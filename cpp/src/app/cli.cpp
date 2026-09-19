@@ -1,4 +1,4 @@
-#include "whitehole/app/application.hpp"
+﻿#include "whitehole/app/application.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
 
@@ -10,8 +10,13 @@
 #include "whitehole/smg/field_hashes.hpp"
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/hash.hpp"
+#include "whitehole/smg/object_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
+#include "whitehole/edit/undo.hpp"
+#include "whitehole/util/json.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -76,6 +81,20 @@ int mapSetCommand(int argc, char** argv);
 int mapAddCommand(int argc, char** argv);
 int mapRemoveCommand(int argc, char** argv);
 int objectdbQueryCommand(int argc, char** argv);
+
+// Shared helper declarations (defined further below).
+struct CommonFlags {
+    int gameType{2};
+    bool inPlace{false};
+    bool littleEndian{false};
+};
+void coerceAndSet(smg::BcsvTable& table, smg::BcsvRow& row, const std::string& name,
+                  const std::string& text);
+std::filesystem::path editedOutputPath(const std::filesystem::path& input);
+std::size_t findObjectIndex(const smg::StageArchive& stage, const std::string& name);
+db::ObjectDatabase loadObjectDatabase(const std::filesystem::path& executable);
+CommonFlags parseCommonFlags(int argc, char** argv, int start);
+void printObjectFields(const smg::ObjectModel& model, std::size_t objectIndex);
 
 int archiveCommand(int argc, char** argv) {
     if (argc < 4) {
@@ -353,7 +372,7 @@ int objectDbCommand(int argc, char** argv) {
 
 // ---- Phase 1 sub-command implementations ----------------------------------
 
-namespace {
+std::filesystem::path dataDirectory(const std::filesystem::path& executable) {
     const auto current = std::filesystem::current_path() / "data";
     if (std::filesystem::exists(current)) {
         return current;
@@ -368,6 +387,604 @@ namespace {
     return current;
 #endif
 }
+
+namespace {
+
+int objectdbQueryCommand(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error("objectdb query requires: <object-name> [--data <directory>]");
+    }
+    const std::string objectName = argv[3];
+    std::filesystem::path dataDir = dataDirectory(argv[0]);
+    for (int index = 4; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--data" && index + 1 < argc) {
+            dataDir = argv[++index];
+        } else if (flag == "--json") {
+            g_json = true;
+        } else {
+            throw std::runtime_error("Unknown objectdb query flag: " + flag);
+        }
+    }
+    const auto jsonPath = dataDir / "objectdb.json";
+    const auto cachePath = Settings::defaultConfigPath().parent_path() / "objectdb.cache";
+    db::ObjectDatabase database;
+    database.load(jsonPath, cachePath);
+    if (database.empty()) {
+        throw std::runtime_error(
+            "No object database found. Run 'whitehole-pro-console objectdb update' first.");
+    }
+    const auto* info = database.find(objectName);
+    if (info == nullptr) {
+        throw std::runtime_error("Object not found in database: " + objectName);
+    }
+    const auto* classInfo = database.classForObject(objectName, 2);
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "objectdb query";
+        json["name"] = info->name;
+        json["internalName"] = info->internalName;
+        json["category"] = info->category;
+        json["description"] = info->description;
+        json["file"] = info->file;
+        json["list"] = info->list(2);
+        json["class"] = classInfo != nullptr ? classInfo->internalName : "";
+        util::JsonArray properties;
+        if (classInfo != nullptr) {
+            for (const auto& [identifier, prop] : classInfo->properties) {
+                util::JsonObject entry;
+                entry["id"] = prop.identifier;
+                entry["label"] = prop.simpleName;
+                entry["type"] = prop.declaredType;
+                entry["description"] = prop.description;
+                properties.push_back(std::move(entry));
+            }
+        }
+        json["properties"] = std::move(properties);
+        std::cout << util::serializeJson(json) << '\n';
+        return 0;
+    }
+    std::cout << "Object:      " << info->name << '\n'
+              << "Internal:    " << info->internalName << '\n'
+              << "Category:    " << info->category << '\n'
+              << "List:        " << info->list(2) << '\n'
+              << "Class:       " << (classInfo != nullptr ? classInfo->internalName : "(none)")
+              << '\n';
+    if (!info->description.empty()) {
+        std::cout << "Description: " << info->description << '\n';
+    }
+    if (classInfo != nullptr) {
+        std::cout << "Properties:\n";
+        for (const auto& [identifier, prop] : classInfo->properties) {
+            std::cout << "  " << std::setw(16) << std::left << prop.identifier
+                      << "  " << prop.declaredType << '\n';
+        }
+    }
+    return 0;
+}
+
+int zoneListCommand(int argc, char** argv) {
+    if (argc != 5) {
+        throw std::runtime_error("zone list requires: <game-directory> <galaxy>");
+    }
+    smg::GameArchive game(argv[3]);
+    const auto galaxy = game.openGalaxy(argv[4]);
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "zone list";
+        json["galaxy"] = galaxy.name();
+        util::JsonArray zones;
+        for (const auto& zone : galaxy.zones()) zones.push_back(zone);
+        json["zones"] = std::move(zones);
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << galaxy.name() << " zones:\n";
+        for (const auto& zone : galaxy.zones()) {
+            std::cout << "  " << zone << '\n';
+        }
+    }
+    return 0;
+}
+
+int zoneParamsCommand(int argc, char** argv) {
+    if (argc < 7) {
+        throw std::runtime_error(
+            "zone params requires: <game-directory> <galaxy> <zone> <object> [--game 1|2]");
+    }
+    const auto flags = parseCommonFlags(argc, argv, 7);
+    smg::GameArchive game(argv[3]);
+    const auto galaxy = game.openGalaxy(argv[4]);
+    auto stage = smg::StageArchive::open(game.filesystem(), argv[5], flags.gameType);
+    const auto database = loadObjectDatabase(argv[0]);
+    smg::ObjectModel model(stage, database, flags.gameType);
+    const auto objectIndex = findObjectIndex(stage, argv[6]);
+    printObjectFields(model, objectIndex);
+    return 0;
+}
+
+int zoneSetCommand(int argc, char** argv) {
+    if (argc < 9) {
+        throw std::runtime_error(
+            "zone set requires: <game-directory> <galaxy> <zone> <object> <field> <value> [--game 1|2]");
+    }
+    const std::string galaxyName = argv[4];
+    const std::string zoneName = argv[5];
+    const std::string objectName = argv[6];
+    const std::string fieldName = argv[7];
+    const std::string valueText = argv[8];
+    const auto flags = parseCommonFlags(argc, argv, 9);
+    smg::GameArchive game(argv[3]);
+    const auto galaxy = game.openGalaxy(galaxyName);
+    auto stage = smg::StageArchive::open(game.filesystem(), zoneName, flags.gameType);
+    const auto database = loadObjectDatabase(argv[0]);
+    smg::ObjectModel model(stage, database, flags.gameType);
+    const auto objectIndex = findObjectIndex(stage, objectName);
+
+    edit::UndoStack undo;
+    const auto* property = database.rawProperty(objectName, fieldName, flags.gameType);
+    const auto kind = property != nullptr ? property->kind : db::PropertyKind::Unknown;
+    bool ok = false;
+    switch (kind) {
+    case db::PropertyKind::Float:
+        ok = model.setFloat(objectIndex, fieldName, std::stof(valueText), undo);
+        break;
+    case db::PropertyKind::Boolean:
+        ok = model.setBool(objectIndex, fieldName,
+                           valueText == "1" || valueText == "true", undo);
+        break;
+    case db::PropertyKind::Text:
+    case db::PropertyKind::TextList:
+    case db::PropertyKind::ObjectName:
+        ok = model.setString(objectIndex, fieldName, valueText, undo);
+        break;
+    default:
+        ok = model.setInt(objectIndex, fieldName, std::stol(valueText), undo);
+        break;
+    }
+    if (!ok) {
+        throw std::runtime_error("Failed to set field '" + fieldName + "' on " + objectName);
+    }
+    stage.save();
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "zone set";
+        json["galaxy"] = galaxyName;
+        json["zone"] = zoneName;
+        json["object"] = objectName;
+        json["field"] = fieldName;
+        json["value"] = valueText;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Set " << objectName << "." << fieldName << " = " << valueText
+                  << " in " << zoneName << '\n';
+    }
+    return 0;
+}
+
+int mapAddCommand(int argc, char** argv) {
+    if (argc < 6) {
+        throw std::runtime_error(
+            "map add requires: <archive.arc> <object-name> <kind> [--game 1|2] [--in-place]");
+    }
+    const std::filesystem::path archivePath = argv[3];
+    const std::string objectName = argv[4];
+    const std::string kind = argv[5];
+    const auto flags = parseCommonFlags(argc, argv, 6);
+    auto stage = smg::StageArchive::openMapFile(archivePath, flags.gameType);
+
+    std::size_t tableIndex = stage.tables().size();
+    for (std::size_t index = 0; index < stage.tables().size(); ++index) {
+        if (stage.tables()[index].kind == kind) {
+            tableIndex = index;
+            break;
+        }
+    }
+    if (tableIndex == stage.tables().size()) {
+        throw std::runtime_error("Unknown object kind: " + kind);
+    }
+    auto& table = stage.tables()[tableIndex].table;
+    const auto nameIndex = table.fieldIndex("name");
+    if (!nameIndex) {
+        throw std::runtime_error("Table for kind '" + kind + "' has no name field");
+    }
+    std::vector<smg::BcsvValue> values;
+    values.reserve(table.fields().size());
+    for (const auto& field : table.fields()) {
+        values.push_back(smg::defaultValueFor(field.type));
+    }
+    values[*nameIndex] = objectName;
+    const std::size_t rowIndex = table.insertRow(0, values);
+    stage.rebuildObjects();
+    if (flags.inPlace) {
+        stage.save();
+    } else {
+        stage.saveTo(editedOutputPath(archivePath));
+    }
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "map add";
+        json["archive"] = archivePath.string();
+        json["object"] = objectName;
+        json["kind"] = kind;
+        json["row"] = static_cast<int>(rowIndex);
+        json["table"] = stage.tables()[tableIndex].path;
+        json["inPlace"] = flags.inPlace;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Added " << objectName << " (" << kind << ") at row " << rowIndex << '\n';
+        if (!flags.inPlace) std::cout << "Output: " << editedOutputPath(archivePath).string() << '\n';
+    }
+    return 0;
+}
+
+int mapRemoveCommand(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error(
+            "map remove requires: <archive.arc> <object> [--game 1|2] [--in-place]");
+    }
+    const std::filesystem::path archivePath = argv[3];
+    const std::string objectName = argv[4];
+    const auto flags = parseCommonFlags(argc, argv, 5);
+    auto stage = smg::StageArchive::openMapFile(archivePath, flags.gameType);
+    const auto objectIndex = findObjectIndex(stage, objectName);
+    // Copy the placement info first: rebuildObjects() below invalidates the
+    // objects vector, so references into it must not outlive that call.
+    const std::string resolvedName = stage.objects()[objectIndex].name;
+    const std::size_t tableIndex = stage.objects()[objectIndex].tableIndex;
+    const std::size_t row = stage.objects()[objectIndex].rowIndex;
+    auto& table = stage.tables()[tableIndex].table;
+    table.removeRow(row);
+    stage.rebuildObjects();
+    if (flags.inPlace) {
+        stage.save();
+    } else {
+        stage.saveTo(editedOutputPath(archivePath));
+    }
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "map remove";
+        json["archive"] = archivePath.string();
+        json["object"] = resolvedName;
+        json["row"] = static_cast<int>(row);
+        json["inPlace"] = flags.inPlace;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Removed " << resolvedName << '\n';
+        if (!flags.inPlace) std::cout << "Output: " << editedOutputPath(archivePath).string() << '\n';
+    }
+    return 0;
+}
+
+// Sets one field through ObjectModel, recording an undo entry (discarded on
+// exit; CLI runs are one-shot edits).
+int mapSetField(int argc, char** argv) {
+    if (argc < 7) {
+        throw std::runtime_error(
+            "map set requires: <archive.arc> <object> <field> <value> [--game 1|2] [--in-place]");
+    }
+    const std::filesystem::path archivePath = argv[3];
+    const std::string objectName = argv[4];
+    const std::string fieldName = argv[5];
+    const std::string valueText = argv[6];
+    const auto flags = parseCommonFlags(argc, argv, 7);
+    auto stage = smg::StageArchive::openMapFile(archivePath, flags.gameType);
+    const auto database = loadObjectDatabase(argv[0]);
+    smg::ObjectModel model(stage, database, flags.gameType);
+    const auto objectIndex = findObjectIndex(stage, objectName);
+
+    edit::UndoStack undo;
+    const auto* property = database.rawProperty(objectName, fieldName, flags.gameType);
+    const auto kind = property != nullptr ? property->kind : db::PropertyKind::Unknown;
+    bool ok = false;
+    switch (kind) {
+    case db::PropertyKind::Float:
+        ok = model.setFloat(objectIndex, fieldName, std::stof(valueText), undo);
+        break;
+    case db::PropertyKind::Boolean:
+        ok = model.setBool(objectIndex, fieldName,
+                           valueText == "1" || valueText == "true", undo);
+        break;
+    case db::PropertyKind::Text:
+    case db::PropertyKind::TextList:
+    case db::PropertyKind::ObjectName:
+        ok = model.setString(objectIndex, fieldName, valueText, undo);
+        break;
+    default:
+        ok = model.setInt(objectIndex, fieldName, std::stol(valueText), undo);
+        break;
+    }
+    if (!ok) {
+        throw std::runtime_error("Failed to set field '" + fieldName + "' on " + objectName +
+                                 " (field may be absent from this table row)");
+    }
+    if (flags.inPlace) {
+        stage.save();
+    } else {
+        stage.saveTo(editedOutputPath(archivePath));
+    }
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "map set";
+        json["archive"] = archivePath.string();
+        json["object"] = objectName;
+        json["field"] = fieldName;
+        json["value"] = valueText;
+        json["inPlace"] = flags.inPlace;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Set " << objectName << "." << fieldName << " = " << valueText << '\n';
+        if (!flags.inPlace) std::cout << "Output: " << editedOutputPath(archivePath).string() << '\n';
+    }
+    return 0;
+}
+
+int mapSetCommand(int argc, char** argv) {
+    return mapSetField(argc, argv);
+}
+
+// Finds a placement object by (case-insensitive) name; returns object index.
+std::size_t findObjectIndex(const smg::StageArchive& stage, const std::string& name) {
+    const auto& objects = stage.objects();
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        std::string candidate = objects[index].name;
+        std::string needle = name;
+        std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(needle.begin(), needle.end(), needle.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (candidate == needle) return index;
+    }
+    throw std::runtime_error("Object not found: " + name);
+}
+
+db::ObjectDatabase loadObjectDatabase(const std::filesystem::path& executable) {
+    db::ObjectDatabase database;
+    const auto jsonPath = dataDirectory(executable) / "objectdb.json";
+    const auto cachePath =
+        Settings::defaultConfigPath().parent_path() / "objectdb.cache";
+    database.load(jsonPath, cachePath);
+    if (database.empty()) {
+        throw std::runtime_error(
+            "No object database found. Run 'whitehole-pro-console objectdb update' first.");
+    }
+    return database;
+}
+
+// Parses trailing --game/--in-place/--json options starting at argv[start].
+CommonFlags parseCommonFlags(int argc, char** argv, int start) {
+    CommonFlags flags;
+    for (int index = start; index < argc; ++index) {
+        const std::string arg = argv[index];
+        if (arg == "--game" && index + 1 < argc) {
+            flags.gameType = std::stoi(argv[++index]);
+            if (flags.gameType != 1 && flags.gameType != 2) {
+                throw std::runtime_error("--game must be 1 or 2");
+            }
+        } else if (arg == "--in-place") {
+            flags.inPlace = true;
+        } else if (arg == "--json") {
+            g_json = true;
+        } else if (arg == "--little") {
+            flags.littleEndian = true;
+        } else {
+            throw std::runtime_error("Unknown option: " + arg);
+        }
+    }
+    return flags;
+}
+
+void printObjectFields(const smg::ObjectModel& model, std::size_t objectIndex) {
+    const auto* objectClass = model.objectClass(objectIndex);
+    if (g_json) {
+        util::JsonObject json;
+        json["stage"] = model.stage().stageName();
+        json["object"] = model.stage().objects()[objectIndex].name;
+        json["class"] = objectClass ? objectClass->internalName : "";
+        util::JsonArray fields;
+        for (const auto& field : model.fields(objectIndex)) {
+            util::JsonObject entry;
+            entry["id"] = field.identifier;
+            entry["label"] = field.label;
+            entry["kind"] = std::string(smg::propertyKindLabel(field.kind));
+            entry["present"] = field.present;
+            entry["used"] = field.used;
+            entry["value"] = smg::toString(field.value);
+            fields.push_back(std::move(entry));
+        }
+        json["fields"] = std::move(fields);
+        std::cout << util::serializeJson(json) << '\n';
+        return;
+    }
+    std::cout << model.stage().objects()[objectIndex].name;
+    if (objectClass != nullptr) {
+        std::cout << "  [" << objectClass->internalName << "]";
+    }
+    std::cout << '\n';
+    for (const auto& field : model.fields(objectIndex)) {
+        std::cout << "  " << std::setw(24) << std::left << field.identifier << "  "
+                  << std::setw(8) << smg::propertyKindLabel(field.kind)
+                  << (field.present ? "  " : "! ")
+                  << smg::toString(field.value) << '\n';
+    }
+}
+
+int mapParamsCommand(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error("map params requires: <archive.arc> <object> [--game 1|2]");
+    }
+    const auto flags = parseCommonFlags(argc, argv, 5);
+    auto stage = smg::StageArchive::openMapFile(argv[3], flags.gameType);
+    const auto database = loadObjectDatabase(argv[0]);
+    smg::ObjectModel model(stage, database, flags.gameType);
+    const auto objectIndex = findObjectIndex(stage, argv[4]);
+    printObjectFields(model, objectIndex);
+    return 0;
+}
+
+int bcsvAddCommand(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error("bcsv add requires an input path");
+    }
+    const std::filesystem::path inputPath = argv[3];
+    bool littleEndian = false;
+    bool inPlace = false;
+    std::vector<std::pair<std::string, std::string>> fieldValues;
+    for (int index = 4; index < argc; ++index) {
+        const std::string arg = argv[index];
+        if (arg == "--little") littleEndian = true;
+        else if (arg == "--in-place") inPlace = true;
+        else if (arg == "--json") g_json = true;
+        else if (arg.rfind("--", 0) == 0 && arg.find('=') != std::string::npos) {
+            const auto eq = arg.find('=');
+            fieldValues.emplace_back(arg.substr(2, eq - 2), arg.substr(eq + 1));
+        } else throw std::runtime_error("Unknown bcsv add argument: " + arg);
+    }
+    const auto endian = littleEndian ? whitehole::io::Endian::little : whitehole::io::Endian::big;
+    auto table = smg::BcsvTable::open(inputPath, endian);
+    if (table.fields().empty()) {
+        throw std::runtime_error("Cannot add a row to a table with no fields");
+    }
+    const std::size_t newRow = table.addRow();
+    for (const auto& [name, value] : fieldValues) {
+        coerceAndSet(table, table.rows()[newRow], name, value);
+    }
+    const auto outputPath = inPlace ? inputPath : editedOutputPath(inputPath);
+    whitehole::io::writeFile(outputPath, table.serialize());
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "bcsv add";
+        json["input"] = inputPath.string();
+        util::JsonObject fields;
+        for (const auto& [name, value] : fieldValues) fields[name] = value;
+        json["fields"] = std::move(fields);
+        json["newRow"] = static_cast<int>(newRow);
+        json["inPlace"] = inPlace;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Added row " << newRow << " with " << fieldValues.size() << " field(s)\n";
+        if (!inPlace) std::cout << "Output: " << outputPath.string() << '\n';
+    }
+    return 0;
+}
+
+int bcsvRemoveCommand(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error("bcsv remove requires: <input> <row> [--little] [--in-place]");
+    }
+    const std::filesystem::path inputPath = argv[3];
+    const std::size_t rowIndex = static_cast<std::size_t>(std::stoul(argv[4]));
+    bool littleEndian = false;
+    bool inPlace = false;
+    for (int index = 5; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--little") littleEndian = true;
+        else if (flag == "--in-place") inPlace = true;
+        else if (flag == "--json") g_json = true;
+        else throw std::runtime_error("Unknown bcsv remove flag: " + flag);
+    }
+    const auto endian = littleEndian ? whitehole::io::Endian::little : whitehole::io::Endian::big;
+    auto table = smg::BcsvTable::open(inputPath, endian);
+    if (rowIndex >= table.rows().size()) {
+        throw std::runtime_error("Row index out of range: " + std::to_string(rowIndex) +
+                                 " (" + std::to_string(table.rows().size()) + " rows)");
+    }
+    table.removeRow(rowIndex);
+    const auto outputPath = inPlace ? inputPath : editedOutputPath(inputPath);
+    whitehole::io::writeFile(outputPath, table.serialize());
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "bcsv remove";
+        json["input"] = inputPath.string();
+        json["row"] = static_cast<int>(rowIndex);
+        json["rows"] = static_cast<int>(table.rows().size());
+        json["inPlace"] = inPlace;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Removed row " << rowIndex << " (" << table.rows().size() << " rows remain)\n";
+        if (!inPlace) std::cout << "Output: " << outputPath.string() << '\n';
+    }
+    return 0;
+}
+
+// ---- shared helpers --------------------------------------------------------
+
+// Coerces a text argument to the field's declared type and stores it.
+void coerceAndSet(smg::BcsvTable& table, smg::BcsvRow& row, const std::string& name,
+                  const std::string& text) {
+    const auto index = table.fieldIndex(name);
+    if (!index) {
+        throw std::runtime_error("Field not found: " + name);
+    }
+    switch (table.fields()[*index].type) {
+    case smg::BcsvType::floatingPoint:
+        table.setFloat(row, name, std::stof(text));
+        break;
+    case smg::BcsvType::integer:
+    case smg::BcsvType::integer2:
+        table.setInt(row, name, std::stol(text));
+        break;
+    case smg::BcsvType::shortInteger:
+        table.setInt(row, name, static_cast<std::int16_t>(std::stol(text)));
+        break;
+    case smg::BcsvType::byte:
+        table.setInt(row, name, static_cast<std::int8_t>(std::stol(text)));
+        break;
+    case smg::BcsvType::fixedString:
+    case smg::BcsvType::stringOffset:
+        table.setString(row, name, text);
+        break;
+    }
+}
+
+std::filesystem::path editedOutputPath(const std::filesystem::path& input) {
+    std::filesystem::path output = input;
+    output += ".edited";
+    return output;
+}
+
+int bcsvSetCommand(int argc, char** argv) {
+    if (argc < 7) {
+        throw std::runtime_error("bcsv set requires: <input> <row> <field> <value> [--little] [--in-place]");
+    }
+    const std::filesystem::path inputPath = argv[3];
+    const std::size_t rowIndex = static_cast<std::size_t>(std::stoul(argv[4]));
+    const std::string fieldName = argv[5];
+    const std::string valueText = argv[6];
+    bool littleEndian = false;
+    bool inPlace = false;
+    for (int index = 7; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--little") littleEndian = true;
+        else if (flag == "--in-place") inPlace = true;
+        else if (flag == "--json") g_json = true;
+        else throw std::runtime_error("Unknown bcsv set flag: " + flag);
+    }
+    const auto endian = littleEndian ? whitehole::io::Endian::little : whitehole::io::Endian::big;
+    auto table = smg::BcsvTable::open(inputPath, endian);
+    if (rowIndex >= table.rows().size()) {
+        throw std::runtime_error("Row index out of range: " + std::to_string(rowIndex) +
+                                 " (" + std::to_string(table.rows().size()) + " rows)");
+    }
+    coerceAndSet(table, table.rows()[rowIndex], fieldName, valueText);
+    const auto outputPath = inPlace ? inputPath : editedOutputPath(inputPath);
+    whitehole::io::writeFile(outputPath, table.serialize());
+    if (g_json) {
+        util::JsonObject json;
+        json["command"] = "bcsv set";
+        json["input"] = inputPath.string();
+        json["row"] = static_cast<int>(rowIndex);
+        json["field"] = fieldName;
+        json["value"] = valueText;
+        json["inPlace"] = inPlace;
+        std::cout << util::serializeJson(json) << '\n';
+    } else {
+        std::cout << "Set " << fieldName << " = " << valueText << " on row " << rowIndex << '\n';
+        if (!inPlace) std::cout << "Output: " << outputPath.string() << '\n';
+    }
+    return 0;
+}
+
+} // namespace
 
 int runCli(int argc, char** argv) {
     try {

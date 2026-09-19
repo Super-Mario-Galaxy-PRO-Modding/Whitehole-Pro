@@ -224,6 +224,7 @@ void ViewportWindow::frameSelection() {
 }
 
 void ViewportWindow::invalidate() {
+    dirty_ = true;
     if (window_ != nullptr) {
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -421,9 +422,10 @@ void ViewportWindow::shutdownGL() noexcept {
     }
 }
 
-void ViewportWindow::paint() {
-    PAINTSTRUCT paintInfo{};
-    BeginPaint(window_, &paintInfo);
+// The GL body of one frame. Kept separate from paint() because the window class
+// is CS_OWNDC, so device_ is the window's own persistent DC and this can run
+// either inside a WM_PAINT or from the editor's render loop with no DC juggling.
+void ViewportWindow::drawFrame() {
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
         ensureMeshes(meshesFilled_, meshes_);
@@ -478,7 +480,30 @@ void ViewportWindow::paint() {
         wglMakeCurrent(nullptr, nullptr);
         drawOverlay(device_);
     }
+    // A finished frame -- whichever path drew it -- leaves nothing outstanding.
+    dirty_ = false;
+}
+
+void ViewportWindow::paint() {
+    PAINTSTRUCT paintInfo{};
+    BeginPaint(window_, &paintInfo);
+    drawFrame();
     EndPaint(window_, &paintInfo);
+}
+
+bool ViewportWindow::renderIfDirty() {
+    if (!dirty_ || window_ == nullptr || glContext_ == nullptr || device_ == nullptr) {
+        return false;
+    }
+    // Nothing to show. Stay dirty so the frame is drawn once it is revealed.
+    if (!IsWindowVisible(window_)) {
+        return false;
+    }
+    drawFrame();
+    // Cancel the WM_PAINT invalidate() queued, so this redraw is not repeated
+    // the next time the message queue drains.
+    ValidateRect(window_, nullptr);
+    return true;
 }
 
 void ViewportWindow::updateSize(int width, int height) {

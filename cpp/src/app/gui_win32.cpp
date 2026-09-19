@@ -1164,6 +1164,11 @@ void syncViewportChild(EditorState& state) {
     }
     ShowWindow(state.viewport.handle(), wantVisible ? SW_SHOWNA : SW_HIDE);
     state.viewportChildVisible = wantVisible;
+    if (wantVisible) {
+        // A hidden GL surface comes back undefined, so ask for a fresh frame the
+        // instant the child is revealed instead of waiting for an interaction.
+        state.viewport.invalidate();
+    }
 }
 
 // --- Shell: menu bar, toolbar, dockspace, status bar --------------------------
@@ -2097,6 +2102,11 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         // Position + show/hide the OpenGL child window last, once every popup for
         // this frame has been submitted.
         syncViewportChild(state);
+        // Then draw it. The child has no timer and Windows only sends WM_PAINT
+        // when it gets uncovered, so without driving the redraw from here a
+        // static scene keeps whatever was drawn last -- and shows a stale buffer
+        // after the popup logic above re-shows the window.
+        state.viewport.renderIfDirty();
 
         // --- Keyboard shortcuts ---
         const bool ctrlDown =

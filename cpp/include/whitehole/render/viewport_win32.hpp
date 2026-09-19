@@ -49,7 +49,14 @@ public:
     void setShowLabels(bool showLabels) noexcept;
     void frameAll();
     void frameSelection();
+    // Marks the surface as needing a redraw. Everything that can change what the
+    // viewport looks like funnels through here, so the editor can poll one flag
+    // instead of guessing when a repaint is due.
     void invalidate();
+    // Draws immediately when something invalidated the surface, and reports
+    // whether it did. Called once per editor frame: a clean viewport costs a
+    // single bool test, and an idle editor stops re-presenting the same image.
+    bool renderIfDirty();
 
     void setOnSelect(SelectCallback callback) { onSelect_ = std::move(callback); }
     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
@@ -68,6 +75,9 @@ private:
     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     bool initGL();
     void shutdownGL() noexcept;
+    // The GL body of one frame, split out of paint() so it can also run from the
+    // editor's own loop rather than only inside a WM_PAINT.
+    void drawFrame();
     void paint();
     void updateSize(int width, int height);
     void applyCameraToGL(int width, int height);
@@ -84,6 +94,10 @@ private:
     HGLRC glContext_{nullptr};
     int width_{1};
     int height_{1};
+    // Set by invalidate(), cleared by a completed frame. Pending work survives
+    // the child being hidden, so revealing it again draws a fresh image instead
+    // of the undefined contents a hidden GL surface comes back with.
+    bool dirty_{true};
     ViewportCamera camera_{};
     ViewportScene scene_{};
     std::optional<std::size_t> selected_;

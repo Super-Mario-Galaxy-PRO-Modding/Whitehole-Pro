@@ -1,0 +1,73 @@
+﻿ M CMakeLists.txt
+A  _gui_mid.txt
+A  _read.ps1
+A  _vp_dump.txt
+A  _vp_mid.txt
+ M build_core.log
+ M build_log.txt
+A  build_ninja/CMakeCache.txt
+A  build_ninja/CMakeFiles/4.4.3/CMakeSystem.cmake
+A  build_ninja/CMakeFiles/CMakeConfigureLog.yaml
+A  build_ninja/CMakeFiles/cmake.check_cache
+ M build_output.txt
+ M build_test.log
+A  check_build.ps1
+A  cmake_log.txt
+A  cpp/include/whitehole/render/model_library.hpp
+ M cpp/include/whitehole/render/viewport_scene.hpp
+ M cpp/include/whitehole/render/viewport_win32.hpp
+ M cpp/src/app/cli.cpp
+ M cpp/src/app/gui_win32.cpp
+A  cpp/src/render/model_library.cpp
+ M cpp/src/render/viewport_scene.cpp
+ M cpp/src/render/viewport_win32.cpp
+ M cpp/src/smg/bmd.cpp
+ M cpp/tests/core_tests.cpp
+A  test_diff.txt
+A  test_log.txt
+A  tests_out2.txt
+?? _cache.txt
+?? _cli_diff.txt
+?? _cli_head.txt
+?? _cli_history.txt
+?? _diff.txt
+?? _diff8.txt
+?? _doc_hits.txt
+?? _docs.txt
+?? _fullbuild.txt
+?? _fullbuild_err.txt
+?? _git_all.txt
+?? _gjson.txt
+?? _headers.txt
+?? _listing.txt
+?? _lsfiles.txt
+?? _st.txt
+?? _st2.txt
+?? _stat2.txt
+?? _status.txt
+?? _temp_tracked.txt
+?? _temps.txt
+?? _tools.txt
+?? build_new.bat
+?? test.txt
+76966ec sy24 the movie
+1bdc1d7 Clean up loose ends: restore viewport labels feature, drop scratch files
+72d1b8b I am more ruan than jager
+
+Name              Length LastWriteTime       
+----              ------ -------------       
+temp_bcsv_add.cpp   2848 9/19/2026 7:43:45 AM
+temp_bcsv_set.cpp   2993 9/19/2026 7:43:45 AM
+
+
+
+Name                 Length
+----                 ------
+cli.cpp               17761
+cli.cpp.tmp           16343
+gui_stub.cpp            464
+gui_win32.cpp         45619
+object_db_update.cpp   6401
+settings.cpp           4535
+
+

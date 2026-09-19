@@ -1,0 +1,130 @@
+﻿25: #include "whitehole/smg/bcsv.hpp"
+301:     // Box matrix must map the unit-box corner onto position + half extent.
+397:     expect(whitehole::smg::jmapHash("name") == 0x00337A8B, "JMap hash does not match the game algorithm");
+402: std::vector<std::uint8_t> makeTinyBcsv(whitehole::io::Endian endian) {
+413:     writer.writeU8(static_cast<std::uint8_t>(whitehole::smg::BcsvType::integer));
+419:     writer.writeU8(static_cast<std::uint8_t>(whitehole::smg::BcsvType::stringOffset));
+427: void expectTablesEqual(const whitehole::smg::BcsvTable& left, const whitehole::smg::BcsvTable& right,
+457: void testBcsvEndianness() {
+459:         const whitehole::smg::BcsvTable table(makeTinyBcsv(endian), endian);
+460:         expect(table.fields().size() == 2 && table.rows().size() == 1, "tiny BCSV shape changed");
+461:         expect(std::get<std::int32_t>(table.rows()[0].values[0]) == 42, "BCSV integer parsing failed");
+462:         expect(std::get<std::string>(table.rows()[0].values[1]) == "Comet", "BCSV string parsing failed");
+463:         const whitehole::smg::BcsvTable rewritten(table.serialize(), endian);
+464:         expectTablesEqual(table, rewritten, "tiny BCSV round trip");
+474:         expect(overflowRejected, "BCSV silently truncated an integer outside its field mask");
+477:         invalidByteMask.fields()[0].type = whitehole::smg::BcsvType::byte;
+486:         expect(maskRejected, "BCSV accepted mask bits outside a field's storage width");
+490: void testBcsvMutation() {
+492:     using whitehole::smg::BcsvTable;
+493:     using whitehole::smg::BcsvType;
+495:     BcsvTable table(makeTinyBcsv(Endian::big), Endian::big);
+520:     const auto flagIndex = table.ensureField("flag", BcsvType::byte);
+521:     expect(table.fields()[flagIndex].type == BcsvType::byte, "ensureField stored the wrong type");
+522:     expect(table.ensureField("flag", BcsvType::integer) == flagIndex, "ensureField is not idempotent");
+529:     const BcsvTable rewritten(table.serialize(), Endian::big);
+530:     expectTablesEqual(table, rewritten, "mutated BCSV round trip");
+539:     BcsvTable empty;
+552:     std::size_t bcsvCount = 0;
+562:             const auto explicitBcsv = std::filesystem::path(entry.path).extension() == ".bcsv";
+564:             if (entry.directory || (!explicitBcsv && !jmapTable)) {
+567:             const whitehole::smg::BcsvTable table(archive.read(entry), archive.endian());
+568:             const whitehole::smg::BcsvTable rewritten(table.serialize(), archive.endian());
+570:             ++bcsvCount;
+589:     expect(bcsvCount >= 20, "too few bundled BCSV tables were tested");
+597:         return !entry.directory && std::filesystem::path(entry.path).filename() == "scenariodata.bcsv";
+600:     whitehole::smg::BcsvTable table(archive.read(*tableEntry), archive.endian());
+610:     const whitehole::smg::BcsvTable savedTable(saved.read(*savedEntry), saved.endian());
+612:            "edited BCSV value did not survive archive recompression");
+786: // data/objectdb.json is a gitignored first-run download, so a fresh checkout
+792:     database.load(root / "data" / "objectdb.json");
+824:     expect(!database.empty(), "objectdb.json did not load for the object model test");
+931:     expect(!database.empty(), "objectdb.json did not load for the validation test");
+990:     expect(!document.zoneName().empty(), "openMapFile did not set the zone name");
+1049:     expect(!stage.objects().empty(), "template map loaded no placement objects");
+1050:     expect(stage.objects().size() >= 10, "template map loaded fewer objects than expected");
+1058:     expect(!reloaded.objects().empty(), "saved map reloaded no objects");
+1148:         expect(img.rgba[0] == 255 && img.rgba[3] == 255, "C8 palette entry 0 should map white");
+1149:         expect(img.rgba[4] == 0 && img.rgba[7] == 255, "C8 palette entry 1 should map black");
+1266:     const auto path = temp.path / "objectdb.json";
+1275:     expect(db.size() == 2, "objectdb size wrong");
+1276:     expect(db.contains("Kinopio"), "objectdb missing Kinopio");
+1277:     expect(db.displayName("Kinopio") == "Toad", "objectdb display name wrong");
+1278:     expect(db.displayName("Missing") == "\"Missing\"", "objectdb fallback wrong");
+1368:     const auto path = temp.path / "objectdb.json";
+1396:     expect(db.size() == 2, "objectdb v2 object count wrong");
+1397:     expect(db.classCount() == 1, "objectdb v2 class count wrong");
+1398:     expect(db.categoryCount() == 2, "objectdb v2 category count wrong");
+1399:     expect(db.timestamp() == 1234567890U, "objectdb v2 timestamp wrong");
+1402:     expect(kinopio != nullptr, "objectdb v2 missing Kinopio");
+1403:     expect(kinopio->name == "Toad", "objectdb v2 display name wrong");
+1404:     expect(kinopio->description == "Friendly.", "objectdb v2 notes wrong");
+1405:     expect(kinopio->className(1) == "SampleObj", "objectdb v2 smg1 class wrong");
+1406:     expect(kinopio->className(2) == "SampleObj", "objectdb v2 smg2 class wrong");
+1407:     expect(kinopio->list(2) == "ObjInfo", "objectdb v2 list wrong");
+1408:     expect(!kinopio->unused, "objectdb v2 unused flag wrong");
+1410:     expect(db.findClass("SampleObj") != nullptr, "objectdb v2 class lookup failed");
+1411:     expect(db.classForObject("Kinopio", 2) != nullptr, "objectdb v2 class-for-object failed");
+1414:     expect(db.propertyLabel("Kinopio", "Obj_arg0", 2) == "Range", "objectdb v2 label wrong");
+1415:     expect(db.propertyDescription("Kinopio", "Obj_arg0", 2) == "How far.", "objectdb v2 description wrong");
+1417:     expect(range != nullptr, "objectdb v2 float property missing");
+1418:     expect(range->kind == whitehole::db::PropertyKind::Float, "objectdb v2 float kind wrong");
+1419:     expect(range->needed, "objectdb v2 needed flag wrong");
+1422:     expect(mode != nullptr, "objectdb v2 list property missing");
+1423:     expect(mode->kind == whitehole::db::PropertyKind::IntList, "objectdb v2 list kind wrong");
+1424:     expect(mode->values.size() == 2, "objectdb v2 values count wrong");
+1425:     expect(mode->values[1] == "1: On", "objectdb v2 value formatting wrong");
+1428:     expect(db.propertyUsed("Kinopio", "Obj_arg2", 2), "objectdb v2 smg2-only property hidden");
+1429:     expect(!db.propertyUsed("Kinopio", "Obj_arg2", 1), "objectdb v2 smg2-only property leaked to smg1");
+1432:     expect(db.propertyUsed("Kinopio", "Obj_arg3", 2), "objectdb v2 exclusive property hidden");
+1433:     expect(!db.propertyUsed("OldThing", "Obj_arg3", 2), "objectdb v2 exclusive property leaked");
+1438:     expect(switchA != nullptr, "objectdb v2 untyped property missing");
+1439:     expect(switchA->kind == whitehole::db::PropertyKind::Integer, "objectdb v2 untyped kind wrong");
+1441:            "objectdb v2 unknown property label wrong");
+1452:            "objectdb v2 availability wrong");
+1453:     expect(db.objectAvailable("OldThing", 1), "objectdb v2 smg1-only availability wrong");
+1454:     expect(!db.objectAvailable("OldThing", 2), "objectdb v2 smg1-only leaked to smg2");
+1457:     expect(db.search("toad", 2).size() == 1, "objectdb v2 search by display name");
+1458:     expect(db.search("kinop", 2).size() == 1, "objectdb v2 search by internal name");
+1459:     expect(db.search("sampleobj", 1).size() == 2, "objectdb v2 search by class name");
+1460:     expect(db.search("nothinghere", 2).empty(), "objectdb v2 search false positive");
+1463:     expect(db.categories()[0].key == "enemy", "objectdb v2 category order wrong");
+1464:     expect(db.categories()[1].description == "Stage Parts", "objectdb v2 category description wrong");
+1469:     const auto jsonPath = temp.path / "objectdb.json";
+1470:     const auto cachePath = temp.path / "cache" / "objectdb.cache";
+1482:     expect(!db.cacheLoaded(), "objectdb cache should not be used before it exists");
+1483:     expect(db.displayName("Obj") == "First", "objectdb cache source value wrong");
+1484:     expect(std::filesystem::exists(cachePath), "objectdb cache was not written");
+1488:     expect(cached.cacheLoaded(), "objectdb cache was not used on the second load");
+1489:     expect(cached.size() == 1, "objectdb cache object count wrong");
+1490:     expect(cached.classCount() == 1, "objectdb cache class count wrong");
+1491:     expect(cached.displayName("Obj") == "First", "objectdb cache display name wrong");
+1492:     expect(cached.timestamp() == 7U, "objectdb cache timestamp wrong");
+1504:     expect(!reparsed.cacheLoaded(), "objectdb cache was not invalidated");
+1505:     expect(reparsed.displayName("Obj") == "Second", "objectdb cache invalidation value wrong");
+1510:     const auto path = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "objectdb.json";
+1515:     expect(db.size() > 2000, "real objectdb object count unexpectedly small");
+1516:     expect(db.classCount() > 800, "real objectdb class count unexpectedly small");
+1517:     expect(db.categoryCount() >= 10, "real objectdb categories unexpectedly few");
+1518:     expect(db.timestamp() > 0, "real objectdb timestamp missing");
+1530:     expect(declared > 2000, "real objectdb declares too few SMG2 class names");
+1531:     expect(resolved == declared, "real objectdb has unresolvable SMG2 class names");
+1534:     expect(rail != nullptr, "real objectdb missing the RailMoveObj class");
+1535:     expect(!rail->properties.empty(), "real objectdb RailMoveObj has no parameters");
+1888:     expect(model.materials[0].textureIndices[7] == -1, "bmd unused texture map should be -1");
+2169:         testBcsvEndianness();
+2170:         testBcsvMutation();
+
+Name                    Length
+----                    ------
+templates                     
+areamanagerlimits.json  7831  
+galaxies.json           5368  
+hashlookup.txt          22827 
+hints.json              1960  
+modelsubstitutions.json 6678  
+shortcuts.json          32056 
+specialrenderers.json   24446 
+zones.json              5368  
+
+

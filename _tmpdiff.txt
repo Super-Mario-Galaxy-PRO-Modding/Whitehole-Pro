@@ -1,0 +1,213 @@
+﻿diff --git a/cpp/src/app/cli.cpp.tmp b/cpp/src/app/cli.cpp
+index dffd137..bdaa4ee 100644
+--- a/cpp/src/app/cli.cpp.tmp
++++ b/cpp/src/app/cli.cpp
+@@ -3,8 +3,6 @@
+ #include "whitehole/app/object_db_update.hpp"
+ 
+ #include "whitehole/db/object_db.hpp"
+-#include "whitehole/edit/commands.hpp"
+-#include "whitehole/edit/undo.hpp"
+ #include "whitehole/io/binary_file.hpp"
+ #include "whitehole/io/rarc.hpp"
+ #include "whitehole/io/yaz0.hpp"
+@@ -12,9 +10,7 @@
+ #include "whitehole/smg/field_hashes.hpp"
+ #include "whitehole/smg/game_archive.hpp"
+ #include "whitehole/smg/hash.hpp"
+-#include "whitehole/smg/object_model.hpp"
+ #include "whitehole/smg/stage_archive.hpp"
+-#include "whitehole/util/json.hpp"
+ 
+ #include <chrono>
+ #include <iomanip>
+@@ -26,7 +22,6 @@ namespace whitehole::app {
+ namespace {
+ 
+ bool g_json = false;
+-
+ std::filesystem::path executableDirectory(const std::filesystem::path& executable) {
+     auto path = executable;
+     if (path.has_parent_path()) {
+@@ -36,11 +31,11 @@ std::filesystem::path executableDirectory(const std::filesystem::path& executabl
+ }
+ 
+ void printUsage() {
+-    std::cout
++        std::cout
+         << "Whitehole Pro C++ 0.2.0\n"
+         << "Native Super Mario Galaxy editor core\n\n"
+         << "Usage:\n"
+-        << "  whitehole-pro-console\n"
++        << "  whitehole-pro-console [--json] <command> [args...]\n\n"
+         << "  whitehole-pro-console gui\n"
+         << "  whitehole-pro-console game list <game-directory>\n"
+         << "  whitehole-pro-console galaxy inspect <game-directory> <galaxy>\n"
+@@ -66,16 +61,22 @@ void printUsage() {
+         << "  whitehole-pro-console map remove <archive.arc> <object> [--game 1|2] [--in-place]\n"
+         << "  whitehole-pro-console zone params <game-directory> <galaxy> <zone> <object> [--game 1|2]\n"
+         << "  whitehole-pro-console zone set <game-directory> <galaxy> <zone> <object> <field> <value> [--game 1|2]\n"
+-        << "  whitehole-pro-console zone list <game-directory> <galaxy>\n"
+-        << "\nOptions:\n"
+-        << "  --json          Emit JSON on stdout instead of human text\n"
+-        << "  --in-place      Overwrite the input file (map/bcsv writers)\n"
+-        << "  --data <dir>    Override the default data directory\n"
+-        << "  --no-cache      Do not use the compiled objectdb cache\n"
+-        << "  --little        Read the BCSV as little-endian\n"
+-        << "  --game 1|2      Override the game type for object lookups\n";
++        << "  whitehole-pro-console zone list <game-directory> <galaxy>\n";
+ }
+ 
++// Forward declarations for the new Phase 1 sub-commands.
++int bcsvSetCommand(int argc, char** argv);
++int bcsvAddCommand(int argc, char** argv);
++int bcsvRemoveCommand(int argc, char** argv);
++int zoneParamsCommand(int argc, char** argv);
++int zoneSetCommand(int argc, char** argv);
++int zoneListCommand(int argc, char** argv);
++int mapParamsCommand(int argc, char** argv);
++int mapSetCommand(int argc, char** argv);
++int mapAddCommand(int argc, char** argv);
++int mapRemoveCommand(int argc, char** argv);
++int objectdbQueryCommand(int argc, char** argv);
++
+ int archiveCommand(int argc, char** argv) {
+     if (argc < 4) {
+         throw std::runtime_error("archive requires an operation and input path");
+@@ -164,9 +165,18 @@ int bcsvCommand(int argc, char** argv) {
+             throw std::runtime_error("bcsv roundtrip requires an output path and optional --little flag");
+         }
+         whitehole::io::writeFile(argv[4], table.serialize());
+-        std::cout << "Rewrote " << table.rows().size() << " rows to " << argv[4] << '\n';
++                std::cout << "Rewrote " << table.rows().size() << " rows to " << argv[4] << '\n';
+         return 0;
+     }
++    if (operation == "set") {
++        return bcsvSetCommand(argc, argv);
++    }
++    if (operation == "add") {
++        return bcsvAddCommand(argc, argv);
++    }
++    if (operation == "remove") {
++        return bcsvRemoveCommand(argc, argv);
++    }
+     throw std::runtime_error("Unknown BCSV operation: " + operation);
+ }
+ 
+@@ -212,27 +222,67 @@ void printObjects(const smg::StageArchive& stage) {
+ }
+ 
+ int zoneCommand(int argc, char** argv) {
+-    if (argc != 5 || std::string(argv[2]) != "objects") {
+-        throw std::runtime_error("zone objects requires a game directory and zone name");
++    if (argc < 3) {
++        throw std::runtime_error("zone requires an operation and arguments");
+     }
+-    smg::GameArchive game(argv[3]);
+-    printObjects(smg::StageArchive::open(game.filesystem(), argv[4], game.gameType()));
+-    return 0;
++    const std::string operation = argv[2];
++    if (operation == "objects") {
++        if (argc != 5) {
++            throw std::runtime_error("zone objects requires a game directory and zone name");
++        }
++        smg::GameArchive game(argv[3]);
++        printObjects(smg::StageArchive::open(game.filesystem(), argv[4], game.gameType()));
++        return 0;
++    }
++    if (operation == "list") {
++        return zoneListCommand(argc, argv);
++    }
++    if (operation == "params") {
++        return zoneParamsCommand(argc, argv);
++    }
++    if (operation == "set") {
++        return zoneSetCommand(argc, argv);
++    }
++    throw std::runtime_error("Unknown zone operation '" + operation +
++                             "'. Supported: objects, list, params, set.");
+ }
+ 
+ int mapCommand(int argc, char** argv) {
+-    if (argc != 4 || std::string(argv[2]) != "objects") {
+-        throw std::runtime_error("map objects requires an archive path");
++    if (argc < 3) {
++        throw std::runtime_error("map requires an operation and an archive path");
+     }
+-    printObjects(smg::StageArchive::openMapFile(argv[3]));
+-    return 0;
++    const std::string operation = argv[2];
++    if (operation == "objects") {
++        if (argc != 4) {
++            throw std::runtime_error("map objects requires an archive path");
++        }
++        printObjects(smg::StageArchive::openMapFile(argv[3]));
++        return 0;
++    }
++    if (operation == "params") {
++        return mapParamsCommand(argc, argv);
++    }
++    if (operation == "set") {
++        return mapSetCommand(argc, argv);
++    }
++    if (operation == "add") {
++        return mapAddCommand(argc, argv);
++    }
++    if (operation == "remove") {
++        return mapRemoveCommand(argc, argv);
++    }
++    throw std::runtime_error("Unknown map operation '" + operation +
++                             "'. Supported: objects, params, set, add, remove.");
+ }
+ 
+ int objectDbCommand(int argc, char** argv) {
+     if (argc < 3) {
+         throw std::runtime_error("objectdb supports: check, update");
+     }
+-    const std::string operation = argv[2];
++        const std::string operation = argv[2];
++    if (operation == "query") {
++        return objectdbQueryCommand(argc, argv);
++    }
+     if (operation != "check" && operation != "update") {
+         throw std::runtime_error("unknown objectdb operation: " + operation);
+     }
+@@ -301,6 +351,8 @@ int objectDbCommand(int argc, char** argv) {
+ 
+ } // namespace
+ 
++// ---- Phase 1 sub-command implementations ----------------------------------
++
+ std::filesystem::path dataDirectory(const std::filesystem::path& executable) {
+     const auto current = std::filesystem::current_path() / "data";
+     if (std::filesystem::exists(current)) {
+@@ -319,10 +371,8 @@ std::filesystem::path dataDirectory(const std::filesystem::path& executable) {
+ 
+ int runCli(int argc, char** argv) {
+     try {
+-        // Allow a global --json flag before the command so scripts can request
+-        // JSON output without per-command flag churn. The flag is consumed here
+-        // and the sub-commands receive a clean argv that still starts with the
+-        // program name in argv[0].
++        // Parse a global --json flag that can appear before the command. When
++        // set, sub-commands emit JSON on stdout instead of human-readable text.
+         int argvOffset = 0;
+         if (argc > 1 && std::string(argv[1]) == "--json") {
+             g_json = true;
+@@ -337,15 +387,12 @@ int runCli(int argc, char** argv) {
+             return 0;
+ #endif
+         }
+-
+-        // Build argv for sub-commands: argv[0] is the program name, argv[1] is
+-        // the command name, followed by the command-specific arguments.
++        // Build a sub-argv: argv[0] is the program name, argv[1] is the command.
+         char* subArgv[256];
+         subArgv[0] = argv[0];
+         for (int index = 1; index < effectiveArgc; ++index) {
+             subArgv[index] = argv[index + argvOffset];
+         }
+-
+         const std::string command = subArgv[1];
+         if (command == "--help" || command == "-h") {
+             printUsage();

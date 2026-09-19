@@ -1,0 +1,486 @@
+﻿diff --git a/cpp/include/whitehole/render/viewport_win32.hpp b/cpp/include/whitehole/render/viewport_win32.hpp
+index ebd96c1..d040b10 100644
+--- a/cpp/include/whitehole/render/viewport_win32.hpp
++++ b/cpp/include/whitehole/render/viewport_win32.hpp
+@@ -7,13 +7,19 @@
+ // GL context down. setScene() copies oriented boxes in (cheap pointer-free
+ // structs). Input mirrors Java GalaxyRenderer: left-drag pan, right-drag
+ // orbit, wheel dolly, click select, Space frame selection.
++//
++// Objects with a real game model (ViewportBox::model) are drawn from GL
++// display lists compiled once per mesh, so a whole zone of BMD models still
++// redraws cheaply; objects without one keep the category placeholder shapes.
+ 
+ #ifdef _WIN32
+ 
+ #include "whitehole/render/camera.hpp"
++#include "whitehole/render/model_mesh.hpp"
+ #include "whitehole/render/viewport_scene.hpp"
+ 
+ #include <functional>
++#include <memory>
+ #include <optional>
+ #include <vector>
+ #include <windows.h>
+@@ -49,6 +55,15 @@ public:
+     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
+ 
+ private:
++    // Cached GL display lists for one model mesh: `shaded` bakes the material
++    // diffuse colors, `plain` leaves the color to the current GL state so
++    // selection/hover can tint the whole model in one call.
++    struct ModelListEntry {
++        std::weak_ptr<const ModelMesh> mesh;
++        unsigned int shaded{0};
++        unsigned int plain{0};
++    };
++
+     static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam);
+     bool initGL();
+@@ -57,6 +72,9 @@ private:
+     void updateSize(int width, int height);
+     void applyCameraToGL(int width, int height);
+     void drawShape(const ViewportBox& box, bool selected, bool hovered);
++    void drawModelTriangles(const ModelMesh& mesh, bool bakeColors);
++    unsigned int modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain);
++    void pruneModelLists() noexcept;
+     void drawGrid();
+     void drawOverlay(HDC device);
+     std::optional<std::size_t> pickAt(int x, int y);
+@@ -81,6 +99,7 @@ private:
+     bool trackingMouse_{false}; // TrackMouseEvent armed so hover clears on leave
+     bool meshesFilled_{false};  // lazily built once per GL context
+     std::vector<math::Vec3f> meshes_[5]; // unit triangles, one entry per CategoryStyle::Shape
++    std::vector<ModelListEntry> modelLists_; // display lists, validated via weak_ptr
+ };
+ 
+ } // namespace whitehole::render
+diff --git a/cpp/src/app/gui_win32.cpp b/cpp/src/app/gui_win32.cpp
+index 84ee8f5..d7e67bc 100644
+--- a/cpp/src/app/gui_win32.cpp
++++ b/cpp/src/app/gui_win32.cpp
+@@ -15,8 +15,10 @@
+ 
+ #include "whitehole/app/settings.hpp"
+ #include "whitehole/app/object_db_update.hpp"
++#include "whitehole/db/modelsubstitutions.hpp"
+ #include "whitehole/db/name_table.hpp"
+ #include "whitehole/db/object_db.hpp"
++#include "whitehole/render/model_library.hpp"
+ #include "whitehole/render/object_visual.hpp"
+ #include "whitehole/util/json.hpp"
+ #include "whitehole/util/text.hpp"
+@@ -219,6 +221,8 @@ struct EditorState {
+     db::NameTable galaxyNames;
+     db::NameTable zoneNames;
+     db::ObjectDatabase objectDb;
++    db::ModelSubstitutions modelSubstitutions;
++    render::ModelLibrary modelLibrary;
+     Settings settings;
+     std::optional<smg::GameArchive> game;
+     std::vector<std::string> galaxies;
+@@ -447,12 +451,30 @@ void rememberMap(EditorState& state, const std::filesystem::path& path) {
+ void showObject(EditorState& state, int index);
+ void syncViewportSelection(EditorState& state, std::optional<std::size_t> selected);
+ 
++// Status suffix describing how many objects got real game models vs. kept the
++// placeholder shape in the last viewport rebuild (empty when no game models
++// are available, e.g. a map archive opened without a game directory).
++std::string modelStatusSuffix(EditorState& state) {
++    if (!state.modelLibrary.bound() || !state.stage) {
++        return "";
++    }
++    return " \u2014 game models shown: " + std::to_string(state.modelLibrary.loadedCount()) +
++           ", placeholder: " + std::to_string(state.modelLibrary.missingCount());
++}
++
+ void refreshViewport(EditorState& state, bool frame) {
+     if (!state.viewportReady) {
+         return;
+     }
+     if (state.stage) {
+-        state.viewportScene.rebuild(state.stage->objects());
++        // Game models come from the open workspace's ObjectData archives; a
++        // standalone map archive without one keeps the placeholder shapes.
++        if (state.modelLibrary.bound()) {
++            state.modelLibrary.resetCounters();
++            state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary);
++        } else {
++            state.viewportScene.rebuild(state.stage->objects());
++        }
+     } else {
+         state.viewportScene.clear();
+     }
+@@ -549,15 +571,22 @@ void openMap(EditorState& state, const std::filesystem::path& path) {
+     syncViewportSelection(state, std::nullopt);
+     refreshViewport(state, true);
+     rememberMap(state, path);
+-    setStatus(state, "Opened map archive with " + std::to_string(state.stage->objects().size()) + " objects.");
++    // A game directory (if one is open) still supplies the ObjectData models.
++    setStatus(state, "Opened map archive with " + std::to_string(state.stage->objects().size()) + " objects." +
++                         modelStatusSuffix(state));
+ }
+ 
+ void openGame(EditorState& state, const std::filesystem::path& path) {
+     state.game.emplace(path);
+     if (state.game->gameType() == 0) {
+         state.game.reset();
++        state.modelLibrary.bind(nullptr);
+         throw std::runtime_error("That folder is not an SMG1/SMG2 workspace");
+     }
++    // ObjectData model archives live in the game workspace; bind them so the
++    // viewport can show the real BMD models.
++    state.modelLibrary.bind(&state.game->filesystem());
++    state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
+     state.galaxies = state.game->galaxies();
+     state.zones = state.game->zones();
+     state.stage.reset();
+@@ -598,7 +627,8 @@ void selectZone(EditorState& state) {
+     syncViewportSelection(state, std::nullopt);
+     refreshViewport(state, true);
+     if (state.stage) {
+-        setStatus(state, "Loaded " + zone + " (" + std::to_string(state.stage->objects().size()) + " objects).");
++        setStatus(state, "Loaded " + zone + " (" + std::to_string(state.stage->objects().size()) + " objects)." +
++                             modelStatusSuffix(state));
+     }
+ }
+ 
+@@ -913,6 +943,16 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
+         }
+         state->objectDb.load(objectDbPath,
+                              Settings::defaultConfigPath().parent_path() / "objectdb.cache");
++        // Model name substitutions (data/modelsubstitutions.json) feed the
++        // viewport's BMD model lookup; missing file just means no aliases.
++        try {
++            state->modelSubstitutions.setBaseGameRoot(state->dataRoot);
++            state->modelSubstitutions.initBaseGame();
++            state->modelSubstitutions.load();
++        } catch (...) {
++        }
++        state->modelLibrary.setSubstitutions(&state->modelSubstitutions);
++        state->modelLibrary.setLowPoly(state->settings.lowPolyModels);
+         rebuildRecentMenu(*state);
+         applyTheme(*state);
+         if (!state->settings.lastGameDir.empty() && initialFile.empty() &&
+diff --git a/cpp/src/render/viewport_scene.cpp b/cpp/src/render/viewport_scene.cpp
+index 6abad56..fc7c986 100644
+--- a/cpp/src/render/viewport_scene.cpp
++++ b/cpp/src/render/viewport_scene.cpp
+@@ -56,6 +56,12 @@ math::Matrix4 placementWorldInverse(const math::Matrix4& world, const math::Vec3
+     return inverse;
+ }
+ 
++math::Matrix4 placementRotation(const smg::PlacementObject& object) noexcept {
++    return math::Matrix4::rotationZ(object.rotation.x * kDegreesToRadians) *
++           math::Matrix4::rotationY(object.rotation.y * kDegreesToRadians) *
++           math::Matrix4::rotationX(object.rotation.z * kDegreesToRadians);
++}
++
+ } // namespace
+ 
+ math::Matrix4 placementWorldMatrix(const smg::PlacementObject& object) noexcept {
+@@ -69,21 +75,56 @@ math::Matrix4 placementWorldMatrix(const smg::PlacementObject& object) noexcept
+     const float visualZ = std::max(std::abs(safeScale.z), kMinVisualScale);
+     const math::Matrix4 scaled =
+         math::Matrix4::scale({visualX * kPlaceholderHalfExtent, visualY * kPlaceholderHalfExtent, visualZ * kPlaceholderHalfExtent});
+-    const math::Matrix4 rotation = math::Matrix4::rotationZ(object.rotation.x * kDegreesToRadians) *
+-                                   math::Matrix4::rotationY(object.rotation.y * kDegreesToRadians) *
+-                                   math::Matrix4::rotationX(object.rotation.z * kDegreesToRadians);
++    const math::Matrix4 rotation = placementRotation(object);
+     return math::Matrix4::translation(object.position) * rotation * scaled;
+ }
+ 
++math::Matrix4 objectWorldMatrix(const smg::PlacementObject& object) noexcept {
++    const math::Vec3f safeScale{std::abs(object.scale.x) > 0.000001F ? object.scale.x : 1.0F,
++                                std::abs(object.scale.y) > 0.000001F ? object.scale.y : 1.0F,
++                                std::abs(object.scale.z) > 0.000001F ? object.scale.z : 1.0F};
++    const math::Matrix4 rotation = placementRotation(object);
++    return math::Matrix4::translation(object.position) * rotation * math::Matrix4::scale(safeScale);
++}
++
++math::Matrix4 objectPickMatrix(const smg::PlacementObject& object, float radius) noexcept {
++    // Wrapping the model's bounding sphere in the same placement transform
++    // gives picking the oriented-box maths it already has, with the unit box
++    // acting as the sphere's proxy.
++    return objectWorldMatrix(object) * math::Matrix4::scale({radius, radius, radius});
++}
++
++float modelPickRadius(const ModelMesh& mesh) noexcept {
++    // Max corner length of the bounding box: the tightest origin-centred
++    // sphere that contains the whole mesh even when it is built off-centre.
++    float radius = 0.0F;
++    if (!mesh.empty()) {
++        const float x[2] = {mesh.boundsMin.x, mesh.boundsMax.x};
++        const float y[2] = {mesh.boundsMin.y, mesh.boundsMax.y};
++        const float z[2] = {mesh.boundsMin.z, mesh.boundsMax.z};
++        for (const float cornerX : x) {
++            for (const float cornerY : y) {
++                for (const float cornerZ : z) {
++                    radius = std::max(radius, math::Vec3f{cornerX, cornerY, cornerZ}.length());
++                }
++            }
++        }
++    }
++    // Degenerate/point models still need to be clickable.
++    return std::max(radius, 1.0F);
++}
++
+ std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) noexcept {
+-    // The linear part of the placement matrix is S * R, so its row i is exactly
++    // The linear part of the picking matrix is S * R, so its row i is exactly
+     // scale[i] * (row i of the rotation). Row lengths therefore recover the
+-    // per-axis world scale (including the placeholder half extent) with no
+-    // approximation, which is what placementWorldInverse() expects.
+-    const math::Vec3f scale{math::Vec3f{box.world.values[0], box.world.values[1], box.world.values[2]}.length(),
+-                            math::Vec3f{box.world.values[4], box.world.values[5], box.world.values[6]}.length(),
+-                            math::Vec3f{box.world.values[8], box.world.values[9], box.world.values[10]}.length()};
+-    const math::Matrix4 inverse = placementWorldInverse(box.world, scale);
++    // per-axis world scale (including the placeholder half extent or a model's
++    // pick radius) with no approximation, which is what placementWorldInverse()
++    // expects.
++    const math::Matrix4& world = box.pickWorld;
++    const math::Vec3f scale{math::Vec3f{world.values[0], world.values[1], world.values[2]}.length(),
++                            math::Vec3f{world.values[4], world.values[5], world.values[6]}.length(),
++                            math::Vec3f{world.values[8], world.values[9], world.values[10]}.length()};
++    const math::Matrix4 inverse = placementWorldInverse(world, scale);
+     const math::Vec3f localOrigin = inverse.transformPoint(ray.origin);
+     const math::Vec3f localDirection{ray.direction.x * inverse.values[0] + ray.direction.y * inverse.values[4] +
+                                          ray.direction.z * inverse.values[8],
+@@ -120,7 +161,7 @@ std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) no
+     return tMin;
+ }
+ 
+-void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects) {
++void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models) {
+     boxes_.clear();
+     boxes_.reserve(objects.size());
+     math::Vec3f sum{0.0F, 0.0F, 0.0F};
+@@ -130,17 +171,38 @@ void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects) {
+         box.objectIndex = index;
+         box.name = object.name;
+         box.kind = object.kind;
+-        box.world = placementWorldMatrix(object);
+-        box.center = object.position;
+-        // Extents mirror the visual clamp used by the world matrix so the
+-        // frame-all radius and picking agree with what is drawn.
+-        const float extent = kPlaceholderHalfExtent *
+-                             std::max({std::abs(object.scale.x) > 0.000001F ? std::abs(object.scale.x) : 1.0F,
+-                                       std::abs(object.scale.y) > 0.000001F ? std::abs(object.scale.y) : 1.0F,
+-                                       std::abs(object.scale.z) > 0.000001F ? std::abs(object.scale.z) : 1.0F,
+-                                       kMinVisualScale});
+-        box.halfExtents = {extent, extent, extent};
+         box.category = classifyObject(object.kind, object.name);
++        box.center = object.position;
++
++        // Real game model when the workspace provides one: drawn at the
++        // object's true scale and picked against its bounding sphere. Missing
++        // models keep the category placeholder box (and its visibility clamp)
++        // so every object stays visible and clickable either way.
++        std::shared_ptr<const ModelMesh> mesh;
++        if (models != nullptr) {
++            mesh = models->model(object.name);
++        }
++        if (mesh != nullptr && !mesh->empty()) {
++            box.model = std::move(mesh);
++            box.world = objectWorldMatrix(object);
++            const float radius = modelPickRadius(*box.model);
++            box.pickWorld = objectPickMatrix(object, radius);
++            box.halfExtents = {radius * std::abs(object.scale.x > 0.000001F ? object.scale.x : 1.0F),
++                               radius * std::abs(object.scale.y > 0.000001F ? object.scale.y : 1.0F),
++                               radius * std::abs(object.scale.z > 0.000001F ? object.scale.z : 1.0F)};
++        } else {
++            box.model.reset();
++            box.world = placementWorldMatrix(object);
++            box.pickWorld = box.world;
++            // Extents mirror the visual clamp used by the world matrix so the
++            // frame-all radius and picking agree with what is drawn.
++            const float extent = kPlaceholderHalfExtent *
++                                 std::max({std::abs(object.scale.x) > 0.000001F ? std::abs(object.scale.x) : 1.0F,
++                                           std::abs(object.scale.y) > 0.000001F ? std::abs(object.scale.y) : 1.0F,
++                                           std::abs(object.scale.z) > 0.000001F ? std::abs(object.scale.z) : 1.0F,
++                                           kMinVisualScale});
++            box.halfExtents = {extent, extent, extent};
++        }
+         boxes_.push_back(box);
+         sum = sum + object.position;
+     }
+diff --git a/cpp/src/render/viewport_win32.cpp b/cpp/src/render/viewport_win32.cpp
+index 3077556..0f1226b 100644
+--- a/cpp/src/render/viewport_win32.cpp
++++ b/cpp/src/render/viewport_win32.cpp
+@@ -68,8 +68,79 @@ void drawTriangles(const std::vector<math::Vec3f>& triangles) {
+     glEnd();
+ }
+ 
++// Cap on cached model display lists. Two lists per mesh (shaded + plain) keep
++// even a fully modelled zone well inside this budget; the oldest entries are
++// evicted FIFO, and expired entries are pruned whenever new ones arrive.
++constexpr std::size_t kMaxModelListEntries = 128;
++
+ } // namespace
+ 
++void ViewportWindow::drawModelTriangles(const ModelMesh& mesh, bool bakeColors) {
++    glBegin(GL_TRIANGLES);
++    for (const auto& triangle : mesh.triangles) {
++        if (bakeColors) {
++            glColor4f(triangle.color[0], triangle.color[1], triangle.color[2], triangle.color[3]);
++        }
++        const ModelVertex* vertices[3] = {&triangle.a, &triangle.b, &triangle.c};
++        for (const ModelVertex* vertex : vertices) {
++            glNormal3f(vertex->normal.x, vertex->normal.y, vertex->normal.z);
++            glVertex3f(vertex->position.x, vertex->position.y, vertex->position.z);
++        }
++    }
++    glEnd();
++}
++
++unsigned int ViewportWindow::modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain) {
++    for (auto& entry : modelLists_) {
++        if (entry.mesh.expired()) {
++            continue;
++        }
++        if (entry.mesh.lock() != mesh) {
++            continue;
++        }
++        unsigned int& list = plain ? entry.plain : entry.shaded;
++        if (list == 0) {
++            list = glGenLists(1);
++            if (list != 0) {
++                glNewList(list, GL_COMPILE);
++                drawModelTriangles(*mesh, !plain);
++                glEndList();
++            }
++        }
++        return list;
++    }
++
++    pruneModelLists();
++    ModelListEntry entry;
++    entry.mesh = mesh;
++    unsigned int& list = plain ? entry.plain : entry.shaded;
++    list = glGenLists(1);
++    if (list != 0) {
++        glNewList(list, GL_COMPILE);
++        drawModelTriangles(*mesh, !plain);
++        glEndList();
++    }
++    modelLists_.push_back(std::move(entry));
++    return list;
++}
++
++void ViewportWindow::pruneModelLists() noexcept {
++    // Drop entries whose mesh was evicted from the scene (weak_ptr expired) so
++    // stale display lists cannot leak; then apply the FIFO cap.
++    modelLists_.erase(std::remove_if(modelLists_.begin(), modelLists_.end(),
++                                     [](const ModelListEntry& entry) { return entry.mesh.expired(); }),
++                      modelLists_.end());
++    while (modelLists_.size() >= kMaxModelListEntries) {
++        if (modelLists_.front().shaded != 0) {
++            glDeleteLists(modelLists_.front().shaded, 1);
++        }
++        if (modelLists_.front().plain != 0) {
++            glDeleteLists(modelLists_.front().plain, 1);
++        }
++        modelLists_.erase(modelLists_.begin());
++    }
++}
++
+ ViewportWindow::ViewportWindow() = default;
+ ViewportWindow::~ViewportWindow() {
+     destroy();
+@@ -325,6 +396,21 @@ bool ViewportWindow::initGL() {
+ 
+ void ViewportWindow::shutdownGL() noexcept {
+     if (glContext_ != nullptr) {
++        // Display lists belong to the context; delete them while it is still
++        // current instead of leaking them until the driver reclaims the
++        // context itself.
++        if (device_ != nullptr) {
++            wglMakeCurrent(device_, glContext_);
++        }
++        for (const auto& entry : modelLists_) {
++            if (entry.shaded != 0) {
++                glDeleteLists(entry.shaded, 1);
++            }
++            if (entry.plain != 0) {
++                glDeleteLists(entry.plain, 1);
++            }
++        }
++        modelLists_.clear();
+         wglMakeCurrent(nullptr, nullptr);
+         wglDeleteContext(glContext_);
+         glContext_ = nullptr;
+@@ -359,6 +445,11 @@ void ViewportWindow::paint() {
+         glLightfv(GL_LIGHT0, GL_POSITION, position);
+         glShadeModel(GL_FLAT);
+         glEnable(GL_DEPTH_TEST);
++        // Non-uniform object scales need normalisation so the fixed-function
++        // pipeline renormalises the inverse-transpose-transformed normals
++        // (display lists bake the normals, not the transform).
++        glEnable(GL_NORMALIZE);
++        pruneModelLists();
+         for (const auto& box : scene_.boxes()) {
+             const bool selected = selected_.has_value() && *selected_ == box.objectIndex;
+             const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
+@@ -423,6 +514,40 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
+ }
+ 
+ void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hovered) {
++    // Real game model path: the BMD triangles are drawn from a cached display
++    // list under the object's placement transform. Smooth vertex normals +
++    // material diffuse colors make the model read like the game's own render.
++    if (box.model != nullptr && !box.model->empty()) {
++        glPushMatrix();
++        glMultMatrixf(box.world.values.data());
++        glShadeModel(GL_SMOOTH);
++        if (selected || hovered) {
++            // Tinted pass: the plain list (no baked colors) with one highlight
++            // color, so a highlighted object is unmistakable at any zoom.
++            if (selected) {
++                glColor3f(1.0F, 0.85F, 0.20F);
++            } else {
++                glColor3f(0.55F, 0.80F, 1.0F);
++            }
++            const unsigned int list = modelDisplayList(box.model, true);
++            if (list != 0) {
++                glCallList(list);
++            } else {
++                drawModelTriangles(*box.model, false);
++            }
++        } else {
++            const unsigned int list = modelDisplayList(box.model, false);
++            if (list != 0) {
++                glCallList(list);
++            } else {
++                drawModelTriangles(*box.model, true);
++            }
++        }
++        glShadeModel(GL_FLAT);
++        glPopMatrix();
++        return;
++    }
++
+     const CategoryStyle& style = categoryStyle(box.category);
+     // Selection/hover tint the category color (instead of replacing it) so
+     // the category stays readable while the object is clearly highlighted.
+diff --git a/cpp/src/smg/bmd.cpp b/cpp/src/smg/bmd.cpp
+index 6f73bbc..36b837a 100644
+--- a/cpp/src/smg/bmd.cpp
++++ b/cpp/src/smg/bmd.cpp
+@@ -619,10 +619,13 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
+     const auto cullModeOffset = reader.u32(sectionStart + 0x1C);
+     const auto materialColorOffset = reader.u32(sectionStart + 0x20);
+     const auto colorChannelCountOffset = reader.u32(sectionStart + 0x24);
+-    const auto colorChannelOffset = reader.u32(sectionStart + 0x28);
++    // Colour-channel and texture-index tables are skipped positionally below
++    // (light channels and texture indices are walked as raw record bytes), so
++    // their offsets are only read to keep the field walk explicit.
++    (void)reader.u32(sectionStart + 0x28);
++    (void)reader.u32(sectionStart + 0x48);
+     const auto ambientColorOffset = reader.u32(sectionStart + 0x2C);
+     const auto texGenCountOffset = reader.u32(sectionStart + 0x34);
+-    const auto textureIndexOffset = reader.u32(sectionStart + 0x48);
+     const auto tevStageCountOffset = reader.u32(sectionStart + 0x58);
+     const auto zModeOffset = reader.u32(sectionStart + 0x74);
+     const auto zCompLocOffset = reader.u32(sectionStart + 0x78);

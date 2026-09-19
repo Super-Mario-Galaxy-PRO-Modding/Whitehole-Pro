@@ -1,0 +1,24 @@
+﻿C:\Users\conta\Documents\GitHub\Whitehole-Pro\temp_bcsv_add.cpp
+C:\Users\conta\Documents\GitHub\Whitehole-Pro\temp_bcsv_set.cpp
+
+Name                 Length
+----                 ------
+cli.cpp               17761
+cli.cpp.tmp           16343
+gui_stub.cpp            464
+gui_win32.cpp         45619
+object_db_update.cpp   6401
+settings.cpp           4535
+
+
+
+
+Name          
+----          
+commands.cpp  
+document.cpp  
+undo.cpp      
+validation.cpp
+
+
+

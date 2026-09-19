@@ -1,0 +1,60 @@
+﻿411
+79: int archiveCommand(int argc, char** argv) {
+115: int yaz0Command(int argc, char** argv) {
+132: int bcsvCommand(int argc, char** argv) {
+173: int gameCommand(int argc, char** argv) {
+193: int galaxyCommand(int argc, char** argv) {
+214: int zoneCommand(int argc, char** argv) {
+223: int mapCommand(int argc, char** argv) {
+231: int objectDbCommand(int argc, char** argv) {
+401:         79 int archiveCommand(int argc, char** argv) { 
+402:        115 int yaz0Command(int argc, char** argv) {    
+403:        132 int bcsvCommand(int argc, char** argv) {    
+404:        173 int gameCommand(int argc, char** argv) {    
+405:        193 int galaxyCommand(int argc, char** argv) {  
+406:        214 int zoneCommand(int argc, char** argv) {    
+407:        223 int mapCommand(int argc, char** argv) {     
+408:        231 int objectDbCommand(int argc, char** argv) {
+26: namespace {
+302: } // namespace
+397: } // namespace whitehole::app
+        if (command == "zone") {
+            return zoneCommand(effectiveArgc, subArgv);
+        }
+        if (command == "map") {
+            return mapCommand(effectiveArgc, subArgv);
+        }
+        if (command == "objectdb") {
+            return objectDbCommand(effectiveArgc, subArgv);
+        }
+        if (command == "hash") {
+            if (effectiveArgc != 3) {
+                throw std::runtime_error("hash requires one field name");
+            }
+            std::cout << "JMap:      0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+                      << whitehole::smg::jmapHash(subArgv[2]) << '\n'
+                      << "SuperFast: 0x" << std::setw(8) << whitehole::smg::superFastHash(subArgv[2]) << '\n';
+            return 0;
+        }
+        throw std::runtime_error("Unknown command: " + command);
+    } catch (const std::exception& error) {
+        std::cerr << "whitehole-pro-console: " << error.what() << '\n';
+        return 1;
+    }
+}
+
+} // namespace whitehole::app
+
+LineNumber Line                                        
+---------- ----                                        
+        79 int archiveCommand(int argc, char** argv) { 
+       115 int yaz0Command(int argc, char** argv) {    
+       132 int bcsvCommand(int argc, char** argv) {    
+       173 int gameCommand(int argc, char** argv) {    
+       193 int galaxyCommand(int argc, char** argv) {  
+       214 int zoneCommand(int argc, char** argv) {    
+       223 int mapCommand(int argc, char** argv) {     
+       231 int objectDbCommand(int argc, char** argv) {
+
+
+True

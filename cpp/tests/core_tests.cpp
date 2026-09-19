@@ -783,6 +783,34 @@ void testStageEditCommands() {
     std::filesystem::remove(saved);
 }
 
+// data/objectdb.json is a gitignored first-run download, so a fresh checkout
+// does not have it. These tests only need a non-empty database, so fall back to
+// a small inline one (same schema as testObjectDatabaseV2) when the file is
+// absent; the real community database is used whenever it exists.
+void loadObjectDatabaseForTests(whitehole::db::ObjectDatabase& database) {
+    const auto root = std::filesystem::path(WHITEHOLE_SOURCE_DIR);
+    database.load(root / "data" / "objectdb.json");
+    if (!database.empty()) {
+        return;
+    }
+    database.clear();
+    database.loadFromJson(R"({
+  "Timestamp": 0,
+  "Classes": [
+    {"InternalName":"SampleObj","Name":"SampleObj","Notes":"A test class","Games":3,"Progress":1,
+     "Parameters":{
+        "Obj_arg0":{"Name":"Range","Type":"Float","Games":3,"Needed":true,"Description":"How far.","Values":[],"Exclusives":[]},
+        "Obj_arg1":{"Name":"Mode","Type":"Integer","Games":3,"Needed":false,"Description":"Pick one.","Values":[{"Value":0,"Notes":"Off"},{"Value":1,"Notes":"On"}],"Exclusives":[]}
+     }}
+  ],
+  "Objects": [
+    {"InternalName":"Kinopio","ClassNameSMG1":"SampleObj","ClassNameSMG2":"SampleObj","Name":"Toad",
+     "Notes":"Friendly.","Category":"npc","ListSMG1":"ObjInfo","ListSMG2":"ObjInfo","File":"Map","Games":3,
+     "Progress":1,"IsUnused":false,"IsLeftover":false}
+  ]
+})");
+}
+
 void testObjectModel() {
     using whitehole::db::ObjectDatabase;
     using whitehole::db::PropertyKind;
@@ -792,7 +820,7 @@ void testObjectModel() {
 
     const auto root = std::filesystem::path(WHITEHOLE_SOURCE_DIR);
     ObjectDatabase database;
-    database.load(root / "data" / "objectdb.json");
+    loadObjectDatabaseForTests(database);
     expect(!database.empty(), "objectdb.json did not load for the object model test");
 
     auto stage = whitehole::smg::StageArchive::openMapFile(root / "data" / "templates" / "SMG2BigGalaxyMap.arc");
@@ -899,7 +927,7 @@ void testValidation() {
 
     const auto root = std::filesystem::path(WHITEHOLE_SOURCE_DIR);
     ObjectDatabase database;
-    database.load(root / "data" / "objectdb.json");
+    loadObjectDatabaseForTests(database);
     expect(!database.empty(), "objectdb.json did not load for the validation test");
 
     auto stage = whitehole::smg::StageArchive::openMapFile(root / "data" / "templates" / "SMG2BigGalaxyMap.arc");
@@ -947,7 +975,7 @@ void testDocument() {
 
     const auto root = std::filesystem::path(WHITEHOLE_SOURCE_DIR);
     ObjectDatabase database;
-    database.load(root / "data" / "objectdb.json");
+    loadObjectDatabaseForTests(database);
 
     Document document;
     document.setDatabase(&database);
@@ -1682,7 +1710,7 @@ std::vector<std::uint8_t> makeShp1Body() {
     }
     putU32(body, kAttributes - 8 + 3 * 8, 0xFF); // attribute terminator
 
-    putU32(body, kPacketLocations - 8, 8);      // packet size
+    putU32(body, kPacketLocations - 8, static_cast<std::uint32_t>(kPacketSize));      // packet size
     putU32(body, kPacketLocations - 8 + 4, 0);  // packet offset within the data block
 
     body[kPacketData - 8] = 0x80; // GX quads
@@ -1918,6 +1946,223 @@ void testBmdParsing() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Model library: ObjectData archive resolution -> BMD parse -> viewport mesh.
+// ---------------------------------------------------------------------------
+
+// Minimal big-endian RARC: a root directory named `rootName` holding the given
+// files. Enough for the model loader to locate and read a payload; mirrors how
+// real ObjectData archives address their model file as /<Root>/<Name>.bdl.
+std::vector<std::uint8_t> makeMinimalRarc(std::string_view rootName,
+                                          const std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& files) {
+    // NOTE: the on-disk RARC header occupies 0x00-0x3F (file header + data
+    // header), so the string table must start at 0x40. Starting it at 0x20
+    // would overwrite the node/entry/string-table fields just written above.
+    constexpr std::size_t kStringOffset = 0x40;
+    std::size_t cursor = 0;
+    const std::size_t dotOffset = cursor;
+    cursor += 2; // ".\0"
+    const std::size_t dotDotOffset = cursor;
+    cursor += 3; // "..\0"
+    const std::size_t rootOffset = cursor;
+    cursor += rootName.size() + 1;
+    std::vector<std::size_t> nameOffsets;
+    for (const auto& [name, payload] : files) {
+        nameOffsets.push_back(cursor);
+        cursor += name.size() + 1;
+    }
+    const std::size_t stringTableSize = cursor;
+
+    const std::size_t nodeOffset = (kStringOffset + stringTableSize + 0x1F) & ~std::size_t{0x1F};
+    const std::size_t entryCount = 2 + files.size(); // "." and ".." pseudo entries
+    const std::size_t entryOffset = nodeOffset + 0x10;
+    std::size_t dataOffset = entryOffset + entryCount * 0x14;
+    dataOffset = (dataOffset + 0x1F) & ~std::size_t{0x1F};
+    std::size_t total = dataOffset;
+    for (const auto& [name, payload] : files) {
+        total += payload.size();
+    }
+
+    std::vector<std::uint8_t> file(total, 0);
+    putText(file, 0, "RARC");
+    putU32(file, 0x04, static_cast<std::uint32_t>(total));
+    putU32(file, 0x08, 0x20);
+    putU32(file, 0x0C, static_cast<std::uint32_t>(dataOffset - 0x20));
+    putU32(file, 0x20, 1); // one root node
+    putU32(file, 0x24, static_cast<std::uint32_t>(nodeOffset - 0x20));
+    putU32(file, 0x28, static_cast<std::uint32_t>(entryCount));
+    putU32(file, 0x2C, static_cast<std::uint32_t>(entryOffset - 0x20));
+    putU32(file, 0x30, static_cast<std::uint32_t>(stringTableSize));
+    putU32(file, 0x34, static_cast<std::uint32_t>(kStringOffset - 0x20));
+    putU32(file, 0x38, 0);
+
+    putText(file, kStringOffset + dotOffset, ".");
+    putText(file, kStringOffset + dotDotOffset, "..");
+    putText(file, kStringOffset + rootOffset, rootName);
+    for (std::size_t index = 0; index < files.size(); ++index) {
+        putText(file, kStringOffset + nameOffsets[index], files[index].first);
+    }
+
+    putU32(file, nodeOffset, 0x524F4F54U); // 'ROOT' magic
+    putU32(file, nodeOffset + 0x04, static_cast<std::uint32_t>(rootOffset));
+    putU16(file, nodeOffset + 0x08, 0); // name hash, not validated by the reader
+    putU16(file, nodeOffset + 0x0A, static_cast<std::uint16_t>(entryCount));
+    putU32(file, nodeOffset + 0x0C, 0); // first entry
+
+    const auto putEntry = [&](std::size_t index, std::uint16_t type, std::uint32_t nameOffset,
+                              std::uint32_t relativeData, std::uint32_t size) {
+        const std::size_t entry = entryOffset + index * 0x14;
+        putU16(file, entry, static_cast<std::uint16_t>(index));
+        putU16(file, entry + 0x02, 0);
+        putU16(file, entry + 0x04, type);
+        putU16(file, entry + 0x06, static_cast<std::uint16_t>(nameOffset));
+        putU32(file, entry + 0x08, relativeData);
+        putU32(file, entry + 0x0C, size);
+    };
+    putEntry(0, 0, static_cast<std::uint32_t>(dotOffset), 0, 0);
+    putEntry(1, 0, static_cast<std::uint32_t>(dotDotOffset), 0, 0);
+    std::size_t relative = 0;
+    for (std::size_t index = 0; index < files.size(); ++index) {
+        putEntry(2 + index, 0x1100, static_cast<std::uint32_t>(nameOffsets[index]),
+                 static_cast<std::uint32_t>(relative), static_cast<std::uint32_t>(files[index].second.size()));
+        relative += files[index].second.size();
+    }
+    std::size_t payloadCursor = dataOffset;
+    for (const auto& [name, payload] : files) {
+        std::copy(payload.begin(), payload.end(), file.begin() + static_cast<std::ptrdiff_t>(payloadCursor));
+        payloadCursor += payload.size();
+    }
+    return file;
+}
+
+void writeTestFile(const std::filesystem::path& path, const std::vector<std::uint8_t>& data) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("could not write test file: " + path.string());
+    }
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+}
+
+void testModelLibrary() {
+    using whitehole::render::ModelLibrary;
+
+    TemporaryDirectory temporary;
+    const auto objectData = temporary.path / "ObjectData";
+    if (!std::filesystem::create_directory(objectData)) {
+        throw std::runtime_error("could not create test ObjectData directory");
+    }
+
+    const auto tiny = makeTinyBmd();
+    writeTestFile(objectData / "TestObj.arc", makeMinimalRarc("TestObj", {{"TestObj.bdl", tiny}}));
+    writeTestFile(objectData / "TestObjLow.arc", makeMinimalRarc("TestObjLow", {{"TestObjLow.bdl", tiny}}));
+    writeTestFile(objectData / "Ambiguous.arc",
+                  makeMinimalRarc("Ambiguous", {{"Ambiguous.bmd", tiny}, {"Other.bmd", tiny}}));
+    writeTestFile(objectData / "OddLayout.arc", makeMinimalRarc("OddLayout", {{"SomeModel.bmd", tiny}}));
+
+    whitehole::io::DirectoryFilesystem workspace(temporary.path);
+    ModelLibrary library;
+    expect(!library.bound(), "unbound library must report unbound");
+    expect(library.model("TestObj") == nullptr, "unbound library must return no model");
+    library.bind(&workspace);
+    expect(library.bound(), "bound library must report bound");
+
+    // A missing archive resolves to nothing and stays a cached miss.
+    expect(library.archiveNameFor("Missing").empty(), "missing archive should not resolve");
+    expect(library.model("Missing") == nullptr, "missing archive should produce no model");
+    expect(library.missingCount() == 1, "missing lookup was not counted");
+
+    // The model name resolves to the archive, parses, and builds the same mesh
+    // a direct BMD parse would.
+    expect(library.archiveNameFor("TestObj") == "TestObj.arc", "archive name resolution is wrong");
+    const auto mesh = library.model("TestObj");
+    expect(mesh != nullptr, "TestObj model did not load");
+    const auto expected = whitehole::render::buildModelMesh(whitehole::smg::parseBmd(tiny));
+    expect(mesh->triangles.size() == expected.triangles.size(), "loaded model triangle count is wrong");
+    expect(!mesh->empty(), "loaded model mesh is empty");
+    expect(library.loadedCount() == 1 && library.missingCount() == 1, "model counters are wrong");
+    // Caching: the same mesh object is returned for repeated lookups.
+    expect(library.model("TestObj") == mesh, "model cache did not reuse the mesh");
+    expect(library.loadedCount() == 1 && library.missingCount() == 1,
+           "cached lookups must not inflate the counters");
+
+    // Archives with more than one model file are ambiguous and refused.
+    expect(library.model("Ambiguous") == nullptr, "ambiguous archive must not produce a model");
+    // A single model file in an unexpected layout still resolves.
+    const auto odd = library.model("OddLayout");
+    expect(odd != nullptr, "single-model fallback layout did not load");
+    expect(odd->triangles.size() == expected.triangles.size(), "fallback layout mesh is wrong");
+
+    // The low-poly setting switches to the Low archive when it exists.
+    library.setLowPoly(true);
+    expect(library.archiveNameFor("TestObj") == "TestObjLow.arc", "low-poly archive resolution is wrong");
+    const auto lowMesh = library.model("TestObj");
+    expect(lowMesh != nullptr && lowMesh != mesh, "low-poly switch did not reload the model");
+    library.setLowPoly(false);
+    expect(library.archiveNameFor("TestObj") == "TestObj.arc", "disabling low-poly did not restore resolution");
+    const auto restoredMesh = library.model("TestObj");
+    // setLowPoly() clears the cache, so the restored mesh is a fresh load of
+    // the same archive: compare content, not identity.
+    expect(restoredMesh != nullptr && restoredMesh != lowMesh, "disabling low-poly did not reload the model");
+    expect(restoredMesh->triangles.size() == mesh->triangles.size(),
+           "disabling low-poly did not restore the mesh");
+
+    // Model name substitutions: an aliased name resolves to its target
+    // archive; names without a substitution fall through unchanged.
+    const auto substitutions = temporary.path / "data";
+    if (!std::filesystem::create_directory(substitutions)) {
+        throw std::runtime_error("could not create test data directory");
+    }
+    const std::string substitutionJson =
+        whitehole::util::serializeJson(whitehole::util::parseJson(R"({"testalias":"TestObj"})"));
+    writeTestFile(substitutions / "modelsubstitutions.json",
+                  std::vector<std::uint8_t>(substitutionJson.begin(), substitutionJson.end()));
+    whitehole::db::ModelSubstitutions modelSubstitutions;
+    modelSubstitutions.setBaseGameRoot(temporary.path);
+    modelSubstitutions.initBaseGame();
+    modelSubstitutions.load();
+    expect(modelSubstitutions.isLoaded(), "model substitutions did not load");
+
+    ModelLibrary substitutedLibrary;
+    substitutedLibrary.bind(&workspace);
+    substitutedLibrary.setSubstitutions(&modelSubstitutions);
+    expect(substitutedLibrary.archiveNameFor("TestAlias") == "TestObj.arc",
+           "substituted model name did not resolve to its target archive");
+    expect(substitutedLibrary.model("TestAlias") != nullptr, "substituted model name did not load");
+    // Unknown names fall through to their own archive (or to nothing).
+    expect(substitutedLibrary.archiveNameFor("TestObj") == "TestObj.arc", "plain name resolution broke");
+    expect(substitutedLibrary.archiveNameFor("Nothing").empty(), "unknown name must not resolve");
+
+    // The scene attaches the model and keeps the placeholder behaviour intact.
+    whitehole::smg::PlacementObject modelled;
+    modelled.name = "TestObj";
+    modelled.kind = "obj";
+    modelled.position = {50.0F, 0.0F, 0.0F};
+    modelled.scale = {2.0F, 1.0F, 1.0F};
+    whitehole::smg::PlacementObject plain;
+    plain.name = "Missing";
+    plain.kind = "obj";
+    whitehole::render::ViewportScene scene;
+    scene.rebuild({modelled, plain}, &library);
+    expect(scene.boxes().size() == 2, "model scene dropped objects");
+    expect(scene.boxes()[0].model != nullptr, "scene did not attach the game model");
+    expect(scene.boxes()[0].model == restoredMesh, "scene attached the wrong mesh");
+    // Modelled objects draw at the true object scale (2x here), placeholders
+    // keep the 25-unit box with its minimum visual scale clamp.
+    const auto modelCorner = scene.boxes()[0].world.transformPoint({1.0F, 0.0F, 0.0F});
+    expect(std::abs(modelCorner.x - (50.0F + 2.0F)) < 0.01F, "model world matrix must use the true scale");
+    expect(std::abs(scene.boxes()[1].halfExtents.x - 25.0F) < 0.01F, "placeholder extents changed");
+    // Picking hits the model's bounding sphere.
+    whitehole::render::ViewportCamera camera;
+    camera.target = modelled.position;
+    camera.yawRadians = 0.0F;
+    camera.pitchRadians = 0.0F;
+    camera.distance = 500.0F;
+    expect(scene.pick(camera, 400.0F, 300.0F, 800.0F, 600.0F).has_value(), "picking missed a modelled object");
+    // Rebuilding without a library keeps every object on the placeholder path.
+    whitehole::render::ViewportScene plainScene;
+    plainScene.rebuild({modelled});
+    expect(plainScene.boxes().front().model == nullptr, "scene attached a model without a library");
+}
 } // namespace
 
 int main() {
@@ -1944,6 +2189,7 @@ int main() {
         testStageAndGameModels();
         testBtiDecoding();
         testBmdParsing();
+        testModelLibrary();
         testJsonRoundTrip();
         testSettingsRoundTrip();
         testObjectDatabase();

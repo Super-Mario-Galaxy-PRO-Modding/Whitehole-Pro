@@ -619,10 +619,13 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
     const auto cullModeOffset = reader.u32(sectionStart + 0x1C);
     const auto materialColorOffset = reader.u32(sectionStart + 0x20);
     const auto colorChannelCountOffset = reader.u32(sectionStart + 0x24);
-    const auto colorChannelOffset = reader.u32(sectionStart + 0x28);
+    // Colour-channel and texture-index tables are skipped positionally below
+    // (light channels and texture indices are walked as raw record bytes), so
+    // their offsets are only read to keep the field walk explicit.
+    (void)reader.u32(sectionStart + 0x28);
+    (void)reader.u32(sectionStart + 0x48);
     const auto ambientColorOffset = reader.u32(sectionStart + 0x2C);
     const auto texGenCountOffset = reader.u32(sectionStart + 0x34);
-    const auto textureIndexOffset = reader.u32(sectionStart + 0x48);
     const auto tevStageCountOffset = reader.u32(sectionStart + 0x58);
     const auto zModeOffset = reader.u32(sectionStart + 0x74);
     const auto zCompLocOffset = reader.u32(sectionStart + 0x78);

@@ -13,16 +13,21 @@
 
 #include "whitehole/app/application.hpp"
 
+#include "whitehole/app/gui_theme.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
 #include "whitehole/db/name_table.hpp"
 #include "whitehole/db/object_db.hpp"
 #include "whitehole/render/object_visual.hpp"
-#include "whitehole/util/json.hpp"
 #include "whitehole/util/text.hpp"
 #include "whitehole/render/viewport_win32.hpp"
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/stage_archive.hpp"
+
+#include <d3d11.h>
+#include <imgui.h>
+#include <backends/imgui_impl_win32.h>
+#include <backends/imgui_impl_dx11.h>
 
 #include <windows.h>
 #include <commctrl.h>
@@ -46,34 +51,12 @@
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "shell32.lib")
 
+// ImGui's Win32 backend implements its input handler here.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
+    HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+
 namespace whitehole::app {
 namespace {
-
-constexpr int kIdOpenGame = 1001;
-constexpr int kIdOpenMap = 1002;
-constexpr int kIdSave = 1003;
-constexpr int kIdExit = 1004;
-constexpr int kIdShowLabels = 1005;
-constexpr int kIdGalaxies = 1101;
-constexpr int kIdZones = 1102;
-constexpr int kIdObjects = 1103;
-constexpr int kIdName = 1104;
-constexpr int kIdPosX = 1105;
-constexpr int kIdPosY = 1106;
-constexpr int kIdPosZ = 1107;
-constexpr int kIdRotX = 1108;
-constexpr int kIdRotY = 1109;
-constexpr int kIdRotZ = 1110;
-constexpr int kIdScaleX = 1111;
-constexpr int kIdScaleY = 1112;
-constexpr int kIdScaleZ = 1113;
-constexpr int kIdApply = 1120;
-constexpr int kIdRecentBase = 1200;
-constexpr int kIdRecentMax = 1208;
-constexpr int kIdSearch = 1210;
-constexpr int kIdToggleDark = 1220;
-constexpr int kIdStatus = 1121;
-constexpr int kIdViewport = 1122;
 
 std::wstring utf8ToWide(std::string_view text) {
     if (text.empty()) {
@@ -95,20 +78,20 @@ std::string wideToUtf8(std::wstring_view text) {
     return result;
 }
 
-std::string windowText(HWND window) {
-    const auto length = GetWindowTextLengthW(window);
-    std::wstring text(static_cast<std::size_t>(length), L'\0');
-    GetWindowTextW(window, text.data(), length + 1);
-    return wideToUtf8(text);
+void showBootError(const wchar_t* what) {
+    MessageBoxW(nullptr, what, L"Whitehole Pro — startup failed",
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
-void setWindowText(HWND window, std::string_view text) {
-    SetWindowTextW(window, utf8ToWide(text).c_str());
+void showBootHresult(const wchar_t* what, HRESULT hr) {
+    wchar_t buffer[512];
+    swprintf(buffer, 512, L"%s\n\nHRESULT: 0x%08lX", what, static_cast<unsigned long>(hr));
+    showBootError(buffer);
 }
 
-float parseFloat(HWND window, float fallback) {
+float parseFloatText(std::string_view text, float fallback) {
     try {
-        return std::stof(windowText(window));
+        return std::stof(std::string(text));
     } catch (...) {
         return fallback;
     }
@@ -145,14 +128,11 @@ void markFirstBootSeen() {
     }
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    // Best-effort: if the config dir can't be created, the splash simply
-    // returns next launch instead of silently swallowing the note.
     std::ofstream(firstBootConfigDir() / "firstboot_done.marker", std::ios::trunc);
 }
 
 // One-time hello on first boot. TaskDialog gives a native, themeable popup;
-// MessageBoxW is the fallback on platforms that can't resolve it. The popup
-// always writes the marker on dismissal, so it genuinely only shows once.
+// MessageBoxW is the fallback. The marker is always written on dismissal.
 void showFirstBootSplash(HWND owner) {
     const std::wstring content =
         L"hello i know you don't know who i am but here's a WIP rewrite of your "
@@ -164,11 +144,10 @@ void showFirstBootSplash(HWND owner) {
     TASKDIALOGCONFIG config{};
     config.cbSize = sizeof(config);
     config.hwndParent = owner;
-        config.dwFlags = TDF_SIZE_TO_CONTENT;
+    config.dwFlags = TDF_SIZE_TO_CONTENT;
     config.pszWindowTitle = L"Whitehole Pro";
     config.pszContent = content.c_str();
     config.pszFooter = footer.c_str();
-    config.pszVerificationText = L"Don't show again";
 
     TASKDIALOG_BUTTON acceptButton{100, L"Accept"};
     config.pButtons = &acceptButton;
@@ -181,9 +160,7 @@ void showFirstBootSplash(HWND owner) {
         const auto taskDialogIndirect = reinterpret_cast<TaskDialogIndirectWFn>(
             GetProcAddress(comctl, "TaskDialogIndirectW"));
         if (taskDialogIndirect != nullptr) {
-            int button = 0;
-            BOOL verified = FALSE;
-            taskDialogIndirect(&config, &button, nullptr, &verified);
+            taskDialogIndirect(&config, nullptr, nullptr, nullptr);
             markFirstBootSeen();
             return;
         }
@@ -192,27 +169,16 @@ void showFirstBootSplash(HWND owner) {
     markFirstBootSeen();
 }
 
-// A small, modern face-lift for the raw-Win32 chrome: a single Segoe UI 9pt
-// font applied to the window and every child control. The manifest already
-// enables Common Controls v6, so the themed standard controls plus this font
-// are the only visible change â€” no new libraries required. The font handle is
-// intentionally not freed (created once per window, for the life of the app).
-void applyModernTheme(HWND window) {
-    LOGFONTW logFont{};
-    HDC device = GetDC(window);
-    logFont.lfHeight = -MulDiv(9, GetDeviceCaps(device, LOGPIXELSX), 72);
-    ReleaseDC(window, device);
-        logFont.lfWeight = FW_SEMIBOLD;
-    logFont.lfQuality = CLEARTYPE_QUALITY;
-    logFont.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
-    lstrcpynW(logFont.lfFaceName, L"Segoe UI", LF_FACESIZE);
-    HFONT font = CreateFontIndirectW(&logFont);
-    SendMessageW(window, WM_SETFONT, reinterpret_cast<WPARAM>(font), 0);
-    EnumChildWindows(window, [](HWND child, LPARAM parameter) -> BOOL {
-        SendMessageW(child, WM_SETFONT, parameter, TRUE);
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(font));
-}
+// ---------------------------------------------------------------------------
+// Editor state: everything the immediate-mode UI reads and writes. Unlike the
+// old control-based GUI there are no HWND widget fields here — panels render
+// every frame straight from this struct.
+// ---------------------------------------------------------------------------
+struct Toast {
+    std::string text;
+    double born{0.0};
+    bool error{false};
+};
 
 struct EditorState {
     std::filesystem::path dataRoot;
@@ -225,109 +191,142 @@ struct EditorState {
     std::vector<std::string> zones;
     std::optional<smg::StageArchive> stage;
     std::string filter;
-    // Visible object rows after the search filter; maps list index -> stage index.
+    // Visible object rows after the search filter; maps list row -> stage index.
     std::vector<std::size_t> visibleObjects;
+
     HWND window{nullptr};
-    HMENU fileMenu{nullptr};
-    HWND galaxiesList{nullptr};
-    HWND zonesList{nullptr};
-    HWND objectsList{nullptr};
-    HWND searchEdit{nullptr};
-    HWND nameEdit{nullptr};
-    HWND posX{nullptr};
-    HWND posY{nullptr};
-    HWND posZ{nullptr};
-    HWND rotX{nullptr};
-    HWND rotY{nullptr};
-    HWND rotZ{nullptr};
-    HWND scaleX{nullptr};
-    HWND scaleY{nullptr};
-    HWND scaleZ{nullptr};
-    HWND applyButton{nullptr};
-    HWND galaxiesLabel{nullptr};
-    HWND zonesLabel{nullptr};
-    HWND objectsLabel{nullptr};
-    HWND nameLabel{nullptr};
-    HWND positionLabel{nullptr};
-    HWND rotationLabel{nullptr};
-    HWND scaleLabel{nullptr};
-    HWND status{nullptr};
-    HWND hintLabel{nullptr};
     render::ViewportWindow viewport;
     render::ViewportScene viewportScene;
     std::optional<std::size_t> viewportSelected;
     bool viewportReady{false};
     bool syncingSelection{false};
     bool showLabels{false};
+
+    // --- UI bookkeeping -----------------------------------------------------
+    int selectedGalaxy{-1};
+    int selectedZone{-1};
+    std::optional<std::size_t> selectedObject;
+    char searchBuf[160]{};   // object list filter
+    char nameBuf[160]{};     // selected object name (committed on Enter)
+    float transform[9]{};    // pos.xyz, rot.xyz, scale.xyz (display values)
+    bool transformDirty{false};
+    bool unsaved{false};
+    std::string statusText{
+        "Drag a map archive onto the window, or use File > Open Game Directory."};
+    std::vector<Toast> toasts;
+    std::vector<std::string> logLines;
+    std::string lastFilter; // cached so filtering only reruns on change
 };
 
-// Keeps every control anchored while the window is resized: three list columns
-// on top, the 3D viewport in the middle, fixed transform rows at the bottom.
-void setStatus(EditorState& state, std::string_view text);
-void applyTheme(EditorState& state) {
-    // Theme switch hook: force a repaint; themed controls come from the v6
-    // Common Controls manifest. Full dark palettes stay in applyModernTheme().
-    if (state.window != nullptr) {
-        InvalidateRect(state.window, nullptr, TRUE);
+// --- DX11 plumbing -----------------------------------------------------------
+// Dear ImGui renders through a swap chain on the main window; the OpenGL
+// viewport runs its own context in a child window, so the two never touch each
+// other's device state.
+
+ID3D11Device* g_device = nullptr;
+ID3D11DeviceContext* g_context = nullptr;
+IDXGISwapChain* g_swapChain = nullptr;
+ID3D11RenderTargetView* g_renderTarget = nullptr;
+HRESULT g_lastDeviceHr = S_OK; // last D3D11CreateDeviceAndSwapChain result
+
+void createRenderTarget() {
+    ID3D11Texture2D* backBuffer = nullptr;
+    g_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    g_device->CreateRenderTargetView(backBuffer, nullptr, &g_renderTarget);
+    backBuffer->Release();
+}
+
+void cleanupRenderTarget() {
+    if (g_renderTarget != nullptr) {
+        g_renderTarget->Release();
+        g_renderTarget = nullptr;
     }
 }
 
-void layoutEditor(EditorState& state, HWND window) {
-    RECT client{};
-    GetClientRect(window, &client);
-    const auto width = static_cast<int>(client.right);
-    const auto height = static_cast<int>(client.bottom);
+float dpiScaleFactor() {
+    // We don't have a window handle at call time in runGui, so fall back to
+    // 96 DPI == 1.0 scale. The DPI is picked up per-frame from the window once
+    // it exists and the ImGui backend handles per-monitor DPI automatically.
+    return 1.0F;
+}
 
-    constexpr int margin = 12;
-    constexpr int rowHeight = 24;
-    constexpr int rowGap = 36;
-    constexpr int statusHeight = 22;
-
-    const auto statusTop = height - margin - statusHeight;
-    const auto editorTop = statusTop - rowGap - rowHeight - (3 * rowGap);
-    const auto columnWidth = std::max(150, (width - margin * 4) / 3);
-    const auto listTop = margin + 20;
-    // Reserve the middle band for the 3D viewport; lists keep a usable height
-    // while the viewport takes whatever vertical space is left.
-    constexpr int listHeight = 148;
-    const auto viewportTop = listTop + listHeight + 8;
-    const auto viewportHeight = std::max(140, editorTop - 26 - viewportTop);
-
-    const auto secondX = margin * 2 + columnWidth;
-    const auto thirdX = margin * 3 + columnWidth * 2;
-    const auto thirdWidth = std::max(150, width - thirdX - margin);
-
-    MoveWindow(state.galaxiesLabel, margin, margin, columnWidth, 18, TRUE);
-    MoveWindow(state.galaxiesList, margin, listTop, columnWidth, listHeight, TRUE);
-    MoveWindow(state.zonesLabel, secondX, margin, columnWidth, 18, TRUE);
-    MoveWindow(state.zonesList, secondX, listTop, columnWidth, listHeight, TRUE);
-    MoveWindow(state.objectsLabel, thirdX, margin, thirdWidth, 18, TRUE);
-    MoveWindow(state.searchEdit, thirdX, listTop, thirdWidth, 24, TRUE);
-    MoveWindow(state.objectsList, thirdX, listTop + 28, thirdWidth, listHeight - 28, TRUE);
-
-    const auto nameWidth = std::clamp(secondX - 76, 140, 224);
-    MoveWindow(state.nameLabel, margin, editorTop + 4, 50, 18, TRUE);
-    MoveWindow(state.nameEdit, 64, editorTop, nameWidth, rowHeight, TRUE);
-    MoveWindow(state.positionLabel, 300, editorTop + rowGap + 4, 70, 18, TRUE);
-    MoveWindow(state.rotationLabel, 300, editorTop + (2 * rowGap) + 4, 70, 18, TRUE);
-    MoveWindow(state.scaleLabel, 300, editorTop + (3 * rowGap) + 4, 70, 18, TRUE);
-
-    constexpr int valueColumns[3] = {370, 456, 542};
-    const HWND positionEdits[3] = {state.posX, state.posY, state.posZ};
-    const HWND rotationEdits[3] = {state.rotX, state.rotY, state.rotZ};
-    const HWND scaleEdits[3] = {state.scaleX, state.scaleY, state.scaleZ};
-    for (int column = 0; column < 3; ++column) {
-        MoveWindow(positionEdits[column], valueColumns[column], editorTop + rowGap, 80, rowHeight, TRUE);
-        MoveWindow(rotationEdits[column], valueColumns[column], editorTop + (2 * rowGap), 80, rowHeight, TRUE);
-        MoveWindow(scaleEdits[column], valueColumns[column], editorTop + (3 * rowGap), 80, rowHeight, TRUE);
+bool createDeviceD3D(HWND window) {
+    DXGI_SWAP_CHAIN_DESC desc{};
+    desc.BufferDesc.RefreshRate.Numerator = 60;
+    desc.BufferDesc.RefreshRate.Denominator = 1;
+    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.OutputWindow = window;
+    desc.Windowed = TRUE;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    const D3D_FEATURE_LEVEL levels[] = {
+        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+    };
+    D3D_FEATURE_LEVEL featureLevel{};
+    HRESULT createHr = S_OK;
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels,
+        static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION, &desc,
+        &g_swapChain, &g_device, &featureLevel, &g_context);
+    if (FAILED(hr)) {
+        // Hardware device failed (e.g. no GPU driver in a VM/RDP session);
+        // fall back to the WARP software rasterizer so the editor still boots.
+        createHr = hr;
+        hr = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels,
+            static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION, &desc,
+            &g_swapChain, &g_device, &featureLevel, &g_context);
     }
-    MoveWindow(state.applyButton, 640, editorTop + rowGap, 90, 28, TRUE);
-    MoveWindow(state.status, margin, statusTop, width - margin * 2, statusHeight, TRUE);
-    MoveWindow(state.hintLabel, margin, viewportTop - 2, width - margin * 2, 18, TRUE);
-    if (state.viewport.handle() != nullptr) {
-        MoveWindow(state.viewport.handle(), margin, viewportTop + 18, width - margin * 2, viewportHeight, TRUE);
+    g_lastDeviceHr = hr;
+    if (FAILED(hr)) {
+        showBootHresult(L"Could not create the Direct3D 11 device.\n"
+                        L"Hardware attempt also reported an error.",
+                        createHr);
+        return false;
+    }
+    createRenderTarget();
+    return true;
+}
+
+void cleanupDeviceD3D() {
+    cleanupRenderTarget();
+    if (g_swapChain != nullptr) {
+        g_swapChain->Release();
+        g_swapChain = nullptr;
+    }
+    if (g_context != nullptr) {
+        g_context->Release();
+        g_context = nullptr;
+    }
+    if (g_device != nullptr) {
+        g_device->Release();
+        g_device = nullptr;
     }
 }
+
+// --- user feedback helpers ---------------------------------------------------
+
+void setStatus(EditorState& state, std::string_view text) {
+    state.statusText = std::string(text);
+}
+
+void pushLog(EditorState& state, std::string_view text) {
+    state.logLines.emplace_back(text);
+    if (state.logLines.size() > 500) {
+        state.logLines.erase(state.logLines.begin());
+    }
+}
+
+void pushToast(EditorState& state, std::string_view text, bool error = false) {
+    state.toasts.push_back(Toast{std::string(text), ImGui::GetTime(), error});
+    pushLog(state, text);
+    setStatus(state, text);
+}
+
+// --- file dialogs ------------------------------------------------------------
 
 std::optional<std::filesystem::path> pickFolder(HWND owner) {
     IFileDialog* dialog = nullptr;
@@ -368,84 +367,25 @@ std::optional<std::filesystem::path> pickOpenFile(HWND owner) {
     return std::filesystem::path(file);
 }
 
-void setStatus(EditorState& state, std::string_view text) {
-    setWindowText(state.status, text);
-}
-
-void clearList(HWND list) {
-    SendMessageW(list, LB_RESETCONTENT, 0, 0);
-}
-
-void fillList(HWND list, const std::vector<std::string>& items, const db::NameTable* names) {
-    clearList(list);
-    for (const auto& item : items) {
-        const auto label = names != nullptr ? names->displayName(item) + "  [" + item + "]" : item;
-        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(utf8ToWide(label).c_str()));
-    }
-}
+// --- data layer --------------------------------------------------------------
 
 void refreshObjects(EditorState& state) {
-    clearList(state.objectsList);
     state.visibleObjects.clear();
     if (!state.stage) {
         return;
     }
-    // Defer viewport rebuilds while bulk-adding rows (10k+ objects).
-    SendMessageW(state.objectsList, WM_SETREDRAW, FALSE, 0);
     const std::string needle = whitehole::util::toLower(state.filter);
     const auto& objects = state.stage->objects();
     for (std::size_t i = 0; i < objects.size(); ++i) {
         const auto& object = objects[i];
         if (!needle.empty()) {
-            const std::string hay = whitehole::util::toLower(object.name + " " + object.kind + " " + object.layer);
+            const std::string hay = whitehole::util::toLower(
+                object.name + " " + object.kind + " " + object.layer);
             if (hay.find(needle) == std::string::npos) continue;
         }
         state.visibleObjects.push_back(i);
-        std::string label = object.kind + "/" + object.layer + "  " + object.name;
-        const std::string friendly = state.objectDb.displayName(object.name);
-        if (friendly != "\"" + object.name + "\"") label += "  (" + friendly + ")";
-        SendMessageW(state.objectsList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(utf8ToWide(label).c_str()));
-    }
-    SendMessageW(state.objectsList, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(state.objectsList, nullptr, TRUE);
-}
-
-[[nodiscard]] int listToStageIndex(EditorState& state, int listIndex) {
-    if (listIndex < 0 || static_cast<std::size_t>(listIndex) >= state.visibleObjects.size()) return -1;
-    return static_cast<int>(state.visibleObjects[static_cast<std::size_t>(listIndex)]);
-}
-
-[[nodiscard]] int stageToListIndex(EditorState& state, std::size_t stageIndex) {
-    for (std::size_t i = 0; i < state.visibleObjects.size(); ++i) {
-        if (state.visibleObjects[i] == stageIndex) return static_cast<int>(i);
-    }
-    return -1;
-}
-
-void rebuildRecentMenu(EditorState& state) {
-    if (state.fileMenu == nullptr) return;
-    // Clear old recent entries (keep static items, recent block lives at the end).
-    for (int id = kIdRecentBase; id <= kIdRecentMax; ++id) {
-        RemoveMenu(state.fileMenu, static_cast<UINT>(id), MF_BYCOMMAND);
-    }
-    const auto& recent = state.settings.recentMaps;
-    if (recent.empty()) return;
-    AppendMenuW(state.fileMenu, MF_SEPARATOR, 0, nullptr);
-    int id = kIdRecentBase;
-    for (const auto& entry : recent) {
-        if (id > kIdRecentMax) break;
-        AppendMenuW(state.fileMenu, MF_STRING, static_cast<UINT_PTR>(id++), utf8ToWide(entry).c_str());
     }
 }
-
-void rememberMap(EditorState& state, const std::filesystem::path& path) {
-    state.settings.pushRecentMap(path.string());
-    state.settings.save();
-    rebuildRecentMenu(state);
-}
-
-void showObject(EditorState& state, int index);
-void syncViewportSelection(EditorState& state, std::optional<std::size_t> selected);
 
 void refreshViewport(EditorState& state, bool frame) {
     if (!state.viewportReady) {
@@ -466,6 +406,7 @@ void refreshViewport(EditorState& state, bool frame) {
         state.viewportSelected.reset();
     }
     state.viewport.setSelected(state.viewportSelected);
+    state.viewport.setShowLabels(state.showLabels);
     if (frame) {
         state.viewport.frameAll();
     } else {
@@ -473,53 +414,48 @@ void refreshViewport(EditorState& state, bool frame) {
     }
 }
 
-void showObject(EditorState& state, int stageIndex) {
-    if (!state.stage || stageIndex < 0 ||
-        static_cast<std::size_t>(stageIndex) >= state.stage->objects().size()) {
+// Copies the selected object into the property widgets.
+void syncTransformBuffers(EditorState& state) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        state.transformDirty = false;
         return;
     }
-    const auto& object = state.stage->objects()[static_cast<std::size_t>(stageIndex)];
-    setWindowText(state.nameEdit, object.name);
-    setWindowText(state.posX, formatFloat(object.position.x));
-    setWindowText(state.posY, formatFloat(object.position.y));
-    setWindowText(state.posZ, formatFloat(object.position.z));
-    setWindowText(state.rotX, formatFloat(object.rotation.x));
-    setWindowText(state.rotY, formatFloat(object.rotation.y));
-    setWindowText(state.rotZ, formatFloat(object.rotation.z));
-    setWindowText(state.scaleX, formatFloat(object.scale.x));
-    setWindowText(state.scaleY, formatFloat(object.scale.y));
-    setWindowText(state.scaleZ, formatFloat(object.scale.z));
-    // Same category language as the viewport legend and the list chips.
-    const auto& style = render::objectStyle(object.kind, object.name);
-    setStatus(state, std::string(object.name) + " \u2014 " + style.label + " (" + object.kind + "/" + object.layer + ")");
+    const auto& object = state.stage->objects()[*state.selectedObject];
+    std::snprintf(state.nameBuf, sizeof(state.nameBuf), "%s", object.name.c_str());
+    state.transform[0] = object.position.x;
+    state.transform[1] = object.position.y;
+    state.transform[2] = object.position.z;
+    state.transform[3] = object.rotation.x;
+    state.transform[4] = object.rotation.y;
+    state.transform[5] = object.rotation.z;
+    state.transform[6] = object.scale.x;
+    state.transform[7] = object.scale.y;
+    state.transform[8] = object.scale.z;
+    state.transformDirty = false;
 }
 
-void applyObject(EditorState& state) {
-    const auto listIndex = static_cast<int>(SendMessageW(state.objectsList, LB_GETCURSEL, 0, 0));
-    const int stageIndex = listToStageIndex(state, listIndex);
-    if (!state.stage || stageIndex < 0 ||
-        static_cast<std::size_t>(stageIndex) >= state.stage->objects().size()) {
+// Pushes the property widgets into the selected object and repaints the scene.
+void applyTransform(EditorState& state) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
         return;
     }
-    auto& object = state.stage->objects()[static_cast<std::size_t>(stageIndex)];
-    object.name = windowText(state.nameEdit);
-    object.position.x = parseFloat(state.posX, object.position.x);
-    object.position.y = parseFloat(state.posY, object.position.y);
-    object.position.z = parseFloat(state.posZ, object.position.z);
-    object.rotation.x = parseFloat(state.rotX, object.rotation.x);
-    object.rotation.y = parseFloat(state.rotY, object.rotation.y);
-    object.rotation.z = parseFloat(state.rotZ, object.rotation.z);
-    object.scale.x = parseFloat(state.scaleX, object.scale.x);
-    object.scale.y = parseFloat(state.scaleY, object.scale.y);
-    object.scale.z = parseFloat(state.scaleZ, object.scale.z);
-    setStatus(state, "Updated " + object.name + " in memory. Save the zone to write the archive.");
-    refreshObjects(state);
-    const int newList = stageToListIndex(state, static_cast<std::size_t>(stageIndex));
-    SendMessageW(state.objectsList, LB_SETCURSEL, static_cast<WPARAM>(newList), 0);
-    state.viewportSelected = static_cast<std::size_t>(stageIndex);
-    if (state.viewportReady) {
-        state.viewport.setSelected(state.viewportSelected);
+    auto& object = state.stage->objects()[*state.selectedObject];
+    if (const std::string newName = state.nameBuf;
+        !newName.empty() && newName != object.name) {
+        object.name = newName;
     }
+    object.position.x = state.transform[0];
+    object.position.y = state.transform[1];
+    object.position.z = state.transform[2];
+    object.rotation.x = state.transform[3];
+    object.rotation.y = state.transform[4];
+    object.rotation.z = state.transform[5];
+    object.scale.x = state.transform[6];
+    object.scale.y = state.transform[7];
+    object.scale.z = state.transform[8];
+    state.unsaved = true;
     refreshViewport(state, false);
 }
 
@@ -531,25 +467,41 @@ void syncViewportSelection(EditorState& state, std::optional<std::size_t> select
     if (state.syncingSelection) {
         return;
     }
+    state.selectedObject = selected;
+    syncTransformBuffers(state);
     if (selected.has_value() && state.stage && *selected < state.stage->objects().size()) {
-        state.syncingSelection = true;
-        SendMessageW(state.objectsList, LB_SETCURSEL, static_cast<WPARAM>(stageToListIndex(state, *selected)), 0);
-        showObject(state, static_cast<int>(*selected));
-        state.syncingSelection = false;
+        const auto& object = state.stage->objects()[*selected];
+        const auto& style = render::objectStyle(object.kind, object.name);
+        setStatus(state, std::string(object.name) + " — " + style.label +
+                             " (" + object.kind + "/" + object.layer + ")");
     }
+}
+
+void selectObject(EditorState& state, std::optional<std::size_t> stageIndex) {
+    state.syncingSelection = true;
+    syncViewportSelection(state, stageIndex);
+    state.syncingSelection = false;
+}
+
+void rememberMap(EditorState& state, const std::filesystem::path& path) {
+    state.settings.pushRecentMap(path.string());
+    state.settings.save();
 }
 
 void openMap(EditorState& state, const std::filesystem::path& path) {
     state.stage = smg::StageArchive::openMapFile(path);
     state.zones = {state.stage->stageName()};
-    fillList(state.zonesList, state.zones, nullptr);
+    state.selectedZone = 0;
     state.filter.clear();
-    if (state.searchEdit != nullptr) setWindowText(state.searchEdit, "");
+    state.searchBuf[0] = '\0';
+    state.lastFilter.clear();
     refreshObjects(state);
-    syncViewportSelection(state, std::nullopt);
+    selectObject(state, std::nullopt);
     refreshViewport(state, true);
     rememberMap(state, path);
-    setStatus(state, "Opened map archive with " + std::to_string(state.stage->objects().size()) + " objects.");
+    state.unsaved = false;
+    pushToast(state, "Opened map archive with " +
+                         std::to_string(state.stage->objects().size()) + " objects.");
 }
 
 void openGame(EditorState& state, const std::filesystem::path& path) {
@@ -561,403 +513,570 @@ void openGame(EditorState& state, const std::filesystem::path& path) {
     state.galaxies = state.game->galaxies();
     state.zones = state.game->zones();
     state.stage.reset();
+    state.selectedGalaxy = -1;
+    state.selectedZone = -1;
+    state.selectedObject.reset();
     state.settings.lastGameDir = path.string();
     state.settings.save();
-    fillList(state.galaxiesList, state.galaxies, &state.galaxyNames);
-    fillList(state.zonesList, state.zones, &state.zoneNames);
-    clearList(state.objectsList);
-    syncViewportSelection(state, std::nullopt);
     refreshViewport(state, false);
-    setStatus(state, "Opened SMG" + std::to_string(state.game->gameType()) + " workspace with "
-                         + std::to_string(state.galaxies.size()) + " galaxies.");
+    pushToast(state, "Opened SMG" + std::to_string(state.game->gameType()) +
+                         " workspace with " + std::to_string(state.galaxies.size()) +
+                         " galaxies.");
 }
 
-void selectGalaxy(EditorState& state) {
-    const auto index = static_cast<int>(SendMessageW(state.galaxiesList, LB_GETCURSEL, 0, 0));
+void selectGalaxy(EditorState& state, int index) {
     if (!state.game || index < 0 || static_cast<std::size_t>(index) >= state.galaxies.size()) {
         return;
     }
+    state.selectedGalaxy = index;
     const auto galaxy = state.game->openGalaxy(state.galaxies[static_cast<std::size_t>(index)]);
     state.zones = galaxy.zones();
-    fillList(state.zonesList, state.zones, &state.zoneNames);
-    setStatus(state, "Galaxy " + galaxy.name() + " has " + std::to_string(state.zones.size()) + " zones.");
+    state.selectedZone = -1;
+    setStatus(state, "Galaxy " + galaxy.name() + " has " +
+                         std::to_string(state.zones.size()) + " zones.");
 }
 
-void selectZone(EditorState& state) {
-    const auto index = static_cast<int>(SendMessageW(state.zonesList, LB_GETCURSEL, 0, 0));
+void selectZone(EditorState& state, int index) {
     if (index < 0 || static_cast<std::size_t>(index) >= state.zones.size()) {
         return;
     }
+    state.selectedZone = index;
     const auto& zone = state.zones[static_cast<std::size_t>(index)];
     if (state.game) {
-        state.stage = smg::StageArchive::open(state.game->filesystem(), zone, state.game->gameType());
+        state.stage = smg::StageArchive::open(state.game->filesystem(), zone,
+                                              state.game->gameType());
     }
     state.filter.clear();
-    if (state.searchEdit != nullptr) setWindowText(state.searchEdit, "");
+    state.searchBuf[0] = '\0';
+    state.lastFilter.clear();
     refreshObjects(state);
-    syncViewportSelection(state, std::nullopt);
+    selectObject(state, std::nullopt);
     refreshViewport(state, true);
     if (state.stage) {
-        setStatus(state, "Loaded " + zone + " (" + std::to_string(state.stage->objects().size()) + " objects).");
+        pushToast(state, "Loaded " + zone + " (" +
+                             std::to_string(state.stage->objects().size()) + " objects).");
     }
 }
 
 void saveStage(EditorState& state) {
     if (!state.stage) {
-        throw std::runtime_error("No zone is loaded");
+        pushToast(state, "No zone is loaded.", true);
+        return;
     }
-    applyObject(state);
+    applyTransform(state);
     state.stage->save();
-    setStatus(state, "Saved " + state.stage->sourcePath().string());
+    state.unsaved = false;
+    pushToast(state, "Saved " + state.stage->sourcePath().string());
 }
 
-LRESULT CALLBACK editorProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    auto* state = reinterpret_cast<EditorState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-    switch (message) {
-    case WM_CREATE: {
-        auto* created = new EditorState();
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(created));
-        state = created;
-        created->galaxiesLabel = CreateWindowW(L"STATIC", L"Galaxies", WS_CHILD | WS_VISIBLE, 12, 12, 240, 18, window, nullptr, nullptr, nullptr);
-        created->galaxiesList = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
-                                              12, 32, 240, 360, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdGalaxies)), nullptr, nullptr);
-        created->zonesLabel = CreateWindowW(L"STATIC", L"Zones", WS_CHILD | WS_VISIBLE, 264, 12, 240, 18, window, nullptr, nullptr, nullptr);
-        created->zonesList = CreateWindowW(L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
-                                           264, 32, 240, 360, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdZones)), nullptr, nullptr);
-        created->objectsLabel = CreateWindowW(L"STATIC", L"Objects", WS_CHILD | WS_VISIBLE, 516, 12, 360, 18, window, nullptr, nullptr, nullptr);
-        created->searchEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                            516, 32, 360, 24, window,
-                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSearch)), nullptr, nullptr);
-        // Owner-draw fixed: rows get the same category color chip the 3D
-        // viewport uses, so list and scene share one visual language.
-        created->objectsList = CreateWindowW(L"LISTBOX", L"",
-                                             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
-                                             516, 60, 360, 332, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdObjects)), nullptr, nullptr);
+// --- UI panels ---------------------------------------------------------------
 
-        created->nameLabel = CreateWindowW(L"STATIC", L"Name", WS_CHILD | WS_VISIBLE, 12, 404, 50, 18, window, nullptr, nullptr, nullptr);
-        created->nameEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER, 64, 400, 220, 24, window,
-                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdName)), nullptr, nullptr);
-        created->positionLabel = CreateWindowW(L"STATIC", L"Position", WS_CHILD | WS_VISIBLE, 300, 404, 70, 18, window, nullptr, nullptr, nullptr);
-        created->posX = CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_BORDER, 370, 400, 80, 24, window,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPosX)), nullptr, nullptr);
-        created->posY = CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_BORDER, 456, 400, 80, 24, window,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPosY)), nullptr, nullptr);
-        created->posZ = CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_BORDER, 542, 400, 80, 24, window,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdPosZ)), nullptr, nullptr);
-        created->rotationLabel = CreateWindowW(L"STATIC", L"Rotation", WS_CHILD | WS_VISIBLE, 300, 436, 70, 18, window, nullptr, nullptr, nullptr);
-        created->rotX = CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_BORDER, 370, 432, 80, 24, window,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdRotX)), nullptr, nullptr);
-        created->rotY = CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_BORDER, 456, 432, 80, 24, window,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdRotY)), nullptr, nullptr);
-        created->rotZ = CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_BORDER, 542, 432, 80, 24, window,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdRotZ)), nullptr, nullptr);
-        created->scaleLabel = CreateWindowW(L"STATIC", L"Scale", WS_CHILD | WS_VISIBLE, 300, 468, 70, 18, window, nullptr, nullptr, nullptr);
-        created->scaleX = CreateWindowW(L"EDIT", L"1", WS_CHILD | WS_VISIBLE | WS_BORDER, 370, 464, 80, 24, window,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdScaleX)), nullptr, nullptr);
-        created->scaleY = CreateWindowW(L"EDIT", L"1", WS_CHILD | WS_VISIBLE | WS_BORDER, 456, 464, 80, 24, window,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdScaleY)), nullptr, nullptr);
-        created->scaleZ = CreateWindowW(L"EDIT", L"1", WS_CHILD | WS_VISIBLE | WS_BORDER, 542, 464, 80, 24, window,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdScaleZ)), nullptr, nullptr);
-        created->applyButton = CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE, 640, 400, 90, 28, window,
-                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdApply)), nullptr, nullptr);
-        created->hintLabel =
-            CreateWindowW(L"STATIC",
-                          L"3D view: left-drag pans, right-drag orbits, wheel zooms, click selects, Space frames. "
-                          L"Colors match the list and the in-view legend.",
-                          WS_CHILD | WS_VISIBLE, 12, 200, 860, 18, window, nullptr, nullptr, nullptr);
-        created->status = CreateWindowW(L"STATIC", L"Open a game folder or a map archive to begin.",
-                                        WS_CHILD | WS_VISIBLE, 12, 504, 860, 22, window,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdStatus)), nullptr, nullptr);
-        created->viewportReady =
-            created->viewport.create(window, kIdViewport, GetModuleHandleW(nullptr));
-        if (created->viewportReady) {
-            created->viewport.setOnSelect([state = created](std::optional<std::size_t> selected) {
-                syncViewportSelection(*state, selected);
-            });
-            refreshViewport(*created, false);
-        } else {
-            setStatus(*created, "3D viewport unavailable (OpenGL init failed); list editing still works.");
-        }
-                DragAcceptFiles(window, TRUE);
-        layoutEditor(*created, window);
-        applyModernTheme(window);
-        return 0;
+// Category chip in the object list, matching the viewport's color language.
+ImVec4 categoryColor(const smg::PlacementObject& object) {
+    const auto& style = render::objectStyle(object.kind, object.name);
+    return ImVec4(style.color[0], style.color[1], style.color[2], 1.0F);
+}
+
+void drawGalaxyZonePanel(EditorState& state) {
+    if (!ImGui::Begin("Game")) {
+        ImGui::End();
+        return;
     }
-    case WM_SIZE:
-        if (state != nullptr && wParam != SIZE_MINIMIZED) {
-            layoutEditor(*state, window);
-        }
-        return 0;
-    case WM_GETMINMAXINFO: {
-        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
-        limits->ptMinTrackSize.x = 780;
-        limits->ptMinTrackSize.y = 720;
-        return 0;
+    if (state.game.has_value()) {
+        ImGui::TextDisabled("SMG%d workspace", state.game->gameType());
+    } else {
+        ImGui::TextDisabled("No game directory open");
     }
-    case WM_MEASUREITEM:
-        // Owner-draw object rows: fixed height with room for the color chip.
-        if (wParam == kIdObjects) {
-            auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
-            measure->itemHeight = 18;
-            return TRUE;
-        }
-        break;
-    case WM_DRAWITEM: {
-        auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-        if (wParam != kIdObjects || state == nullptr || !state->stage || draw->itemID < 0 ||
-            static_cast<std::size_t>(draw->itemID) >= state->stage->objects().size()) {
-            break;
-        }
-        const auto& object = state->stage->objects()[static_cast<std::size_t>(draw->itemID)];
-        const auto& style = render::objectStyle(object.kind, object.name);
-        if ((draw->itemState & ODS_SELECTED) != 0) {
-            FillRect(draw->hDC, &draw->rcItem, GetSysColorBrush(COLOR_HIGHLIGHT));
-            SetTextColor(draw->hDC, GetSysColor(COLOR_HIGHLIGHTTEXT));
-        } else {
-            FillRect(draw->hDC, &draw->rcItem, GetSysColorBrush(COLOR_WINDOW));
-            SetTextColor(draw->hDC, GetSysColor(COLOR_WINDOWTEXT));
-        }
-        SetBkMode(draw->hDC, TRANSPARENT);
-        // Category chip: the same color the viewport renders the object in.
-        const int chipY = draw->rcItem.top + (draw->rcItem.bottom - draw->rcItem.top - 10) / 2;
-        RECT chip{draw->rcItem.left + 5, chipY, draw->rcItem.left + 15, chipY + 10};
-        HBRUSH chipBrush = CreateSolidBrush(RGB(static_cast<int>(style.color[0] * 255.0F),
-                                                static_cast<int>(style.color[1] * 255.0F),
-                                                static_cast<int>(style.color[2] * 255.0F)));
-        FillRect(draw->hDC, &chip, chipBrush);
-        DeleteObject(chipBrush);
-        const std::wstring text = utf8ToWide(object.name + "   " + object.kind + "/" + object.layer);
-        TextOutW(draw->hDC, draw->rcItem.left + 22, draw->rcItem.top + 2, text.c_str(), static_cast<int>(text.size()));
-        if ((draw->itemState & ODS_FOCUS) != 0) {
-            DrawFocusRect(draw->hDC, &draw->rcItem);
-        }
-        return TRUE;
-    }
-    case WM_COMMAND:
-        if (state == nullptr) {
-            break;
-        }
-        try {
-            switch (LOWORD(wParam)) {
-            case kIdOpenGame: {
-                const auto folder = pickFolder(window);
-                if (folder) {
-                    openGame(*state, *folder);
-                }
-                break;
-            }
-            case kIdOpenMap: {
-                const auto file = pickOpenFile(window);
-                if (file) {
-                    openMap(*state, *file);
-                }
-                break;
-            }
-            case kIdSave:
-                saveStage(*state);
-                break;
-            case kIdApply:
-                applyObject(*state);
-                break;
-            case kIdShowLabels:
-                state->showLabels = !state->showLabels;
-                CheckMenuItem(GetMenu(window), kIdShowLabels,
-                              MF_BYCOMMAND | (state->showLabels ? MF_CHECKED : MF_UNCHECKED));
-                if (state->viewportReady) {
-                    state->viewport.setShowLabels(state->showLabels);
-                }
-                setStatus(*state, state->showLabels ? "Object labels on." : "Object labels off.");
-                break;
-            case kIdExit:
-                DestroyWindow(window);
-                break;
-            case kIdGalaxies:
-                if (HIWORD(wParam) == LBN_SELCHANGE) {
-                    selectGalaxy(*state);
-                }
-                break;
-            case kIdZones:
-                if (HIWORD(wParam) == LBN_SELCHANGE) {
-                    selectZone(*state);
-                }
-                break;
-            case kIdObjects:
-                if (HIWORD(wParam) == LBN_SELCHANGE && !state->syncingSelection) {
-                    const auto listSel = static_cast<int>(SendMessageW(state->objectsList, LB_GETCURSEL, 0, 0));
-                    const int stageSel = listToStageIndex(*state, listSel);
-                    showObject(*state, stageSel);
-                    if (stageSel >= 0) {
-                        syncViewportSelection(*state, static_cast<std::size_t>(stageSel));
-                    } else {
-                        syncViewportSelection(*state, std::nullopt);
-                    }
-                }
-                break;
-            case kIdSearch:
-                if (HIWORD(wParam) == EN_CHANGE) {
-                    state->filter = windowText(state->searchEdit);
-                    // Preserve viewport selection across filtering when possible.
-                    const std::optional<std::size_t> keepSel = state->viewportSelected;
-                    refreshObjects(*state);
-                    if (keepSel && state->stage && *keepSel < state->stage->objects().size()) {
-                        const int list = stageToListIndex(*state, *keepSel);
-                        if (list >= 0) SendMessageW(state->objectsList, LB_SETCURSEL, static_cast<WPARAM>(list), 0);
-                    }
-                    refreshViewport(*state, false);
-                }
-                break;
-            case kIdToggleDark:
-                state->settings.darkMode = !state->settings.darkMode;
-                state->settings.save();
-                applyTheme(*state);
-                setStatus(*state, state->settings.darkMode ? "Dark theme on." : "Light theme on.");
-                break;
-            default:
-                if (LOWORD(wParam) >= kIdRecentBase && LOWORD(wParam) <= kIdRecentMax) {
-                    const std::size_t idx = static_cast<std::size_t>(LOWORD(wParam) - kIdRecentBase);
-                    if (idx < state->settings.recentMaps.size()) {
-                        const std::filesystem::path path(state->settings.recentMaps[idx]);
-                        if (std::filesystem::is_directory(path)) openGame(*state, path);
-                        else openMap(*state, path);
-                    }
-                }
-                break;
-            }
-        } catch (const std::exception& error) {
-            setStatus(*state, error.what());
-            MessageBoxW(window, utf8ToWide(error.what()).c_str(), L"Whitehole Pro", MB_ICONERROR);
-        }
-        return 0;
-    case WM_DROPFILES: {
-        const auto drop = reinterpret_cast<HDROP>(wParam);
-        if (state != nullptr && DragQueryFileW(drop, 0xFFFFFFFFU, nullptr, 0) > 0) {
-            wchar_t dropped[MAX_PATH]{};
-            if (DragQueryFileW(drop, 0, dropped, MAX_PATH) > 0) {
+
+    // Galaxies section
+    ImGui::SeparatorText("Galaxies");
+    if (ImGui::BeginListBox("##galaxies", ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 8))) {
+        for (std::size_t i = 0; i < state.galaxies.size(); ++i) {
+            const std::string label = state.galaxyNames.displayName(state.galaxies[i]);
+            const bool selected = state.selectedGalaxy == static_cast<int>(i);
+            if (ImGui::Selectable(label.c_str(), selected)) {
                 try {
-                    const std::filesystem::path path(dropped);
-                    if (std::filesystem::is_directory(path)) {
-                        openGame(*state, path);
-                    } else {
-                        openMap(*state, path);
-                    }
+                    selectGalaxy(state, static_cast<int>(i));
                 } catch (const std::exception& error) {
-                    setStatus(*state, error.what());
-                    MessageBoxW(window, utf8ToWide(error.what()).c_str(), L"Whitehole Pro", MB_ICONERROR);
+                    pushToast(state, error.what(), true);
                 }
             }
         }
-        DragFinish(drop);
-        return 0;
+        ImGui::EndListBox();
     }
-    case WM_DESTROY:
-        if (state != nullptr) {
-            state->viewport.destroy();
-            delete state;
-            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+
+    // Zones section
+    ImGui::SeparatorText("Zones");
+    if (ImGui::BeginListBox("##zones", ImVec2(-FLT_MIN, -1.0F))) {
+        for (std::size_t i = 0; i < state.zones.size(); ++i) {
+            std::string label = state.zoneNames.displayName(state.zones[i]);
+            if (label != state.zones[i]) {
+                label += "  [" + state.zones[i] + "]";
+            }
+            const bool selected = state.selectedZone == static_cast<int>(i);
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                try {
+                    selectZone(state, static_cast<int>(i));
+                } catch (const std::exception& error) {
+                    pushToast(state, error.what(), true);
+                }
+            }
         }
-        PostQuitMessage(0);
-        return 0;
-    default:
-        break;
+        ImGui::EndListBox();
     }
-    return DefWindowProcW(window, message, wParam, lParam);
+    ImGui::End();
 }
 
-} // namespace
+void drawObjectsPanel(EditorState& state) {
+    if (!ImGui::Begin("Objects")) {
+        ImGui::End();
+        return;
+    }
 
-int runGui(const std::filesystem::path& executable, const std::filesystem::path& initialFile) {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX controls{sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
-    InitCommonControlsEx(&controls);
+    // Filter box with a clear button; filtering reruns only when the text
+    // actually changes so 10k-object stages stay smooth.
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0F);
+    if (ImGui::InputTextWithHint("##search", "Search objects… (Ctrl+F)", state.searchBuf,
+                                 sizeof(state.searchBuf))) {
+        state.filter = state.searchBuf;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("X##clear", ImVec2(24, 0))) {
+        state.searchBuf[0] = '\0';
+        state.filter.clear();
+    }
+    if (state.filter != state.lastFilter) {
+        refreshObjects(state);
+        state.lastFilter = state.filter;
+    }
+    ImGui::TextDisabled("%d of %d", static_cast<int>(state.visibleObjects.size()),
+                        state.stage ? static_cast<int>(state.stage->objects().size()) : 0);
+    ImGui::Separator();
 
-    WNDCLASSW windowClass{};
-    windowClass.lpfnWndProc = editorProc;
-    windowClass.hInstance = GetModuleHandleW(nullptr);
-    windowClass.lpszClassName = L"WhiteholeProEditor";
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    RegisterClassW(&windowClass);
+    if (!state.stage) {
+        ImGui::TextDisabled("Open a zone to list its objects.");
+        ImGui::End();
+        return;
+    }
 
-    HMENU menu = CreateMenu();
-    HMENU fileMenu = CreatePopupMenu();
-    AppendMenuW(fileMenu, MF_STRING, kIdOpenGame, L"Open Game Directory...\tCtrl+O");
-    AppendMenuW(fileMenu, MF_STRING, kIdOpenMap, L"Open Map Archive...\tCtrl+M");
-    AppendMenuW(fileMenu, MF_STRING, kIdSave, L"Save Zone\tCtrl+S");
-    AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(fileMenu, MF_STRING, kIdExit, L"Exit");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"File");
-    HMENU viewMenu = CreatePopupMenu();
-    AppendMenuW(viewMenu, MF_STRING, kIdShowLabels, L"Show Object Labels");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"View");
-
-    HWND window = CreateWindowW(L"WhiteholeProEditor", L"Whitehole Pro", WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 980, 800, nullptr, menu, GetModuleHandleW(nullptr), nullptr);
-    auto* state = reinterpret_cast<EditorState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-    if (state != nullptr) {
-        state->window = window;
-        state->fileMenu = fileMenu;
-        state->settings.load();
-        state->dataRoot = dataDirectory(executable);
-        state->galaxyNames.loadJson(state->dataRoot / "galaxies.json");
-        state->zoneNames.loadJson(state->dataRoot / "zones.json");
-        const std::filesystem::path objectDbPath = state->dataRoot / "objectdb.json";
-        if (!std::filesystem::exists(objectDbPath) && objectDatabaseDownloadAvailable()) {
-            // Java downloads the community database on first run (data/objectdb.json
-            // is gitignored). Match that so a fresh checkout still gets real object
-            // names and full parameter metadata instead of a bare names-only view.
-            setStatus(*state, "Downloading the object database (first run, one time only)...");
-            const std::string failure = downloadObjectDatabase(objectDbPath);
-            if (!failure.empty()) {
-                setStatus(*state, "Object database download failed: " + failure);
+    const auto& objects = state.stage->objects();
+    ImGui::BeginChild("##objectlist");
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(state.visibleObjects.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            const std::size_t stageIndex = state.visibleObjects[static_cast<std::size_t>(row)];
+            const auto& object = objects[stageIndex];
+            const bool selected = state.selectedObject == stageIndex;
+            // Category color chip.
+            ImGui::PushStyleColor(ImGuiCol_Text, categoryColor(object));
+            ImGui::TextUnformatted("*");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            std::string label = object.name;
+            const std::string friendly = state.objectDb.displayName(object.name);
+            if (friendly != "\"" + object.name + "\"") {
+                label += "  (" + friendly + ")";
             }
-        }
-        state->objectDb.load(objectDbPath,
-                             Settings::defaultConfigPath().parent_path() / "objectdb.cache");
-        rebuildRecentMenu(*state);
-        applyTheme(*state);
-        if (!state->settings.lastGameDir.empty() && initialFile.empty() &&
-            std::filesystem::is_directory(state->settings.lastGameDir)) {
-            try {
-                openGame(*state, std::filesystem::path(state->settings.lastGameDir));
-            } catch (...) {
-            }
-        }
-
-        bool opened = state->game.has_value() || state->stage.has_value();
-        if (!initialFile.empty() && std::filesystem::exists(initialFile)) {
-            try {
-                if (std::filesystem::is_directory(initialFile)) {
-                    openGame(*state, initialFile);
-                } else {
-                    openMap(*state, initialFile);
+            ImGui::PushID(static_cast<int>(stageIndex));
+            if (ImGui::Selectable(label.c_str(), selected,
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
+                selectObject(state, stageIndex);
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && state.viewportReady) {
+                    state.viewport.frameSelection();
                 }
-                opened = true;
-            } catch (const std::exception& error) {
-                setStatus(*state, "Could not open " + initialFile.string() + ": " + error.what());
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void drawPropertiesPanel(EditorState& state) {
+    if (!ImGui::Begin("Properties")) {
+        ImGui::End();
+        return;
+    }
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        ImGui::TextDisabled("Select an object to edit its transform.");
+        ImGui::End();
+        return;
+    }
+    const auto& object = state.stage->objects()[*state.selectedObject];
+
+    // Identity header: friendly name from the object database.
+    const std::string friendly = state.objectDb.displayName(object.name);
+    if (friendly != "\"" + object.name + "\"") {
+        ImGui::TextUnformatted(friendly.c_str());
+    }
+    ImGui::TextDisabled("%s / %s", object.kind.c_str(), object.layer.c_str());
+    ImGui::SeparatorText("Name");
+    if (ImGui::InputText("##name", state.nameBuf, sizeof(state.nameBuf),
+                         ImGuiInputTextFlags_EnterReturnsTrue)) {
+        applyTransform(state);
+    }
+
+    auto vecRow = [&](const char* label, float* values, float speed) {
+        ImGui::SeparatorText(label);
+        ImGui::PushID(label);
+        const float itemWidth = (ImGui::GetContentRegionAvail().x - 24.0F) / 3.0F;
+        bool changed = false;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (axis != 0) {
+                ImGui::SameLine();
+            }
+            ImGui::SetNextItemWidth(itemWidth);
+            changed |= ImGui::DragFloat(("##v" + std::to_string(axis)).c_str(),
+                                        &values[axis], speed, 0.0F, 0.0F, "%.1f");
+        }
+        if (changed) {
+            applyTransform(state);
+        }
+        ImGui::PopID();
+    };
+
+    vecRow("Position", &state.transform[0], 0.5F);
+    vecRow("Rotation", &state.transform[3], 0.25F);
+    vecRow("Scale", &state.transform[6], 0.02F);
+
+    ImGui::Separator();
+    const float half = (ImGui::GetContentRegionAvail().x - 8.0F) / 2.0F;
+    if (ImGui::Button("Reset", ImVec2(half, 0))) {
+        syncTransformBuffers(state);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save Zone", ImVec2(-1, 0))) {
+        try {
+            saveStage(state);
+        } catch (const std::exception& error) {
+            pushToast(state, error.what(), true);
+        }
+    }
+    if (state.unsaved) {
+        ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "* Unsaved changes");
+    }
+    ImGui::End();
+}
+
+// Keeps the hosted WGL viewport child window aligned with its docked ImGui
+// window. The viewport handles its own input, so ImGui never sees mouse events
+// while the cursor is over it (exactly what a 3D viewport needs).
+void placeViewportChild(EditorState& state) {
+    if (!state.viewportReady) {
+        return;
+    }
+    if (!ImGui::Begin("Viewport")) {
+        ImGui::End();
+        return;
+    }
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 size = ImGui::GetContentRegionAvail();
+    ImGui::End();
+    if (size.x < 8 || size.y < 8) {
+        return;
+    }
+    const int x = static_cast<int>(origin.x);
+    const int y = static_cast<int>(origin.y);
+    const int w = static_cast<int>(size.x);
+    const int h = static_cast<int>(size.y);
+    RECT existing{};
+    if (GetWindowRect(state.viewport.handle(), &existing)) {
+        if (existing.left != x || existing.top != y ||
+            existing.right - existing.left != w || existing.bottom - existing.top != h) {
+            MoveWindow(state.viewport.handle(), x, y, w, h, TRUE);
+        }
+    }
+}
+
+void drawToasts(EditorState& state) {
+    const double now = ImGui::GetTime();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    float y = viewport->WorkPos.y + viewport->WorkSize.y - 48.0F;
+    for (std::size_t i = state.toasts.size(); i-- > 0;) {
+        const auto& toast = state.toasts[i];
+        const double age = now - toast.born;
+        if (age > 4.0) {
+            state.toasts.erase(state.toasts.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        const float alpha = static_cast<float>(
+            age < 3.5 ? 1.0 : 1.0 - (age - 3.5) / 0.5);
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 16.0F, y),
+                                ImGuiCond_Always, ImVec2(1.0F, 0.0F));
+        ImGui::SetNextWindowBgAlpha(0.90F * alpha);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+                                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
+                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                       ImGuiWindowFlags_AlwaysAutoResize |
+                                       ImGuiWindowFlags_NoFocusOnAppearing;
+        char title[16];
+        std::snprintf(title, sizeof(title), "##toast%zu", i);
+        if (ImGui::Begin(title, nullptr, flags)) {
+            if (toast.error) {
+                ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.45F, alpha), "%s", toast.text.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(0.31F, 0.76F, 0.97F, alpha), "%s", toast.text.c_str());
             }
         }
-        if (!opened) {
-            setStatus(*state, "Drag a map archive onto the window, or use File > Open Game Directory.");
+        ImGui::End();
+        y -= ImGui::GetFrameHeight() * 2.2F;
+    }
+}
+
+void drawStatusBar(EditorState& state) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float height = ImGui::GetFrameHeight() + 8.0F;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##statusbar", nullptr, flags)) {
+        if (state.unsaved) {
+            ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "*");
+            ImGui::SameLine();
         }
-        CheckMenuItem(GetMenu(window), kIdShowLabels,
-                      MF_BYCOMMAND | (state->showLabels ? MF_CHECKED : MF_UNCHECKED));
+        ImGui::TextDisabled("%s", state.statusText.c_str());
     }
-        ShowWindow(window, SW_SHOW);
-    UpdateWindow(window);
+    ImGui::End();
+}
 
-    // One-time first-launch splash: appears only the very first time the app
-    // is run for this user (tracked by a marker file in LocalAppData).
-    if (window != nullptr && !hasSeenFirstBoot()) {
-        showFirstBootSplash(window);
+void drawLogWindow(EditorState& state) {
+    if (!ImGui::Begin("Log")) {
+        ImGui::End();
+        return;
+    }
+    if (ImGui::Button("Clear")) {
+        state.logLines.clear();
+    }
+    ImGui::BeginChild("##logscroll");
+    for (const auto& line : state.logLines) {
+        ImGui::TextUnformatted(line.c_str());
+    }
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0F) {
+        ImGui::SetScrollHereY(1.0F);
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+// CHUNK-SENTINEL-1
+
+} // namespace (anonymous: DX11 plumbing, EditorState, panel drawing)
+
+// ---- Desktop editor entry point ----
+// Called by runCli("gui") and winmain.cpp. Hosts the full ImGui + Win32 + DX11
+// desktop editor loop.
+
+int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::path& initialFile);
+
+// Forward declaration: WndProc is defined after runGui.
+LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+
+// ---- Desktop editor entry point ----
+// Called by runCli("gui") and winmain.cpp. Hosts the full ImGui + Win32 + DX11
+// desktop editor loop.
+
+int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::path& initialFile) {
+    using namespace whitehole::app;
+
+    Settings settings;
+    settings.load();
+    const float dpiScale = dpiScaleFactor();
+    // NOTE: applyWhiteholeTheme must NOT be called here — it needs an ImGui
+    // context (created below). Calling ImGui::GetStyle() with no context is a
+    // null-pointer crash that silently kills the app on boot (WIN32 subsystem
+    // shows no console). Theme is applied after CreateContext instead.
+
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+
+    // --- Register window class ---
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(101));
+    if (wc.hIcon == nullptr) {
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    wc.lpszClassName = L"WhiteholePro";
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    if (!RegisterClassExW(&wc)) {
+        showBootError(L"Could not register the WhiteholePro window class.");
+        return 1;
     }
 
-    MSG message;
-    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+    // --- Create main window ---
+    HWND hwnd = CreateWindowExW(0, L"WhiteholePro", L"Whitehole Pro",
+                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
+                                nullptr, nullptr, instance, nullptr);
+    if (!hwnd) {
+        showBootError(L"Could not create the main editor window.");
+        return 1;
     }
-    CoUninitialize();
-    return static_cast<int>(message.wParam);
+    ShowWindow(hwnd, SW_SHOWDEFAULT);
+    UpdateWindow(hwnd);
+
+    // --- Init D3D11 + ImGui ---
+    if (!createDeviceD3D(hwnd)) {
+        cleanupDeviceD3D();
+        DestroyWindow(hwnd);
+        // createDeviceD3D already showed the HRESULT dialog.
+        return 1;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    applyWhiteholeTheme(settings.darkMode, dpiScale);
+
+    ImGui_ImplWin32_Init(hwnd);
+    ImGui_ImplDX11_Init(g_device, g_context);
+
+    // --- Editor state ---
+    EditorState state;
+    state.settings = settings;
+    state.window = hwnd;
+
+    // --- Load initial file if provided ---
+    if (!initialFile.empty()) {
+        try {
+            if (std::filesystem::is_directory(initialFile)) {
+                state.game.emplace(initialFile);
+                if (state.game->gameType() == 0) {
+                    state.game.reset();
+                    pushToast(state, "That folder is not an SMG1/SMG2 workspace.", true);
+                } else {
+                    state.galaxies = state.game->galaxies();
+                    state.zones = state.game->zones();
+                    state.settings.lastGameDir = initialFile.string();
+                    state.settings.save();
+                    pushToast(state, "Opened SMG" + std::to_string(state.game->gameType()) +
+                                    " workspace with " + std::to_string(state.galaxies.size()) + " galaxies.");
+                }
+            } else {
+                openMap(state, initialFile);
+            }
+        } catch (const std::exception& e) {
+            pushToast(state, e.what(), true);
+        }
+    }
+
+    // --- Main message loop ---
+    MSG msg{};
+    bool done = false;
+    while (!done) {
+        // Pump Win32 messages
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                done = true;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (done) break;
+
+        // Start ImGui frame
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        // Dockspace
+        ImGuiID dockSpaceId = ImGui::GetID("WhiteholeDockSpace");
+        ImGui::DockSpace(dockSpaceId, ImVec2(0.0F, 0.0F), ImGuiDockNodeFlags_PassthruCentralNode);
+
+        // --- Panels ---
+        drawGalaxyZonePanel(state);
+        drawObjectsPanel(state);
+        drawPropertiesPanel(state);
+        drawToasts(state);
+        drawStatusBar(state);
+
+        // --- Rendering ---
+        ImGui::Render();
+        const float clearColor[4] = {0.11f, 0.11f, 0.12f, 1.0f};
+
+        g_context->OMSetRenderTargets(1, &g_renderTarget, nullptr);
+        g_context->ClearRenderTargetView(g_renderTarget, clearColor);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+            ImGui::UpdatePlatformWindows();
+            ImGui::RenderPlatformWindowsDefault();
+        }
+
+        g_swapChain->Present(1, 0); // VSync
+    }
+
+    // --- Cleanup ---
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    cleanupDeviceD3D();
+    DestroyWindow(hwnd);
+
+    state.settings.save();
+    return 0;
+}
+
+// ---- Window procedure ----
+// Handles Win32 messages forwarded to ImGui, plus resize/backbuffer recreation
+// and window destruction.
+
+LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam)) {
+        return 1;
+    }
+    switch (message) {
+        case WM_SIZE:
+            if (g_swapChain != nullptr) {
+                cleanupRenderTarget();
+                g_swapChain->ResizeBuffers(0, static_cast<UINT>(LOWORD(lParam)), static_cast<UINT>(HIWORD(lParam)),
+                                           DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+                createRenderTarget();
+            }
+            return 0;
+        case WM_DESTROY:
+            cleanupDeviceD3D();
+            PostQuitMessage(0);
+            return 0;
+        case WM_DPICHANGED:
+            if (g_swapChain != nullptr) {
+                cleanupRenderTarget();
+                const RECT* rect = reinterpret_cast<RECT*>(lParam);
+                g_swapChain->ResizeBuffers(0, static_cast<UINT>(rect->right - rect->left),
+                                           static_cast<UINT>(rect->bottom - rect->top),
+                                           DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+                createRenderTarget();
+            }
+            return 0;
+        case WM_CREATE:
+            DragAcceptFiles(window, TRUE);
+            return 0;
+        case WM_DROPFILES: {
+            wchar_t buffer[MAX_PATH];
+            if (DragQueryFileW(reinterpret_cast<HDROP>(wParam), 0, buffer, MAX_PATH) > 0) {
+                DragFinish(reinterpret_cast<HDROP>(wParam));
+                const std::filesystem::path dropped = buffer;
+                if (std::filesystem::exists(dropped)) {
+                    MessageBoxW(window,
+                                (utf8ToWide(dropped.string())).c_str(),
+                                L"Whitehole Pro", MB_OK | MB_ICONINFORMATION);
+                }
+            }
+            return 0;
+        }
+        default:
+            return DefWindowProcW(window, message, wParam, lParam);
+    }
 }
 
 } // namespace whitehole::app

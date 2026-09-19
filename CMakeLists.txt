@@ -110,7 +110,7 @@ endif()
 add_library(whitehole_win32 INTERFACE)
 if(WHITEHOLE_HAVE_WIN32_GUI)
     target_compile_definitions(whitehole_win32 INTERFACE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(whitehole_win32 INTERFACE comctl32 ole32 uuid shell32 comdlg32 opengl32 gdi32 winhttp)
+    target_link_libraries(whitehole_win32 INTERFACE comctl32 ole32 uuid shell32 comdlg32 opengl32 gdi32 winhttp d3d11 dxgi dwmapi d3dcompiler)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Application objects shared by both executables (compiled only once)
 # ---------------------------------------------------------------------------
-set(WHITEHOLE_GUI_SOURCE cpp/src/app/gui_win32.cpp cpp/src/render/viewport_win32.cpp)
+set(WHITEHOLE_GUI_SOURCE cpp/src/app/gui_win32.cpp cpp/src/app/gui_theme.cpp cpp/src/render/viewport_win32.cpp)
 if(NOT WHITEHOLE_HAVE_WIN32_GUI)
     set(WHITEHOLE_GUI_SOURCE cpp/src/app/gui_stub.cpp)
 endif()
@@ -155,6 +155,11 @@ add_library(whitehole_app OBJECT
     ${WHITEHOLE_GUI_SOURCE}
 )
 target_link_libraries(whitehole_app PRIVATE whitehole_core whitehole_win32)
+if(WHITEHOLE_HAVE_WIN32_GUI)
+    # The ImGui-backed GUI lives in the shared app objects, so both executables
+    # need the vendored Dear ImGui static library on the link line.
+    target_link_libraries(whitehole_app PRIVATE whitehole_imgui)
+endif()
 target_compile_definitions(whitehole_app PRIVATE
     WHITEHOLE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
@@ -207,6 +212,9 @@ endfunction()
 # ---------------------------------------------------------------------------
 add_executable(whitehole-pro-console cpp/src/main.cpp $<TARGET_OBJECTS:whitehole_app>)
 target_link_libraries(whitehole-pro-console PRIVATE whitehole_core whitehole_win32)
+if(WHITEHOLE_HAVE_WIN32_GUI)
+    target_link_libraries(whitehole-pro-console PRIVATE whitehole_imgui)
+endif()
 if(MSVC)
     target_compile_options(whitehole-pro-console PRIVATE /utf-8)
 endif()
@@ -224,7 +232,7 @@ endif()
 # ---------------------------------------------------------------------------
 if(WHITEHOLE_HAVE_WIN32_GUI AND WHITEHOLE_BUILD_GUI)
     add_executable(whitehole-pro WIN32 cpp/src/winmain.cpp $<TARGET_OBJECTS:whitehole_app>)
-    target_link_libraries(whitehole-pro PRIVATE whitehole_core whitehole_win32)
+    target_link_libraries(whitehole-pro PRIVATE whitehole_core whitehole_win32 whitehole_imgui)
     if(NOT MSVC)
         # GNU toolchains need this to accept the wWinMain entry point.
         target_link_options(whitehole-pro PRIVATE -municode)

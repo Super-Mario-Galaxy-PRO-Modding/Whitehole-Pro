@@ -1,8 +1,0 @@
-﻿
-FullName                                                                           Length LastWriteTime        
---------                                                                           ------ -------------        
-C:\Users\conta\Documents\GitHub\Whitehole-Pro\cpp\src\app\cli.cpp                   17761 9/19/2026 11:53:02 AM
-C:\Users\conta\Documents\GitHub\Whitehole-Pro\cpp\src\app\cli.cpp.tmp               16343 9/19/2026 7:43:45 AM 
-C:\Users\conta\Documents\GitHub\Whitehole-Pro\cpp\src\render\object_visual.cpp.bak   9517 9/18/2026 6:21:09 PM 
-
-

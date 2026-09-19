@@ -1,7 +1,0 @@
-﻿C:\Program Files\Git\cmd\git.exe : True
-C:\Program Files (x86)\Git\cmd\git.exe : False
-C:\Users\conta\AppData\Local\Programs\Git\cmd\git.exe : False
-cmake: C:\Program Files\CMake\bin\cmake.exe
-ninja: 
-g++: 
-cl: 

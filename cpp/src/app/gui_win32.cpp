@@ -14,6 +14,7 @@
 #include "whitehole/app/application.hpp"
 
 #include "whitehole/app/gui_theme.hpp"
+#include "whitehole/app/theme_palette.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
@@ -776,6 +777,13 @@ ImVec4 categoryColor(const smg::PlacementObject& object) {
     return ImVec4(style.color[0], style.color[1], style.color[2], 1.0F);
 }
 
+// The palette is the source of truth for every colour the UI paints by hand.
+// ImGui's text helpers want an ImVec4, so the conversion lives in exactly one
+// place and no call site invents a colour of its own.
+ImVec4 toImVec4(const Rgba& color) {
+    return ImVec4(color.r, color.g, color.b, color.a);
+}
+
 void drawGalaxyZonePanel(EditorState& state) {
     if (!state.showProject) {
         return;
@@ -1038,7 +1046,8 @@ void drawPropertiesPanel(EditorState& state) {
         ImGui::SetTooltip("Write the zone back to disk  (Ctrl+S)");
     }
     if (state.unsaved) {
-        ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "* Unsaved changes");
+        ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved),
+                           "* Unsaved changes");
     }
     ImGui::End();
 }
@@ -1367,11 +1376,11 @@ void drawToasts(EditorState& state) {
         char title[16];
         std::snprintf(title, sizeof(title), "##toast%zu", i);
         if (ImGui::Begin(title, nullptr, flags)) {
-            if (toast.error) {
-                ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.45F, alpha), "%s", toast.text.c_str());
-            } else {
-                ImGui::TextColored(ImVec4(0.31F, 0.76F, 0.97F, alpha), "%s", toast.text.c_str());
-            }
+            // Fade with the toast, but keep the palette's ink so both themes
+            // stay readable -- the old hard-coded red was 2.65:1 on white.
+            const Palette& palette = themePalette(state.settings.darkMode);
+            const Rgba& ink = toast.error ? palette.error : palette.accentFg;
+            ImGui::TextColored(ImVec4(ink.r, ink.g, ink.b, alpha), "%s", toast.text.c_str());
         }
         ImGui::End();
         y -= ImGui::GetFrameHeight() * 2.2F;
@@ -1436,7 +1445,7 @@ void drawStatusBar(EditorState& state) {
     ImGui::Dummy(ImVec2(8.0F, 0.0F));
     ImGui::SameLine();
     if (state.unsaved) {
-        ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "*");
+        ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved), "*");
         ImGui::SameLine();
     }
     ImGui::TextUnformatted(state.statusText.c_str());
@@ -1794,7 +1803,7 @@ void drawStaleStatusBar(EditorState& state) {
                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav;
     if (ImGui::Begin("##statusbar", nullptr, flags)) {
         if (state.unsaved) {
-            ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "*");
+            ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved), "*");
             ImGui::SameLine();
         }
         ImGui::TextDisabled("%s", state.statusText.c_str());

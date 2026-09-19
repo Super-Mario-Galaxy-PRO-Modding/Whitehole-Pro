@@ -60,6 +60,7 @@ add_library(whitehole_core
     cpp/src/db/shortcuts.cpp
     cpp/src/db/modelsubstitutions.cpp
     cpp/src/db/specialrenderers.cpp
+    cpp/src/app/theme_palette.cpp
     cpp/src/edit/commands.cpp
     cpp/src/edit/document.cpp
     cpp/src/edit/undo.cpp

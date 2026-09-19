@@ -1,4 +1,5 @@
 ﻿#include "whitehole/app/settings.hpp"
+#include "whitehole/app/theme_palette.hpp"
 #include "whitehole/db/data_holder.hpp"
 #include "whitehole/db/name_table.hpp"
 #include "whitehole/db/hints.hpp"
@@ -2165,6 +2166,111 @@ void testModelLibrary() {
 }
 } // namespace
 
+// The theme is data, so it can be checked instead of eyeballed. Every contrast
+// bug this file has had was invisible to the compiler and only surfaced as "I
+// can't read this", so the palette now carries its own guard.
+//
+// Two deliberate choices keep this honest rather than mechanical. Disabled ink
+// is checked on *rest* surfaces only, because ImGui never applies the hovered
+// or pressed frame colours to a disabled item. Decorative accent is checked
+// against the 3.0 guideline, but only on rest surfaces for the same reason:
+// there is deliberately no bright-azure escape hatch for small controls.
+void testThemeContrast() {
+    using whitehole::app::blend;
+    using whitehole::app::contrastRatio;
+    using whitehole::app::kGlyphContrastMinimum;
+    using whitehole::app::kTextContrastMinimum;
+    using whitehole::app::Palette;
+    using whitehole::app::Rgba;
+    using whitehole::app::themePalette;
+
+    struct Surface {
+        const char* name;
+        const Rgba* color;
+    };
+
+    for (int theme = 0; theme < 2; ++theme) {
+        const bool dark = theme == 0;
+        const std::string label = dark ? "dark" : "light";
+        const Palette& p = themePalette(dark);
+
+        // Body text can land anywhere, so it covers the full surface set; every
+        // other role sticks to the rest surfaces it actually appears on.
+        const Surface all[] = {
+            {"windowBg", &p.windowBg},       {"panelBg", &p.panelBg},
+            {"frameBg", &p.frameBg},         {"frameHover", &p.frameHover},
+            {"frameActive", &p.frameActive}, {"header", &p.header},
+            {"headerHover", &p.headerHover}, {"headerActive", &p.headerActive},
+            {"tabSelected", &p.tabSelected},
+        };
+        const Surface rest[] = {
+            {"windowBg", &p.windowBg}, {"panelBg", &p.panelBg},
+            {"frameBg", &p.frameBg},   {"header", &p.header},
+            {"tabSelected", &p.tabSelected},
+        };
+
+        // Collected rather than asserted one by one: expect() throws, so the
+        // first failure would hide every other one in the same theme.
+        std::vector<std::string> failures;
+        const auto check = [&](const Rgba& fg, const Rgba& bg, double minimum,
+                               const char* what, const char* where) {
+            const double ratio = std::round(contrastRatio(fg, bg) * 100.0) / 100.0;
+            if (ratio < minimum) {
+                failures.push_back(std::string(what) + " on " + where + " is " +
+                                   std::to_string(ratio) + ":1");
+            }
+        };
+
+        for (const auto& surface : all) {
+            check(p.text, *surface.color, kTextContrastMinimum, "body text", surface.name);
+            // mix() in gui_theme.cpp already pulls hovered/pressed surfaces 25-35%
+            // toward this ink, so only test it where it is painted directly; the
+            // mixed backgrounds hold the same floor through the blend.
+            if (surface.color == &p.windowBg || surface.color == &p.panelBg ||
+                surface.color == &p.tabSelected) {
+                check(p.accent, *surface.color, kGlyphContrastMinimum, "accent decoration",
+                      surface.name);
+            }
+        }
+        for (const auto& surface : rest) {
+            // Decoration sits on the rest surfaces above and on the chrome surfaces
+            // tested above; pressed-control accents come from the same deep tone,
+            // which clears 3.0 everywhere.
+            check(p.accent, *surface.color, kGlyphContrastMinimum, "accent decoration",
+                  surface.name);
+            check(p.textDim, *surface.color, kTextContrastMinimum, "secondary text",
+                  surface.name);
+            check(blend(p.textDim, *surface.color, p.disabledAlpha), *surface.color,
+                  kTextContrastMinimum, "disabled text", surface.name);
+            // Glyph roles: check marks, links, slider grabs.
+            check(p.accentFg, *surface.color, kTextContrastMinimum, "accent glyph",
+                  surface.name);
+        }
+        // The unsaved marker is drawn on the tab strip and in the status bar.
+        check(p.unsaved, p.tabSelected, kTextContrastMinimum, "unsaved marker", "tabSelected");
+        check(p.unsaved, p.windowBg, kTextContrastMinimum, "unsaved marker", "windowBg");
+        check(p.unsaved, p.panelBg, kTextContrastMinimum, "unsaved marker", "panelBg");
+        // Error copy is drawn in a popup or over a panel.
+        check(p.error, p.panelBg, kTextContrastMinimum, "error text", "panelBg");
+        check(p.error, p.windowBg, kTextContrastMinimum, "error text", "windowBg");
+
+        std::string joined;
+        for (const auto& failure : failures) {
+            if (!joined.empty()) {
+                joined += "; ";
+            }
+            joined += failure;
+        }
+        expect(failures.empty(), label + " theme contrast: " + joined);
+
+        // The palette has to actually de-emphasise, or "dim" means nothing.
+        expect(contrastRatio(p.text, p.panelBg) > contrastRatio(p.textDim, p.panelBg),
+               label + " theme: secondary text is not dimmer than body text");
+        expect(p.disabledAlpha > 0.60F,
+               label + " theme: disabledAlpha is still at ImGui's failing default");
+    }
+}
+
 int main() {
     try {
         testBinaryData();
@@ -2192,6 +2298,7 @@ int main() {
         testModelLibrary();
         testJsonRoundTrip();
         testSettingsRoundTrip();
+        testThemeContrast();
         testObjectDatabase();
         testObjectDatabaseV2();
         testObjectDatabaseCache();

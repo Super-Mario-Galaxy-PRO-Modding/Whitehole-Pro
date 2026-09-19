@@ -68,7 +68,78 @@ void drawTriangles(const std::vector<math::Vec3f>& triangles) {
     glEnd();
 }
 
+// Cap on cached model display lists. Two lists per mesh (shaded + plain) keep
+// even a fully modelled zone well inside this budget; the oldest entries are
+// evicted FIFO, and expired entries are pruned whenever new ones arrive.
+constexpr std::size_t kMaxModelListEntries = 128;
+
 } // namespace
+
+void ViewportWindow::drawModelTriangles(const ModelMesh& mesh, bool bakeColors) {
+    glBegin(GL_TRIANGLES);
+    for (const auto& triangle : mesh.triangles) {
+        if (bakeColors) {
+            glColor4f(triangle.color[0], triangle.color[1], triangle.color[2], triangle.color[3]);
+        }
+        const ModelVertex* vertices[3] = {&triangle.a, &triangle.b, &triangle.c};
+        for (const ModelVertex* vertex : vertices) {
+            glNormal3f(vertex->normal.x, vertex->normal.y, vertex->normal.z);
+            glVertex3f(vertex->position.x, vertex->position.y, vertex->position.z);
+        }
+    }
+    glEnd();
+}
+
+unsigned int ViewportWindow::modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain) {
+    for (auto& entry : modelLists_) {
+        if (entry.mesh.expired()) {
+            continue;
+        }
+        if (entry.mesh.lock() != mesh) {
+            continue;
+        }
+        unsigned int& list = plain ? entry.plain : entry.shaded;
+        if (list == 0) {
+            list = glGenLists(1);
+            if (list != 0) {
+                glNewList(list, GL_COMPILE);
+                drawModelTriangles(*mesh, !plain);
+                glEndList();
+            }
+        }
+        return list;
+    }
+
+    pruneModelLists();
+    ModelListEntry entry;
+    entry.mesh = mesh;
+    unsigned int& list = plain ? entry.plain : entry.shaded;
+    list = glGenLists(1);
+    if (list != 0) {
+        glNewList(list, GL_COMPILE);
+        drawModelTriangles(*mesh, !plain);
+        glEndList();
+    }
+    modelLists_.push_back(std::move(entry));
+    return list;
+}
+
+void ViewportWindow::pruneModelLists() noexcept {
+    // Drop entries whose mesh was evicted from the scene (weak_ptr expired) so
+    // stale display lists cannot leak; then apply the FIFO cap.
+    modelLists_.erase(std::remove_if(modelLists_.begin(), modelLists_.end(),
+                                     [](const ModelListEntry& entry) { return entry.mesh.expired(); }),
+                      modelLists_.end());
+    while (modelLists_.size() >= kMaxModelListEntries) {
+        if (modelLists_.front().shaded != 0) {
+            glDeleteLists(modelLists_.front().shaded, 1);
+        }
+        if (modelLists_.front().plain != 0) {
+            glDeleteLists(modelLists_.front().plain, 1);
+        }
+        modelLists_.erase(modelLists_.begin());
+    }
+}
 
 ViewportWindow::ViewportWindow() = default;
 ViewportWindow::~ViewportWindow() {
@@ -325,6 +396,21 @@ bool ViewportWindow::initGL() {
 
 void ViewportWindow::shutdownGL() noexcept {
     if (glContext_ != nullptr) {
+        // Display lists belong to the context; delete them while it is still
+        // current instead of leaking them until the driver reclaims the
+        // context itself.
+        if (device_ != nullptr) {
+            wglMakeCurrent(device_, glContext_);
+        }
+        for (const auto& entry : modelLists_) {
+            if (entry.shaded != 0) {
+                glDeleteLists(entry.shaded, 1);
+            }
+            if (entry.plain != 0) {
+                glDeleteLists(entry.plain, 1);
+            }
+        }
+        modelLists_.clear();
         wglMakeCurrent(nullptr, nullptr);
         wglDeleteContext(glContext_);
         glContext_ = nullptr;
@@ -359,6 +445,11 @@ void ViewportWindow::paint() {
         glLightfv(GL_LIGHT0, GL_POSITION, position);
         glShadeModel(GL_FLAT);
         glEnable(GL_DEPTH_TEST);
+        // Non-uniform object scales need normalisation so the fixed-function
+        // pipeline renormalises the inverse-transpose-transformed normals
+        // (display lists bake the normals, not the transform).
+        glEnable(GL_NORMALIZE);
+        pruneModelLists();
         for (const auto& box : scene_.boxes()) {
             const bool selected = selected_.has_value() && *selected_ == box.objectIndex;
             const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
@@ -423,6 +514,40 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
 }
 
 void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hovered) {
+    // Real game model path: the BMD triangles are drawn from a cached display
+    // list under the object's placement transform. Smooth vertex normals +
+    // material diffuse colors make the model read like the game's own render.
+    if (box.model != nullptr && !box.model->empty()) {
+        glPushMatrix();
+        glMultMatrixf(box.world.values.data());
+        glShadeModel(GL_SMOOTH);
+        if (selected || hovered) {
+            // Tinted pass: the plain list (no baked colors) with one highlight
+            // color, so a highlighted object is unmistakable at any zoom.
+            if (selected) {
+                glColor3f(1.0F, 0.85F, 0.20F);
+            } else {
+                glColor3f(0.55F, 0.80F, 1.0F);
+            }
+            const unsigned int list = modelDisplayList(box.model, true);
+            if (list != 0) {
+                glCallList(list);
+            } else {
+                drawModelTriangles(*box.model, false);
+            }
+        } else {
+            const unsigned int list = modelDisplayList(box.model, false);
+            if (list != 0) {
+                glCallList(list);
+            } else {
+                drawModelTriangles(*box.model, true);
+            }
+        }
+        glShadeModel(GL_FLAT);
+        glPopMatrix();
+        return;
+    }
+
     const CategoryStyle& style = categoryStyle(box.category);
     // Selection/hover tint the category color (instead of replacing it) so
     // the category stays readable while the object is clearly highlighted.

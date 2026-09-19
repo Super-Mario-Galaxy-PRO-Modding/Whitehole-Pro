@@ -1,0 +1,38 @@
+﻿6:#include "whitehole/edit/commands.hpp"
+79:int archiveCommand(int argc, char** argv) {
+115:int yaz0Command(int argc, char** argv) {
+132:int bcsvCommand(int argc, char** argv) {
+173:int gameCommand(int argc, char** argv) {
+193:int galaxyCommand(int argc, char** argv) {
+214:int zoneCommand(int argc, char** argv) {
+223:int mapCommand(int argc, char** argv) {
+231:int objectDbCommand(int argc, char** argv) {
+322:// Allow a global --json flag before the command so scripts can request
+323:// JSON output without per-command flag churn. The flag is consumed here
+324:// and the sub-commands receive a clean argv that still starts with the
+341:// Build argv for sub-commands: argv[0] is the program name, argv[1] is
+342:// the command name, followed by the command-specific arguments.
+349:const std::string command = subArgv[1];
+350:if (command == "--help" || command == "-h") {
+354:if (command == "gui") {
+357:if (command == "archive") {
+358:return archiveCommand(effectiveArgc, subArgv);
+360:if (command == "yaz0") {
+361:return yaz0Command(effectiveArgc, subArgv);
+363:if (command == "bcsv") {
+364:return bcsvCommand(effectiveArgc, subArgv);
+366:if (command == "game") {
+367:return gameCommand(effectiveArgc, subArgv);
+369:if (command == "galaxy") {
+370:return galaxyCommand(effectiveArgc, subArgv);
+372:if (command == "zone") {
+373:return zoneCommand(effectiveArgc, subArgv);
+375:if (command == "map") {
+376:return mapCommand(effectiveArgc, subArgv);
+378:if (command == "objectdb") {
+379:return objectDbCommand(effectiveArgc, subArgv);
+381:if (command == "hash") {
+390:throw std::runtime_error("Unknown command: " + command);
+62:<< "  whitehole-pro-console objectdb query <object-name> [--data <directory>]\n"
+63:<< "  whitehole-pro-console map params <archive.arc> <object> [--game 1|2]\n"
+68:<< "  whitehole-pro-console zone set <game-directory> <galaxy> <zone> <object> <field> <value> [--game 1|2]\n"

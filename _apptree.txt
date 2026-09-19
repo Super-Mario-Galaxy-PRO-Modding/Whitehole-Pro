@@ -1,0 +1,6 @@
+﻿100644 blob caacd7c8091da292bae8536390289e522227075b   17694	cpp/src/app/cli.cpp
+100644 blob dffd1370c87385f9424aa8ee94b7fde5ced85688   16343	cpp/src/app/cli.cpp.tmp
+100644 blob 667b83003718ef4bd5492ec97e9b917597c55fc5     464	cpp/src/app/gui_stub.cpp
+100644 blob 84ee8f5b51a8973640f4ea420b1eacfeb95abc73   43551	cpp/src/app/gui_win32.cpp
+100644 blob 297dca16110e57d3e1d8b5e4245a95e046d2f38a    6401	cpp/src/app/object_db_update.cpp
+100644 blob 267ea51207f79972558fb73b506ce58054741372    4535	cpp/src/app/settings.cpp

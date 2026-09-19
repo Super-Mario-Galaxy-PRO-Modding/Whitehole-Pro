@@ -71,6 +71,7 @@ add_library(whitehole_core
     cpp/src/render/camera.cpp
     cpp/src/render/object_visual.cpp
     cpp/src/render/model_mesh.cpp
+    cpp/src/render/model_library.cpp
     cpp/src/render/viewport_scene.cpp
     cpp/src/smg/bcsv.cpp
     cpp/src/smg/field_hashes.cpp

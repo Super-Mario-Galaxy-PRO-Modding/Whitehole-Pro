@@ -1,0 +1,24 @@
+﻿
+LineNumber Line                                         
+---------- ----                                         
+         1 #include "whitehole/app/application.hpp"     
+         2 #include "whitehole/app/settings.hpp"        
+         3 #include "whitehole/app/object_db_update.hpp"
+         5 #include "whitehole/db/object_db.hpp"        
+         6 #include "whitehole/io/binary_file.hpp"      
+         7 #include "whitehole/io/rarc.hpp"             
+         8 #include "whitehole/io/yaz0.hpp"             
+         9 #include "whitehole/smg/bcsv.hpp"            
+        10 #include "whitehole/smg/field_hashes.hpp"    
+        11 #include "whitehole/smg/game_archive.hpp"    
+        12 #include "whitehole/smg/hash.hpp"            
+        13 #include "whitehole/smg/stage_archive.hpp"   
+        15 #include <chrono>                            
+        16 #include <iomanip>                           
+        17 #include <iostream>                          
+        18 #include <stdexcept>                         
+        19 #include <string>                            
+        24 bool g_json = false;                         
+       378             g_json = true;                   
+
+

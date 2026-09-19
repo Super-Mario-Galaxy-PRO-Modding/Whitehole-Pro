@@ -15,8 +15,10 @@
 
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
+#include "whitehole/db/modelsubstitutions.hpp"
 #include "whitehole/db/name_table.hpp"
 #include "whitehole/db/object_db.hpp"
+#include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/util/json.hpp"
 #include "whitehole/util/text.hpp"
@@ -219,6 +221,8 @@ struct EditorState {
     db::NameTable galaxyNames;
     db::NameTable zoneNames;
     db::ObjectDatabase objectDb;
+    db::ModelSubstitutions modelSubstitutions;
+    render::ModelLibrary modelLibrary;
     Settings settings;
     std::optional<smg::GameArchive> game;
     std::vector<std::string> galaxies;
@@ -447,12 +451,30 @@ void rememberMap(EditorState& state, const std::filesystem::path& path) {
 void showObject(EditorState& state, int index);
 void syncViewportSelection(EditorState& state, std::optional<std::size_t> selected);
 
+// Status suffix describing how many objects got real game models vs. kept the
+// placeholder shape in the last viewport rebuild (empty when no game models
+// are available, e.g. a map archive opened without a game directory).
+std::string modelStatusSuffix(EditorState& state) {
+    if (!state.modelLibrary.bound() || !state.stage) {
+        return "";
+    }
+    return " \u2014 game models shown: " + std::to_string(state.modelLibrary.loadedCount()) +
+           ", placeholder: " + std::to_string(state.modelLibrary.missingCount());
+}
+
 void refreshViewport(EditorState& state, bool frame) {
     if (!state.viewportReady) {
         return;
     }
     if (state.stage) {
-        state.viewportScene.rebuild(state.stage->objects());
+        // Game models come from the open workspace's ObjectData archives; a
+        // standalone map archive without one keeps the placeholder shapes.
+        if (state.modelLibrary.bound()) {
+            state.modelLibrary.resetCounters();
+            state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary);
+        } else {
+            state.viewportScene.rebuild(state.stage->objects());
+        }
     } else {
         state.viewportScene.clear();
     }
@@ -549,15 +571,22 @@ void openMap(EditorState& state, const std::filesystem::path& path) {
     syncViewportSelection(state, std::nullopt);
     refreshViewport(state, true);
     rememberMap(state, path);
-    setStatus(state, "Opened map archive with " + std::to_string(state.stage->objects().size()) + " objects.");
+    // A game directory (if one is open) still supplies the ObjectData models.
+    setStatus(state, "Opened map archive with " + std::to_string(state.stage->objects().size()) + " objects." +
+                         modelStatusSuffix(state));
 }
 
 void openGame(EditorState& state, const std::filesystem::path& path) {
     state.game.emplace(path);
     if (state.game->gameType() == 0) {
         state.game.reset();
+        state.modelLibrary.bind(nullptr);
         throw std::runtime_error("That folder is not an SMG1/SMG2 workspace");
     }
+    // ObjectData model archives live in the game workspace; bind them so the
+    // viewport can show the real BMD models.
+    state.modelLibrary.bind(&state.game->filesystem());
+    state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
     state.galaxies = state.game->galaxies();
     state.zones = state.game->zones();
     state.stage.reset();
@@ -598,7 +627,8 @@ void selectZone(EditorState& state) {
     syncViewportSelection(state, std::nullopt);
     refreshViewport(state, true);
     if (state.stage) {
-        setStatus(state, "Loaded " + zone + " (" + std::to_string(state.stage->objects().size()) + " objects).");
+        setStatus(state, "Loaded " + zone + " (" + std::to_string(state.stage->objects().size()) + " objects)." +
+                             modelStatusSuffix(state));
     }
 }
 
@@ -913,6 +943,16 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         }
         state->objectDb.load(objectDbPath,
                              Settings::defaultConfigPath().parent_path() / "objectdb.cache");
+        // Model name substitutions (data/modelsubstitutions.json) feed the
+        // viewport's BMD model lookup; missing file just means no aliases.
+        try {
+            state->modelSubstitutions.setBaseGameRoot(state->dataRoot);
+            state->modelSubstitutions.initBaseGame();
+            state->modelSubstitutions.load();
+        } catch (...) {
+        }
+        state->modelLibrary.setSubstitutions(&state->modelSubstitutions);
+        state->modelLibrary.setLowPoly(state->settings.lowPolyModels);
         rebuildRecentMenu(*state);
         applyTheme(*state);
         if (!state->settings.lastGameDir.empty() && initialFile.empty() &&

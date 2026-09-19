@@ -1,0 +1,45 @@
+﻿76966ec sy24 the movie
+
+M	cpp/src/app/cli.cpp
+A	cpp/src/app/cli.cpp.tmp
+M	cpp/src/app/gui_win32.cpp
+1bdc1d7 Clean up loose ends: restore viewport labels feature, drop scratch files
+
+M	cpp/src/app/gui_win32.cpp
+72d1b8b I am more ruan than jager
+
+M	cpp/src/app/gui_win32.cpp
+c7f6972 Eat it up pt.2 the OM-ening
+
+M	cpp/src/app/gui_win32.cpp
+59f22f6 Eat it up
+
+M	cpp/src/app/gui_win32.cpp
+5aba857 NEW
+
+M	cpp/src/app/cli.cpp
+M	cpp/src/app/gui_win32.cpp
+A	cpp/src/app/object_db_update.cpp
+d11c291 gyatt
+
+M	cpp/src/app/gui_win32.cpp
+A	cpp/src/app/settings.cpp
+f9c9931 I AM A MONK!
+
+M	cpp/src/app/gui_win32.cpp
+7728bb7 I am more Mr than MrL
+
+M	cpp/src/app/gui_win32.cpp
+c71b1a9 i am more sy than 24
+
+M	cpp/src/app/cli.cpp
+M	cpp/src/app/gui_stub.cpp
+b34b6fa i am more lenz than magnet
+
+M	cpp/src/app/gui_stub.cpp
+M	cpp/src/app/gui_win32.cpp
+bee910c i am more master than luma
+
+A	cpp/src/app/cli.cpp
+A	cpp/src/app/gui_stub.cpp
+A	cpp/src/app/gui_win32.cpp

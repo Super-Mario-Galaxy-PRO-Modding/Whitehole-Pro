@@ -1,0 +1,18 @@
+﻿
+Name              Length
+----              ------
+temp_bcsv_add.cpp   2848
+temp_bcsv_set.cpp   2993
+
+
+
+Name                 Length
+----                 ------
+cli.cpp               17761
+cli.cpp.tmp           16343
+gui_stub.cpp            464
+gui_win32.cpp         45619
+object_db_update.cpp   6401
+settings.cpp           4535
+
+

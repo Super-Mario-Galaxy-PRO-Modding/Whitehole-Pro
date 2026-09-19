@@ -56,6 +56,12 @@ math::Matrix4 placementWorldInverse(const math::Matrix4& world, const math::Vec3
     return inverse;
 }
 
+math::Matrix4 placementRotation(const smg::PlacementObject& object) noexcept {
+    return math::Matrix4::rotationZ(object.rotation.x * kDegreesToRadians) *
+           math::Matrix4::rotationY(object.rotation.y * kDegreesToRadians) *
+           math::Matrix4::rotationX(object.rotation.z * kDegreesToRadians);
+}
+
 } // namespace
 
 math::Matrix4 placementWorldMatrix(const smg::PlacementObject& object) noexcept {
@@ -69,21 +75,56 @@ math::Matrix4 placementWorldMatrix(const smg::PlacementObject& object) noexcept 
     const float visualZ = std::max(std::abs(safeScale.z), kMinVisualScale);
     const math::Matrix4 scaled =
         math::Matrix4::scale({visualX * kPlaceholderHalfExtent, visualY * kPlaceholderHalfExtent, visualZ * kPlaceholderHalfExtent});
-    const math::Matrix4 rotation = math::Matrix4::rotationZ(object.rotation.x * kDegreesToRadians) *
-                                   math::Matrix4::rotationY(object.rotation.y * kDegreesToRadians) *
-                                   math::Matrix4::rotationX(object.rotation.z * kDegreesToRadians);
+    const math::Matrix4 rotation = placementRotation(object);
     return math::Matrix4::translation(object.position) * rotation * scaled;
 }
 
+math::Matrix4 objectWorldMatrix(const smg::PlacementObject& object) noexcept {
+    const math::Vec3f safeScale{std::abs(object.scale.x) > 0.000001F ? object.scale.x : 1.0F,
+                                std::abs(object.scale.y) > 0.000001F ? object.scale.y : 1.0F,
+                                std::abs(object.scale.z) > 0.000001F ? object.scale.z : 1.0F};
+    const math::Matrix4 rotation = placementRotation(object);
+    return math::Matrix4::translation(object.position) * rotation * math::Matrix4::scale(safeScale);
+}
+
+math::Matrix4 objectPickMatrix(const smg::PlacementObject& object, float radius) noexcept {
+    // Wrapping the model's bounding sphere in the same placement transform
+    // gives picking the oriented-box maths it already has, with the unit box
+    // acting as the sphere's proxy.
+    return objectWorldMatrix(object) * math::Matrix4::scale({radius, radius, radius});
+}
+
+float modelPickRadius(const ModelMesh& mesh) noexcept {
+    // Max corner length of the bounding box: the tightest origin-centred
+    // sphere that contains the whole mesh even when it is built off-centre.
+    float radius = 0.0F;
+    if (!mesh.empty()) {
+        const float x[2] = {mesh.boundsMin.x, mesh.boundsMax.x};
+        const float y[2] = {mesh.boundsMin.y, mesh.boundsMax.y};
+        const float z[2] = {mesh.boundsMin.z, mesh.boundsMax.z};
+        for (const float cornerX : x) {
+            for (const float cornerY : y) {
+                for (const float cornerZ : z) {
+                    radius = std::max(radius, math::Vec3f{cornerX, cornerY, cornerZ}.length());
+                }
+            }
+        }
+    }
+    // Degenerate/point models still need to be clickable.
+    return std::max(radius, 1.0F);
+}
+
 std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) noexcept {
-    // The linear part of the placement matrix is S * R, so its row i is exactly
+    // The linear part of the picking matrix is S * R, so its row i is exactly
     // scale[i] * (row i of the rotation). Row lengths therefore recover the
-    // per-axis world scale (including the placeholder half extent) with no
-    // approximation, which is what placementWorldInverse() expects.
-    const math::Vec3f scale{math::Vec3f{box.world.values[0], box.world.values[1], box.world.values[2]}.length(),
-                            math::Vec3f{box.world.values[4], box.world.values[5], box.world.values[6]}.length(),
-                            math::Vec3f{box.world.values[8], box.world.values[9], box.world.values[10]}.length()};
-    const math::Matrix4 inverse = placementWorldInverse(box.world, scale);
+    // per-axis world scale (including the placeholder half extent or a model's
+    // pick radius) with no approximation, which is what placementWorldInverse()
+    // expects.
+    const math::Matrix4& world = box.pickWorld;
+    const math::Vec3f scale{math::Vec3f{world.values[0], world.values[1], world.values[2]}.length(),
+                            math::Vec3f{world.values[4], world.values[5], world.values[6]}.length(),
+                            math::Vec3f{world.values[8], world.values[9], world.values[10]}.length()};
+    const math::Matrix4 inverse = placementWorldInverse(world, scale);
     const math::Vec3f localOrigin = inverse.transformPoint(ray.origin);
     const math::Vec3f localDirection{ray.direction.x * inverse.values[0] + ray.direction.y * inverse.values[4] +
                                          ray.direction.z * inverse.values[8],
@@ -120,7 +161,7 @@ std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) no
     return tMin;
 }
 
-void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects) {
+void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models) {
     boxes_.clear();
     boxes_.reserve(objects.size());
     math::Vec3f sum{0.0F, 0.0F, 0.0F};
@@ -130,17 +171,38 @@ void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects) {
         box.objectIndex = index;
         box.name = object.name;
         box.kind = object.kind;
-        box.world = placementWorldMatrix(object);
-        box.center = object.position;
-        // Extents mirror the visual clamp used by the world matrix so the
-        // frame-all radius and picking agree with what is drawn.
-        const float extent = kPlaceholderHalfExtent *
-                             std::max({std::abs(object.scale.x) > 0.000001F ? std::abs(object.scale.x) : 1.0F,
-                                       std::abs(object.scale.y) > 0.000001F ? std::abs(object.scale.y) : 1.0F,
-                                       std::abs(object.scale.z) > 0.000001F ? std::abs(object.scale.z) : 1.0F,
-                                       kMinVisualScale});
-        box.halfExtents = {extent, extent, extent};
         box.category = classifyObject(object.kind, object.name);
+        box.center = object.position;
+
+        // Real game model when the workspace provides one: drawn at the
+        // object's true scale and picked against its bounding sphere. Missing
+        // models keep the category placeholder box (and its visibility clamp)
+        // so every object stays visible and clickable either way.
+        std::shared_ptr<const ModelMesh> mesh;
+        if (models != nullptr) {
+            mesh = models->model(object.name);
+        }
+        if (mesh != nullptr && !mesh->empty()) {
+            box.model = std::move(mesh);
+            box.world = objectWorldMatrix(object);
+            const float radius = modelPickRadius(*box.model);
+            box.pickWorld = objectPickMatrix(object, radius);
+            box.halfExtents = {radius * std::abs(object.scale.x > 0.000001F ? object.scale.x : 1.0F),
+                               radius * std::abs(object.scale.y > 0.000001F ? object.scale.y : 1.0F),
+                               radius * std::abs(object.scale.z > 0.000001F ? object.scale.z : 1.0F)};
+        } else {
+            box.model.reset();
+            box.world = placementWorldMatrix(object);
+            box.pickWorld = box.world;
+            // Extents mirror the visual clamp used by the world matrix so the
+            // frame-all radius and picking agree with what is drawn.
+            const float extent = kPlaceholderHalfExtent *
+                                 std::max({std::abs(object.scale.x) > 0.000001F ? std::abs(object.scale.x) : 1.0F,
+                                           std::abs(object.scale.y) > 0.000001F ? std::abs(object.scale.y) : 1.0F,
+                                           std::abs(object.scale.z) > 0.000001F ? std::abs(object.scale.z) : 1.0F,
+                                           kMinVisualScale});
+            box.halfExtents = {extent, extent, extent};
+        }
         boxes_.push_back(box);
         sum = sum + object.position;
     }

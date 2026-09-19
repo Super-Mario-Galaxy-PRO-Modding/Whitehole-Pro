@@ -1,0 +1,16 @@
+﻿
+build\CMakeCache.txt:23:CMAKE_BUILD_TYPE:UNINITIALIZED=Release
+build\CMakeCache.txt:197:WHITEHOLE_BUILD_GUI:BOOL=ON
+build\CMakeCache.txt:200:WHITEHOLE_BUILD_TESTS:BOOL=ON
+build\CMakeCache.txt:203:WHITEHOLE_ENABLE_LTO:BOOL=OFF
+build\CMakeCache.txt:207:WHITEHOLE_STATIC_RUNTIME:BOOL=ON
+build\CMakeCache.txt:271:CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026
+
+
+
+Name                       Length
+----                       ------
+whitehole_core.lib       20410134
+whitehole_core_tests.exe   971776
+
+

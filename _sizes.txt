@@ -1,0 +1,9 @@
+﻿
+Name              Length
+----              ------
+_cli_tmp_full.txt  16743
+_tmpdiff.txt        8900
+_tmpgrep.txt        1946
+_tmp_mid.txt        9780
+
+

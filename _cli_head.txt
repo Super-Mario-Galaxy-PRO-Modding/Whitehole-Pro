@@ -1,0 +1,28 @@
+﻿    return 0;
+}
+
+} // namespace
+
+// ---- Phase 1 sub-command implementations ----------------------------------
+
+namespace {
+    const auto current = std::filesystem::current_path() / "data";
+    if (std::filesystem::exists(current)) {
+        return current;
+    }
+    const auto beside = executableDirectory(executable) / "data";
+    if (std::filesystem::exists(beside)) {
+        return beside;
+    }
+#ifdef WHITEHOLE_SOURCE_DIR
+    return std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data";
+#else
+    return current;
+#endif
+}
+
+int runCli(int argc, char** argv) {
+    try {
+        // Parse a global --json flag that can appear before the command. When
+        // set, sub-commands emit JSON on stdout instead of human-readable text.
+        int argvOffset = 0;

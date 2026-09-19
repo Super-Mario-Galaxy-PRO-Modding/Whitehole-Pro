@@ -50,6 +50,11 @@ public:
     bool reverseRotation{false};
     bool wasdMovement{false};
 
+    // Layout: when false (default) docked panels can be rearranged inside the
+    // workspace but never torn off into floating OS windows, which is what made
+    // the old UI feel messy.
+    bool allowFloatingPanels{false};
+
     void pushRecentMap(const std::string& path);
 
     [[nodiscard]] static std::filesystem::path defaultConfigPath();

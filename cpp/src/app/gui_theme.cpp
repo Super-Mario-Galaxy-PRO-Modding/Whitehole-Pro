@@ -57,6 +57,17 @@ void applyWhiteholeTheme(bool dark, float scale) {
 
     const ImVec4& accent = dark ? kAccentDark : kAccentLight;
 
+    // Per-theme surfaces for interactive widgets. Each palette assigns these and
+    // the shared accent pass at the bottom consumes them — declaring them here
+    // is what stops the light theme from inheriting dark button fills.
+    ImVec4 buttonBase = frameBg;
+    ImVec4 buttonHoverBase = frameHover;
+    ImVec4 buttonActiveBase = frameActive;
+    ImVec4 headerHoverBase = frameHover;
+    ImVec4 headerActiveBase = frameActive;
+    ImVec4 textDimCol = ImVec4(0.6F, 0.62F, 0.68F, 1.0F);
+    ImVec4 tabSelectedCol = panelBg;
+
     // Docking chrome: the empty dockspace and drag-preview tint carry the
     // accent at low alpha so the workspace reads as one surface.
     colors[ImGuiCol_DockingEmptyBg] = windowBg;
@@ -120,6 +131,23 @@ void applyWhiteholeTheme(bool dark, float scale) {
         colors[ImGuiCol_DragDropTarget] = accent;
         colors[ImGuiCol_NavCursor] = accent;
         colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.55F);
+        colors[ImGuiCol_InputTextCursor] = accent;
+        colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(accent.x, accent.y, accent.z, 0.45F);
+        colors[ImGuiCol_TreeLines] = ImVec4(border.x, border.y, border.z, 0.55F);
+        colors[ImGuiCol_CheckboxSelectedBg] = accent;
+        colors[ImGuiCol_TextLink] = accent;
+        colors[ImGuiCol_UnsavedMarker] = ImVec4(0.98F, 0.75F, 0.30F, 1.0F);
+        colors[ImGuiCol_DragDropTargetBg] = ImVec4(accent.x, accent.y, accent.z, 0.14F);
+
+        // Light surfaces step *up* from the panel so an active tab and a hovered
+        // header are unmistakable even on a dim monitor.
+        buttonBase = frameBg;
+        buttonHoverBase = frameHover;
+        buttonActiveBase = frameActive;
+        headerHoverBase = ImVec4(0.180F, 0.196F, 0.235F, 1.0F);
+        headerActiveBase = ImVec4(0.208F, 0.227F, 0.275F, 1.0F);
+        textDimCol = textDim;
+        tabSelectedCol = ImVec4(0.176F, 0.192F, 0.231F, 1.0F); // #2d313b, above panelBg
     } else {
         // --- light palette --------------------------------------------------
         const ImVec4 windowBgL{0.965F, 0.969F, 0.976F, 1.0F};   // #f6f7f9
@@ -128,7 +156,7 @@ void applyWhiteholeTheme(bool dark, float scale) {
         const ImVec4 frameHoverL{0.839F, 0.851F, 0.875F, 1.0F};
         const ImVec4 frameActiveL{0.784F, 0.800F, 0.831F, 1.0F};
         const ImVec4 textL{0.125F, 0.137F, 0.161F, 1.0F};       // #202329
-        const ImVec4 textDimL{0.447F, 0.475F, 0.533F, 1.0F};
+        const ImVec4 textDimL{0.412F, 0.443F, 0.502F, 1.0F};  // ~4.9:1 on white
         const ImVec4 borderL{0.769F, 0.784F, 0.816F, 1.0F};     // #c4c8d0
         const ImVec4 headerL{0.886F, 0.898F, 0.918F, 1.0F};
 
@@ -179,21 +207,56 @@ void applyWhiteholeTheme(bool dark, float scale) {
         colors[ImGuiCol_DragDropTarget] = accent;
         colors[ImGuiCol_NavCursor] = accent;
         colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.35F);
+        colors[ImGuiCol_InputTextCursor] = accent;
+        colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(accent.x, accent.y, accent.z, 0.45F);
+        colors[ImGuiCol_TreeLines] = ImVec4(borderL.x, borderL.y, borderL.z, 0.75F);
+        colors[ImGuiCol_CheckboxSelectedBg] = ImVec4(accent.x, accent.y, accent.z, 0.85F);
+        colors[ImGuiCol_TextLink] = accent;
+        colors[ImGuiCol_UnsavedMarker] = ImVec4(0.85F, 0.55F, 0.05F, 1.0F);
+        colors[ImGuiCol_DragDropTargetBg] = ImVec4(accent.x, accent.y, accent.z, 0.12F);
+
+        // Buttons sit on a slightly darker grey than the panel so they read as
+        // pressable, and the selected tab lifts clear of the unselected one.
+        buttonBase = frameBgL;
+        buttonHoverBase = frameHoverL;
+        buttonActiveBase = frameActiveL;
+        headerHoverBase = ImVec4(0.831F, 0.847F, 0.875F, 1.0F);
+        headerActiveBase = frameActiveL;
+        textDimCol = textDimL;
+        tabSelectedCol = ImVec4(1.0F, 1.0F, 1.0F, 1.0F);
     }
 
-    // Accent-driven interactive states, identical logic for both themes.
-    // Buttons rest on the frame color and lift to accent-tinted hover so the
-    // primary action reads at a glance; headers keep the neutral surface with
-    // an accent wash on hover instead of a flat fill.
-    colors[ImGuiCol_Button] = frameBg;
-    colors[ImGuiCol_ButtonHovered] = ImVec4(
-        (frameHover.x + accent.x) * 0.5F, (frameHover.y + accent.y) * 0.5F,
-        (frameHover.z + accent.z) * 0.5F, 1.0F);
+    // Accent-driven interactive states, applied once for both themes using the
+    // surfaces each palette selected above. Buttons rest on the frame colour and
+    // lift towards the accent so the primary action reads at a glance; headers
+    // and tabs keep their neutral surface with a faint accent wash on hover.
+    const auto mix = [](const ImVec4& base, const ImVec4& tint, float amount) {
+        return ImVec4(base.x + (tint.x - base.x) * amount,
+                      base.y + (tint.y - base.y) * amount,
+                      base.z + (tint.z - base.z) * amount, 1.0F);
+    };
+
+    const ImVec4 hoverTint = mix(buttonHoverBase, accent, 0.35F);
+    colors[ImGuiCol_Button] = buttonBase;
+    colors[ImGuiCol_ButtonHovered] = hoverTint;
+    colors[ImGuiCol_ButtonActive] = buttonActiveBase;
+    colors[ImGuiCol_TabHovered] = hoverTint;
+    colors[ImGuiCol_HeaderHovered] = mix(headerHoverBase, accent, 0.25F);
+    colors[ImGuiCol_HeaderActive] = headerActiveBase;
+    colors[ImGuiCol_TextDisabled] = textDimCol;
+    colors[ImGuiCol_TabSelected] = tabSelectedCol;
+    colors[ImGuiCol_TabDimmedSelected] = tabSelectedCol;
     colors[ImGuiCol_CheckMark] = accent;
     colors[ImGuiCol_SliderGrab] = accent;
     colors[ImGuiCol_SliderGrabActive] = accent;
     colors[ImGuiCol_PlotLinesHovered] = accent;
     colors[ImGuiCol_PlotHistogramHovered] = accent;
+
+    // Slightly stronger hairlines: at 1px they are the only thing separating
+    // stacked panels, so they need to survive a dim or very bright display.
+    colors[ImGuiCol_Border] = dark ? ImVec4(0.259F, 0.282F, 0.341F, 0.85F)
+                                   : ImVec4(0.718F, 0.737F, 0.776F, 1.0F);
+    colors[ImGuiCol_Separator] = colors[ImGuiCol_Border];
 }
 
 } // namespace whitehole::app

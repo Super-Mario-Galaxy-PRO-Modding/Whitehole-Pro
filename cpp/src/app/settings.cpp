@@ -60,6 +60,7 @@ void Settings::load() {
     collisionModels = getB(root, "collisionModels", false);
     reverseRotation = getB(root, "reverseRotation", false);
     wasdMovement = getB(root, "wasdMovement", false);
+    allowFloatingPanels = getB(root, "allowFloatingPanels", false);
     recentMaps.clear();
     for (const auto& item : root.at("recentMaps").asArray()) {
         if (item.isString() && recentMaps.size() < 8) recentMaps.push_back(item.asString());
@@ -84,6 +85,7 @@ void Settings::save() const {
     putB(o, "collisionModels", collisionModels);
     putB(o, "reverseRotation", reverseRotation);
     putB(o, "wasdMovement", wasdMovement);
+    putB(o, "allowFloatingPanels", allowFloatingPanels);
     util::JsonArray recent;
     for (const auto& m : recentMaps) recent.emplace_back(m);
     o["recentMaps"] = util::JsonValue(std::move(recent));
@@ -100,6 +102,7 @@ void Settings::reset() {
     betterQuality = true;
     lowPolyModels = collisionModels = false;
     reverseRotation = wasdMovement = false;
+    allowFloatingPanels = false;
     loaded_ = true;
 }
 void Settings::pushRecentMap(const std::string& path) {

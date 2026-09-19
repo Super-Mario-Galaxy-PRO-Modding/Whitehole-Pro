@@ -16,8 +16,10 @@
 #include "whitehole/app/gui_theme.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
+#include "whitehole/db/modelsubstitutions.hpp"
 #include "whitehole/db/name_table.hpp"
 #include "whitehole/db/object_db.hpp"
+#include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/util/text.hpp"
 #include "whitehole/render/viewport_win32.hpp"
@@ -186,6 +188,8 @@ struct EditorState {
     db::NameTable galaxyNames;
     db::NameTable zoneNames;
     db::ObjectDatabase objectDb;
+    db::ModelSubstitutions modelSubstitutions;
+    render::ModelLibrary modelLibrary;
     Settings settings;
     std::optional<smg::GameArchive> game;
     std::vector<std::string> galaxies;
@@ -407,7 +411,14 @@ void refreshViewport(EditorState& state, bool frame) {
         return;
     }
     if (state.stage) {
-        state.viewportScene.rebuild(state.stage->objects());
+        // Game models come from the open workspace's ObjectData archives; a
+        // standalone map archive without one keeps the placeholder shapes.
+        if (state.modelLibrary.bound()) {
+            state.modelLibrary.resetCounters();
+            state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary);
+        } else {
+            state.viewportScene.rebuild(state.stage->objects());
+        }
     } else {
         state.viewportScene.clear();
     }
@@ -529,8 +540,14 @@ void openGameImpl(EditorState& state, const std::filesystem::path& path) {
     state.game.emplace(path);
     if (state.game->gameType() == 0) {
         state.game.reset();
+        state.modelLibrary.bind(nullptr);
         throw std::runtime_error("That folder is not an SMG1/SMG2 workspace");
     }
+    // ObjectData model archives live in the game workspace; bind them so the
+    // viewport can show the real BMD models.
+    state.modelLibrary.setSubstitutions(&state.modelSubstitutions);
+    state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
+    state.modelLibrary.bind(&state.game->filesystem());
     state.galaxies = state.game->galaxies();
     state.zones = state.game->zones();
     state.stage.reset();
@@ -935,6 +952,11 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::MenuItem("Log", nullptr, &state.showLog);
         ImGui::Separator();
         ImGui::MenuItem("Object Labels", nullptr, &state.showLabels);
+        if (ImGui::MenuItem("Low-Poly Models", nullptr, &state.settings.lowPolyModels)) {
+            state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
+            state.settings.save();
+            refreshViewport(state, false);
+        }
         ImGui::Separator();
         ImGui::TextDisabled("Overlays");
         ImGui::MenuItem("Axis", nullptr, &state.settings.showAxis);
@@ -1051,7 +1073,7 @@ void drawStatusBar(EditorState& state) {
         ImGui::TextDisabled("%s", state.statusText.c_str());
         // Right-aligned context: game type, object count, selection.
         ImGui::SameLine();
-        const float rightWidth = 340.0F;
+        const float rightWidth = 420.0F;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
                              ImGui::GetContentRegionAvail().x - rightWidth);
         std::string context;
@@ -1062,6 +1084,12 @@ void drawStatusBar(EditorState& state) {
             context += std::to_string(state.stage->objects().size()) + " objects";
             if (state.selectedObject) {
                 context += "  |  sel #" + std::to_string(*state.selectedObject);
+            }
+            // Friend's model stats: how many real BMD models vs placeholders.
+            if (state.modelLibrary.bound()) {
+                context += "  |  models " + std::to_string(state.modelLibrary.loadedCount()) +
+                           "/" + std::to_string(state.modelLibrary.missingCount()) +
+                           " ph";
             }
         } else {
             context += "No zone loaded";
@@ -1154,7 +1182,7 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam
 // Called by runCli("gui") and winmain.cpp. Hosts the full ImGui + Win32 + DX11
 // desktop editor loop.
 
-int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::path& initialFile) {
+int runGui(const std::filesystem::path& executable, const std::filesystem::path& initialFile) {
     using namespace whitehole::app;
 
     Settings settings;
@@ -1221,23 +1249,20 @@ int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::p
     EditorState state;
     state.settings = settings;
     state.window = hwnd;
+    state.dataRoot = dataDirectory(executable);
+    if (!state.dataRoot.empty()) {
+        state.galaxyNames.loadJson(state.dataRoot / "galaxies.json");
+        state.zoneNames.loadJson(state.dataRoot / "zones.json");
+        const auto cachePath =
+            Settings::defaultConfigPath().parent_path() / "objectdb.cache";
+        state.objectDb.load(state.dataRoot / "objectdb.json", cachePath);
+    }
 
     // --- Load initial file if provided ---
     if (!initialFile.empty()) {
         try {
             if (std::filesystem::is_directory(initialFile)) {
-                state.game.emplace(initialFile);
-                if (state.game->gameType() == 0) {
-                    state.game.reset();
-                    pushToast(state, "That folder is not an SMG1/SMG2 workspace.", true);
-                } else {
-                    state.galaxies = state.game->galaxies();
-                    state.zones = state.game->zones();
-                    state.settings.lastGameDir = initialFile.string();
-                    state.settings.save();
-                    pushToast(state, "Opened SMG" + std::to_string(state.game->gameType()) +
-                                    " workspace with " + std::to_string(state.galaxies.size()) + " galaxies.");
-                }
+                openGame(state, initialFile);
             } else {
                 openMap(state, initialFile);
             }

@@ -22,15 +22,16 @@ void applyWhiteholeTheme(bool dark, float scale) {
     ImVec4* colors = style.Colors;
 
     // --- geometry -----------------------------------------------------------
-    // One rounding radius + one padding scale drive the whole look. Rounded
-    // corners everywhere, generous but not puffy spacing, hairline borders.
-    style.WindowRounding = 7.0F * scale;
-    style.ChildRounding = 7.0F * scale;
-    style.FrameRounding = 5.0F * scale;
-    style.PopupRounding = 6.0F * scale;
+    // One rounding radius + one padding scale drive the whole look. Soft
+    // corners, calm spacing, hairline borders; dock tabs stay square-ish so
+    // the tab strip reads as one connected bar.
+    style.WindowRounding = 8.0F * scale;
+    style.ChildRounding = 8.0F * scale;
+    style.FrameRounding = 6.0F * scale;
+    style.PopupRounding = 8.0F * scale;
     style.ScrollbarRounding = 9.0F * scale;
-    style.GrabRounding = 4.0F * scale;
-    style.TabRounding = 5.0F * scale;
+    style.GrabRounding = 5.0F * scale;
+    style.TabRounding = 4.0F * scale;
     style.WindowBorderSize = 1.0F;
     style.ChildBorderSize = 1.0F;
     style.PopupBorderSize = 1.0F;
@@ -38,9 +39,9 @@ void applyWhiteholeTheme(bool dark, float scale) {
     style.TabBarBorderSize = 1.0F;
     style.ScrollbarSize = 13.0F * scale;
     style.GrabMinSize = 10.0F * scale;
-    style.WindowPadding = ImVec2(10.0F * scale, 8.0F * scale);
-    style.FramePadding = ImVec2(8.0F * scale, 4.0F * scale);
-    style.ItemSpacing = ImVec2(8.0F * scale, 6.0F * scale);
+    style.WindowPadding = ImVec2(12.0F * scale, 10.0F * scale);
+    style.FramePadding = ImVec2(10.0F * scale, 5.0F * scale);
+    style.ItemSpacing = ImVec2(10.0F * scale, 7.0F * scale);
     style.ItemInnerSpacing = ImVec2(6.0F * scale, 4.0F * scale);
     style.CellPadding = ImVec2(6.0F * scale, 3.0F * scale);
     style.IndentSpacing = 18.0F * scale;
@@ -181,6 +182,13 @@ void applyWhiteholeTheme(bool dark, float scale) {
     }
 
     // Accent-driven interactive states, identical logic for both themes.
+    // Buttons rest on the frame color and lift to accent-tinted hover so the
+    // primary action reads at a glance; headers keep the neutral surface with
+    // an accent wash on hover instead of a flat fill.
+    colors[ImGuiCol_Button] = frameBg;
+    colors[ImGuiCol_ButtonHovered] = ImVec4(
+        (frameHover.x + accent.x) * 0.5F, (frameHover.y + accent.y) * 0.5F,
+        (frameHover.z + accent.z) * 0.5F, 1.0F);
     colors[ImGuiCol_CheckMark] = accent;
     colors[ImGuiCol_SliderGrab] = accent;
     colors[ImGuiCol_SliderGrabActive] = accent;

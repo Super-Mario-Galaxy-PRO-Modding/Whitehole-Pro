@@ -625,8 +625,18 @@ void drawGalaxyZonePanel(EditorState& state) {
     }
     if (state.game.has_value()) {
         ImGui::TextDisabled("SMG%d workspace", state.game->gameType());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", state.settings.lastGameDir.c_str());
+        }
     } else {
         ImGui::TextDisabled("No game directory open");
+    }
+    if (ImGui::Button("Open Game...")) {
+        requestOpenGame(state);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Open Map...")) {
+        requestOpenMap(state);
     }
 
     // Galaxies section
@@ -720,6 +730,11 @@ void drawObjectsPanel(EditorState& state) {
             ImGui::PushStyleColor(ImGuiCol_Text, categoryColor(object));
             ImGui::TextUnformatted("*");
             ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) {
+                const auto& style = render::objectStyle(object.kind, object.name);
+                ImGui::SetTooltip("%s  [%s / %s]", style.label,
+                                  object.kind.c_str(), object.layer.c_str());
+            }
             ImGui::SameLine();
             std::string label = object.name;
             const std::string friendly = state.objectDb.displayName(object.name);
@@ -733,6 +748,18 @@ void drawObjectsPanel(EditorState& state) {
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && state.viewportReady) {
                     state.viewport.frameSelection();
                 }
+            }
+            // Right-click: focus in the 3D view or discard local edits.
+            if (ImGui::BeginPopupContextItem("##objctx")) {
+                if (ImGui::MenuItem("Focus in viewport", "F", false, state.viewportReady)) {
+                    selectObject(state, stageIndex);
+                    state.viewport.frameSelection();
+                }
+                if (ImGui::MenuItem("Reset transform")) {
+                    selectObject(state, stageIndex);
+                    syncTransformBuffers(state);
+                }
+                ImGui::EndPopup();
             }
             ImGui::PopID();
         }
@@ -763,13 +790,23 @@ void drawPropertiesPanel(EditorState& state) {
         ImGui::TextUnformatted(friendly.c_str());
     }
     ImGui::TextDisabled("%s / %s", object.kind.c_str(), object.layer.c_str());
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Object #%zu", *state.selectedObject);
+    }
     ImGui::SeparatorText("Name");
-    if (ImGui::InputText("##name", state.nameBuf, sizeof(state.nameBuf),
-                         ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (ImGui::InputTextWithHint("##name", "Object name (Enter to apply)", state.nameBuf,
+                                 sizeof(state.nameBuf),
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
         applyTransform(state);
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Renames the object. Press Enter to commit.");
+    }
 
-    auto vecRow = [&](const char* label, float* values, float speed) {
+    auto vecRow = [&](const char* label, const char* hint, float* values, float speed) {
+        // Axis letter + hint per field; the drag widget itself carries the
+        // tooltip so it appears exactly where the user is working.
+        static constexpr const char* kAxes[3] = {"X", "Y", "Z"};
         ImGui::SeparatorText(label);
         ImGui::PushID(label);
         const float itemWidth = (ImGui::GetContentRegionAvail().x - 24.0F) / 3.0F;
@@ -779,8 +816,16 @@ void drawPropertiesPanel(EditorState& state) {
                 ImGui::SameLine();
             }
             ImGui::SetNextItemWidth(itemWidth);
-            changed |= ImGui::DragFloat(("##v" + std::to_string(axis)).c_str(),
+            changed |= ImGui::DragFloat((std::string("##v") + std::to_string(axis)).c_str(),
                                         &values[axis], speed, 0.0F, 0.0F, "%.1f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s %s\n%s", label, kAxes[axis], hint);
+            } else if (ImGui::IsItemActive()) {
+                // Live readout while dragging, so values are readable even when
+                // the field is too narrow to show all digits.
+                ImGui::SetTooltip("%s %s = %.3f", label, kAxes[axis],
+                                  static_cast<double>(values[axis]));
+            }
         }
         if (changed) {
             applyTransform(state);
@@ -788,14 +833,19 @@ void drawPropertiesPanel(EditorState& state) {
         ImGui::PopID();
     };
 
-    vecRow("Position", &state.transform[0], 0.5F);
-    vecRow("Rotation", &state.transform[3], 0.25F);
-    vecRow("Scale", &state.transform[6], 0.02F);
+    vecRow("Position", "World position in game units. Drag or double-click a field to type.",
+           &state.transform[0], 0.5F);
+    vecRow("Rotation", "Euler rotation in degrees.", &state.transform[3], 0.25F);
+    vecRow("Scale", "Per-axis scale. Double-click a field to type an exact value.",
+           &state.transform[6], 0.02F);
 
     ImGui::Separator();
     const float half = (ImGui::GetContentRegionAvail().x - 8.0F) / 2.0F;
     if (ImGui::Button("Reset", ImVec2(half, 0))) {
         syncTransformBuffers(state);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Discard unsaved edits to this object.");
     }
     ImGui::SameLine();
     if (ImGui::Button("Save Zone", ImVec2(-1, 0))) {
@@ -804,6 +854,9 @@ void drawPropertiesPanel(EditorState& state) {
         } catch (const std::exception& error) {
             pushToast(state, error.what(), true);
         }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Write the zone back to disk  (Ctrl+S)");
     }
     if (state.unsaved) {
         ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "* Unsaved changes");
@@ -951,7 +1004,9 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::MenuItem("3D Viewport", nullptr, &state.showViewport);
         ImGui::MenuItem("Log", nullptr, &state.showLog);
         ImGui::Separator();
-        ImGui::MenuItem("Object Labels", nullptr, &state.showLabels);
+        if (ImGui::MenuItem("Object Labels", nullptr, &state.showLabels)) {
+            refreshViewport(state, false);
+        }
         if (ImGui::MenuItem("Low-Poly Models", nullptr, &state.settings.lowPolyModels)) {
             state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
             state.settings.save();
@@ -959,12 +1014,31 @@ void drawMenuBar(EditorState& state, bool& done) {
         }
         ImGui::Separator();
         ImGui::TextDisabled("Overlays");
-        ImGui::MenuItem("Axis", nullptr, &state.settings.showAxis);
-        ImGui::MenuItem("Cameras", nullptr, &state.settings.showCameras);
-        ImGui::MenuItem("Paths", nullptr, &state.settings.showPaths);
+        if (ImGui::MenuItem("Axis", nullptr, &state.settings.showAxis)) {
+            state.settings.save();
+        }
+        if (ImGui::MenuItem("Cameras", nullptr, &state.settings.showCameras)) {
+            state.settings.save();
+        }
+        if (ImGui::MenuItem("Paths", nullptr, &state.settings.showPaths)) {
+            state.settings.save();
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Settings")) {
+        if (ImGui::MenuItem("Dark Theme", nullptr, &state.settings.darkMode)) {
+            applyWhiteholeTheme(state.settings.darkMode, dpiScaleFactor());
+            state.settings.save();
+        }
+        if (ImGui::MenuItem("Preferences...")) {
+            state.showPreferences = true;
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("Keyboard Shortcuts...")) {
+            state.showShortcuts = true;
+        }
         if (ImGui::MenuItem("About Whitehole Pro")) {
             state.showAbout = true;
         }
@@ -1104,6 +1178,7 @@ void drawAboutDialog(EditorState& state) {
         return;
     }
     ImGui::OpenPopup("About Whitehole Pro");
+    ImGui::SetNextWindowSize(ImVec2(420.0F, 0.0F), ImGuiCond_FirstUseEver);
     if (ImGui::BeginPopupModal("About Whitehole Pro", &state.showAbout,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted("Whitehole Pro  (C++ rewrite)");
@@ -1119,6 +1194,102 @@ void drawAboutDialog(EditorState& state) {
         }
         ImGui::EndPopup();
     }
+}
+
+void drawPreferencesDialog(EditorState& state) {
+    if (!state.showPreferences) {
+        return;
+    }
+    ImGui::OpenPopup("Preferences");
+    ImGui::SetNextWindowSize(ImVec2(460.0F, 0.0F), ImGuiCond_FirstUseEver);
+    if (!ImGui::BeginPopupModal("Preferences", &state.showPreferences,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+    bool changed = false;
+    ImGui::SeparatorText("Appearance");
+    if (ImGui::Checkbox("Dark theme", &state.settings.darkMode)) {
+        applyWhiteholeTheme(state.settings.darkMode, dpiScaleFactor());
+        changed = true;
+    }
+    ImGui::SeparatorText("Viewport");
+    changed |= ImGui::Checkbox("Object labels", &state.showLabels);
+    if (ImGui::Checkbox("Low-poly models", &state.settings.lowPolyModels)) {
+        state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
+        refreshViewport(state, false);
+        changed = true;
+    }
+    changed |= ImGui::Checkbox("Better quality", &state.settings.betterQuality);
+    ImGui::SeparatorText("Overlays");
+    changed |= ImGui::Checkbox("Axis", &state.settings.showAxis);
+    changed |= ImGui::Checkbox("Areas", &state.settings.showAreas);
+    changed |= ImGui::Checkbox("Cameras", &state.settings.showCameras);
+    changed |= ImGui::Checkbox("Gravity", &state.settings.showGravity);
+    changed |= ImGui::Checkbox("Paths", &state.settings.showPaths);
+    ImGui::SeparatorText("Editor controls");
+    changed |= ImGui::Checkbox("Invert camera motion", &state.settings.reverseRotation);
+    changed |= ImGui::Checkbox("WASD movement", &state.settings.wasdMovement);
+    ImGui::SeparatorText("Workspace");
+    ImGui::TextDisabled("Game directory:");
+    ImGui::TextUnformatted(state.settings.lastGameDir.empty() ? "(none)"
+                                                              : state.settings.lastGameDir.c_str());
+    if (ImGui::Button("Choose...")) {
+        if (auto picked = pickFolder(state.window); picked.has_value()) {
+            try {
+                openGame(state, *picked);
+            } catch (const std::exception& error) {
+                pushToast(state, error.what(), true);
+                state.showLog = true;
+            }
+        }
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Close")) {
+        state.showPreferences = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    if (changed) {
+        state.settings.save();
+    }
+}
+
+void drawShortcutsDialog(EditorState& state) {
+    if (!state.showShortcuts) {
+        return;
+    }
+    ImGui::OpenPopup("Keyboard Shortcuts");
+    if (!ImGui::BeginPopupModal("Keyboard Shortcuts", &state.showShortcuts,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+    struct Row {
+        const char* keys;
+        const char* action;
+    };
+    constexpr Row rows[] = {
+        {"Ctrl+O", "Open map archive"},
+        {"Ctrl+S", "Save current zone"},
+        {"Ctrl+F", "Focus the object search"},
+        {"F", "Frame the selected object"},
+        {"Double-click", "Frame object in the 3D viewport"},
+    };
+    if (ImGui::BeginTable("##shortcuts", 2, ImGuiTableFlags_SizingFixedFit)) {
+        for (const auto& row : rows) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", row.keys);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(row.action);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Close")) {
+        state.showShortcuts = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 // drawStaleStatusBar: superseded by the context-aware drawStatusBar above.
@@ -1346,6 +1517,8 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             drawRealLogWindow(state);
         }
         drawAboutDialog(state);
+        drawPreferencesDialog(state);
+        drawShortcutsDialog(state);
         drawToasts(state);
         if (state.showStatusBar) {
             drawStatusBar(state);

@@ -56,6 +56,16 @@ void applyWhiteholeTheme(bool dark, float scale) {
 
     const ImVec4& accent = dark ? kAccentDark : kAccentLight;
 
+    // Docking chrome: the empty dockspace and drag-preview tint carry the
+    // accent at low alpha so the workspace reads as one surface.
+    colors[ImGuiCol_DockingEmptyBg] = windowBg;
+    colors[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.35F);
+    colors[ImGuiCol_Tab] = windowBg;
+    colors[ImGuiCol_TabHovered] = frameHover;
+    colors[ImGuiCol_TabSelected] = panelBg;
+    colors[ImGuiCol_TabSelectedOverline] = accent;
+    colors[ImGuiCol_TabDimmed] = windowBg;
+
     if (dark) {
         const ImVec4 text{0.918F, 0.925F, 0.941F, 1.0F};     // #eaeaf0
         const ImVec4 textDim{0.545F, 0.573F, 0.639F, 1.0F};  // #8b92a3

@@ -26,6 +26,7 @@
 
 #include <d3d11.h>
 #include <imgui.h>
+#include <imgui_internal.h> // DockBuilder default layout (vendored, stable pin)
 #include <backends/imgui_impl_win32.h>
 #include <backends/imgui_impl_dx11.h>
 
@@ -211,6 +212,20 @@ struct EditorState {
     float transform[9]{};    // pos.xyz, rot.xyz, scale.xyz (display values)
     bool transformDirty{false};
     bool unsaved{false};
+
+    // --- Docked workspace visibility (View menu toggles, persisted) --------
+    bool showProject{true};
+    bool showObjects{true};
+    bool showProperties{true};
+    bool showViewport{true};
+    bool showLog{false}; // bottom drawer, hidden until needed
+    bool showStatusBar{true};
+    bool showToolbar{true};
+    bool showAbout{false};
+    bool showPreferences{false};
+    bool showShortcuts{false};
+    bool focusSearch{false}; // set by Ctrl+F, consumed by the Objects panel
+    bool firstFrame{true};   // default dock layout is built once via DockBuilder
     std::string statusText{
         "Drag a map archive onto the window, or use File > Open Game Directory."};
     std::vector<Toast> toasts;
@@ -488,7 +503,13 @@ void rememberMap(EditorState& state, const std::filesystem::path& path) {
     state.settings.save();
 }
 
-void openMap(EditorState& state, const std::filesystem::path& path) {
+void openMap(EditorState& state, const std::filesystem::path& path);
+void openGame(EditorState& state, const std::filesystem::path& path);
+void requestOpenMap(EditorState& state);
+void requestOpenGame(EditorState& state);
+void requestSave(EditorState& state);
+
+void openMapImpl(EditorState& state, const std::filesystem::path& path) {
     state.stage = smg::StageArchive::openMapFile(path);
     state.zones = {state.stage->stageName()};
     state.selectedZone = 0;
@@ -504,7 +525,7 @@ void openMap(EditorState& state, const std::filesystem::path& path) {
                          std::to_string(state.stage->objects().size()) + " objects.");
 }
 
-void openGame(EditorState& state, const std::filesystem::path& path) {
+void openGameImpl(EditorState& state, const std::filesystem::path& path) {
     state.game.emplace(path);
     if (state.game->gameType() == 0) {
         state.game.reset();
@@ -578,7 +599,10 @@ ImVec4 categoryColor(const smg::PlacementObject& object) {
 }
 
 void drawGalaxyZonePanel(EditorState& state) {
-    if (!ImGui::Begin("Game")) {
+    if (!state.showProject) {
+        return;
+    }
+    if (!ImGui::Begin("Project", &state.showProject)) {
         ImGui::End();
         return;
     }
@@ -628,9 +652,16 @@ void drawGalaxyZonePanel(EditorState& state) {
 }
 
 void drawObjectsPanel(EditorState& state) {
-    if (!ImGui::Begin("Objects")) {
+    if (!state.showObjects) {
+        return;
+    }
+    if (!ImGui::Begin("Objects", &state.showObjects)) {
         ImGui::End();
         return;
+    }
+    if (state.focusSearch) {
+        ImGui::SetWindowFocus();
+        state.focusSearch = false;
     }
 
     // Filter box with a clear button; filtering reruns only when the text
@@ -694,7 +725,10 @@ void drawObjectsPanel(EditorState& state) {
 }
 
 void drawPropertiesPanel(EditorState& state) {
-    if (!ImGui::Begin("Properties")) {
+    if (!state.showProperties) {
+        return;
+    }
+    if (!ImGui::Begin("Properties", &state.showProperties)) {
         ImGui::End();
         return;
     }
@@ -764,10 +798,19 @@ void drawPropertiesPanel(EditorState& state) {
 // window. The viewport handles its own input, so ImGui never sees mouse events
 // while the cursor is over it (exactly what a 3D viewport needs).
 void placeViewportChild(EditorState& state) {
-    if (!state.viewportReady) {
+    if (!state.viewportReady || !state.showViewport) {
         return;
     }
-    if (!ImGui::Begin("Viewport")) {
+    if (!ImGui::Begin("Viewport", &state.showViewport)) {
+        ImGui::End();
+        return;
+    }
+    if (!state.stage) {
+        ImGui::TextDisabled("No zone loaded.");
+        ImGui::TextDisabled("File > Open Map Archive... or drop a .arc file.");
+        if (ImGui::Button("Open Map...")) {
+            requestOpenMap(state);
+        }
         ImGui::End();
         return;
     }
@@ -790,10 +833,129 @@ void placeViewportChild(EditorState& state) {
     }
 }
 
+// --- Shell: menu bar, toolbar, dockspace, status bar --------------------------
+// These turn the floating demo windows into one docked editor workspace with
+// a real File/Edit/View/Settings/Help menu and a quick-action toolbar.
+
+void requestOpenMap(EditorState& state) {
+    if (auto picked = pickOpenFile(state.window); picked.has_value()) {
+        try {
+            openMap(state, *picked);
+        } catch (const std::exception& error) {
+            pushToast(state, error.what(), true);
+            state.showLog = true;
+        }
+    }
+}
+
+void requestOpenGame(EditorState& state) {
+    if (auto picked = pickFolder(state.window); picked.has_value()) {
+        try {
+            openGame(state, *picked);
+        } catch (const std::exception& error) {
+            pushToast(state, error.what(), true);
+            state.showLog = true;
+        }
+    }
+}
+
+void requestSave(EditorState& state) {
+    try {
+        saveStage(state);
+    } catch (const std::exception& error) {
+        pushToast(state, error.what(), true);
+        state.showLog = true;
+    }
+}
+
+void openMap(EditorState& state, const std::filesystem::path& path) {
+    openMapImpl(state, path);
+}
+
+void openGame(EditorState& state, const std::filesystem::path& path) {
+    openGameImpl(state, path);
+}
+
+void drawMenuBar(EditorState& state, bool& done) {
+    if (!ImGui::BeginMainMenuBar()) {
+        return;
+    }
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Open Map Archive...", "Ctrl+O")) {
+            requestOpenMap(state);
+        }
+        if (ImGui::MenuItem("Open Game Directory...")) {
+            requestOpenGame(state);
+        }
+        if (ImGui::BeginMenu("Recent Maps")) {
+            if (state.settings.recentMaps.empty()) {
+                ImGui::MenuItem("(none yet)", nullptr, false, false);
+            }
+            for (const auto& recent : state.settings.recentMaps) {
+                if (ImGui::MenuItem(recent.c_str())) {
+                    try {
+                        openMap(state, std::filesystem::path(recent));
+                    } catch (const std::exception& error) {
+                        pushToast(state, error.what(), true);
+                    }
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        const bool canSave = state.stage.has_value();
+        if (ImGui::MenuItem("Save Zone", "Ctrl+S", false, canSave)) {
+            requestSave(state);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Exit", "Alt+F4")) {
+            done = true;
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Edit")) {
+        if (ImGui::MenuItem("Focus Search", "Ctrl+F", false, state.stage.has_value())) {
+            state.focusSearch = true;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset Object Transform", nullptr, false,
+                            state.selectedObject.has_value())) {
+            syncTransformBuffers(state);
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem("Toolbar", nullptr, &state.showToolbar);
+        ImGui::MenuItem("Status Bar", nullptr, &state.showStatusBar);
+        ImGui::Separator();
+        ImGui::MenuItem("Project", nullptr, &state.showProject);
+        ImGui::MenuItem("Objects", nullptr, &state.showObjects);
+        ImGui::MenuItem("Properties", nullptr, &state.showProperties);
+        ImGui::MenuItem("3D Viewport", nullptr, &state.showViewport);
+        ImGui::MenuItem("Log", nullptr, &state.showLog);
+        ImGui::Separator();
+        ImGui::MenuItem("Object Labels", nullptr, &state.showLabels);
+        ImGui::Separator();
+        ImGui::TextDisabled("Overlays");
+        ImGui::MenuItem("Axis", nullptr, &state.settings.showAxis);
+        ImGui::MenuItem("Cameras", nullptr, &state.settings.showCameras);
+        ImGui::MenuItem("Paths", nullptr, &state.settings.showPaths);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("About Whitehole Pro")) {
+            state.showAbout = true;
+        }
+        ImGui::EndMenu();
+    }
+    ImGui::EndMainMenuBar();
+}
+
 void drawToasts(EditorState& state) {
     const double now = ImGui::GetTime();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    float y = viewport->WorkPos.y + viewport->WorkSize.y - 48.0F;
+    // Bottom-right card stack above the status bar.
+    float y = viewport->WorkPos.y + viewport->WorkSize.y - 56.0F;
     for (std::size_t i = state.toasts.size(); i-- > 0;) {
         const auto& toast = state.toasts[i];
         const double age = now - toast.born;
@@ -825,7 +987,116 @@ void drawToasts(EditorState& state) {
     }
 }
 
+void drawToolbar(EditorState& state) {
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0F, 4.0F));
+    if (ImGui::Begin("##toolbar", nullptr, flags)) {
+        if (ImGui::Button("Open")) {
+            requestOpenMap(state);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Game")) {
+            requestOpenGame(state);
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!state.stage.has_value());
+        if (ImGui::Button("Save")) {
+            requestSave(state);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!state.viewportReady);
+        if (ImGui::Button("Frame All")) {
+            state.viewport.frameAll();
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Labels", &state.showLabels)) {
+            refreshViewport(state, false);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+        ImGui::SameLine();
+        ImGui::TextDisabled("Search:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(220.0F);
+        if (ImGui::InputTextWithHint("##toolbar-search", "Filter objects...",
+                                     state.searchBuf, sizeof(state.searchBuf))) {
+            state.filter = state.searchBuf;
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 void drawStatusBar(EditorState& state) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float height = ImGui::GetFrameHeight() + 8.0F;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - height));
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##statusbar", nullptr, flags)) {
+        if (state.unsaved) {
+            ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.35F, 1.0F), "*");
+            ImGui::SameLine();
+        }
+        ImGui::TextDisabled("%s", state.statusText.c_str());
+        // Right-aligned context: game type, object count, selection.
+        ImGui::SameLine();
+        const float rightWidth = 340.0F;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                             ImGui::GetContentRegionAvail().x - rightWidth);
+        std::string context;
+        if (state.game) {
+            context += "SMG" + std::to_string(state.game->gameType()) + "  |  ";
+        }
+        if (state.stage) {
+            context += std::to_string(state.stage->objects().size()) + " objects";
+            if (state.selectedObject) {
+                context += "  |  sel #" + std::to_string(*state.selectedObject);
+            }
+        } else {
+            context += "No zone loaded";
+        }
+        ImGui::TextDisabled("%s", context.c_str());
+    }
+    ImGui::End();
+}
+
+void drawAboutDialog(EditorState& state) {
+    if (!state.showAbout) {
+        return;
+    }
+    ImGui::OpenPopup("About Whitehole Pro");
+    if (ImGui::BeginPopupModal("About Whitehole Pro", &state.showAbout,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Whitehole Pro  (C++ rewrite)");
+        ImGui::TextDisabled("Super Mario Galaxy 1 / 2 stage editor");
+        ImGui::Separator();
+        ImGui::BulletText("File > Open Map Archive...  (.arc / .szs)");
+        ImGui::BulletText("File > Open Game Directory...  (extracted workspace)");
+        ImGui::BulletText("Drag & drop a map archive onto the window");
+        ImGui::Separator();
+        if (ImGui::Button("Close")) {
+            state.showAbout = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// drawStaleStatusBar: superseded by the context-aware drawStatusBar above.
+// Kept temporarily so the old call sites keep compiling during the shell
+// rework; delete once the dock-host loop is the only caller.
+void drawStaleStatusBar(EditorState& state) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float height = ImGui::GetFrameHeight() + 8.0F;
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x,
@@ -844,8 +1115,11 @@ void drawStatusBar(EditorState& state) {
     ImGui::End();
 }
 
-void drawLogWindow(EditorState& state) {
-    if (!ImGui::Begin("Log")) {
+void drawRealLogWindow(EditorState& state) {
+    if (!state.showLog) {
+        return;
+    }
+    if (!ImGui::Begin("Log", &state.showLog)) {
         ImGui::End();
         return;
     }
@@ -935,7 +1209,9 @@ int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::p
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    // NOTE: multi-viewport (tearing windows off into OS windows) is OFF on
+    // purpose — it is what made panels float around as separate windows.
+    io.IniFilename = nullptr; // layout rebuilt by DockBuilder each launch
     applyWhiteholeTheme(settings.darkMode, dpiScale);
 
     ImGui_ImplWin32_Init(hwnd);
@@ -989,16 +1265,84 @@ int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::p
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // Dockspace
-        ImGuiID dockSpaceId = ImGui::GetID("WhiteholeDockSpace");
-        ImGui::DockSpace(dockSpaceId, ImVec2(0.0F, 0.0F), ImGuiDockNodeFlags_PassthruCentralNode);
+        // --- Shell: menu, toolbar, dockspace ---
+        drawMenuBar(state, done);
+        if (done) break;
+        if (state.showToolbar) {
+            drawToolbar(state);
+        }
+
+        // Fullscreen dock host. Built once via DockBuilder so the first run
+        // already looks like an editor: project left, properties right,
+        // viewport center, log drawer bottom.
+        const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(mainViewport->WorkPos);
+        ImGui::SetNextWindowSize(mainViewport->WorkSize);
+        ImGui::SetNextWindowViewport(mainViewport->ID);
+        const ImGuiWindowFlags hostFlags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+            ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoSavedSettings;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
+        ImGui::Begin("##dockhost", nullptr, hostFlags);
+        ImGui::PopStyleVar();
+        const ImGuiID dockSpaceId = ImGui::GetID("WhiteholeDockSpace");
+        ImGui::DockSpace(dockSpaceId, ImVec2(0.0F, 0.0F),
+                         ImGuiDockNodeFlags_PassthruCentralNode);
+        if (state.firstFrame) {
+            state.firstFrame = false;
+            ImGui::DockBuilderRemoveNode(dockSpaceId);
+            ImGui::DockBuilderAddNode(dockSpaceId, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockSpaceId, mainViewport->WorkSize);
+            ImGuiID dockLeft = 0, dockCenter = 0, dockRight = 0, dockBottom = 0;
+            ImGui::DockBuilderSplitNode(dockSpaceId, ImGuiDir_Left, 0.20F,
+                                        &dockLeft, &dockCenter);
+            ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Right, 0.28F,
+                                        &dockRight, &dockCenter);
+            ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Down, 0.24F,
+                                        &dockBottom, &dockCenter);
+            ImGui::DockBuilderDockWindow("Project", dockLeft);
+            ImGui::DockBuilderDockWindow("Objects", dockLeft);
+            ImGui::DockBuilderDockWindow("Viewport", dockCenter);
+            ImGui::DockBuilderDockWindow("Properties", dockRight);
+            ImGui::DockBuilderDockWindow("Log", dockBottom);
+            ImGui::DockBuilderFinish(dockSpaceId);
+        }
+        ImGui::End();
 
         // --- Panels ---
         drawGalaxyZonePanel(state);
         drawObjectsPanel(state);
         drawPropertiesPanel(state);
+        placeViewportChild(state);
+        if (state.showLog) {
+            drawRealLogWindow(state);
+        }
+        drawAboutDialog(state);
         drawToasts(state);
-        drawStatusBar(state);
+        if (state.showStatusBar) {
+            drawStatusBar(state);
+        }
+
+        // --- Keyboard shortcuts ---
+        const bool ctrlDown =
+            (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (ctrlDown && (GetAsyncKeyState('O') & 1)) {
+            requestOpenMap(state);
+        }
+        if (ctrlDown && (GetAsyncKeyState('S') & 1) && state.stage) {
+            requestSave(state);
+        }
+        if (ctrlDown && (GetAsyncKeyState('F') & 1)) {
+            state.focusSearch = true;
+            state.showObjects = true;
+        }
+        if ((GetAsyncKeyState('F') & 1) && !ctrlDown && state.viewportReady &&
+            state.selectedObject) {
+            state.viewport.frameSelection();
+        }
 
         // --- Rendering ---
         ImGui::Render();
@@ -1007,11 +1351,6 @@ int runGui(const std::filesystem::path& /*executable*/, const std::filesystem::p
         g_context->OMSetRenderTargets(1, &g_renderTarget, nullptr);
         g_context->ClearRenderTargetView(g_renderTarget, clearColor);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
-            ImGui::UpdatePlatformWindows();
-            ImGui::RenderPlatformWindowsDefault();
-        }
 
         g_swapChain->Present(1, 0); // VSync
     }

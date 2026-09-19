@@ -219,6 +219,11 @@ struct EditorState {
     RECT viewportRect{};
     bool viewportRectValid{false};
     bool viewportChildVisible{false};
+    // The rectangle last handed to MoveWindow. Comparing against this (rather
+    // than GetWindowRect, which reports *screen* coordinates for a child window
+    // while viewportRect is parent-client) is what keeps a settled viewport from
+    // being re-positioned, and its GL surface re-allocated, every single frame.
+    RECT viewportRectApplied{};
 
     // --- UI bookkeeping -----------------------------------------------------
     int selectedGalaxy{-1};
@@ -1145,14 +1150,13 @@ void syncViewportChild(EditorState& state) {
         nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
     const bool wantVisible = state.viewportRectValid && !popupOpen;
     if (wantVisible) {
-        RECT existing{};
         const RECT& target = state.viewportRect;
-        const bool moved = !GetWindowRect(state.viewport.handle(), &existing) ||
-                           existing.left != target.left || existing.top != target.top ||
-                           existing.right != target.right || existing.bottom != target.bottom;
-        if (moved) {
+        const RECT& applied = state.viewportRectApplied;
+        if (target.left != applied.left || target.top != applied.top ||
+            target.right != applied.right || target.bottom != applied.bottom) {
             MoveWindow(state.viewport.handle(), target.left, target.top,
                        target.right - target.left, target.bottom - target.top, TRUE);
+            state.viewportRectApplied = target;
         }
     }
     if (wantVisible == state.viewportChildVisible) {

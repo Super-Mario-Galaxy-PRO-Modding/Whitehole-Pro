@@ -714,10 +714,15 @@ void syncViewportSelection(EditorState& state, std::optional<std::size_t> select
     if (state.viewportReady) {
         state.viewport.setSelected(selected);
     }
+    // Always update the canonical selection: callers like the object list
+    // wrap this function with syncingSelection=true, and the guard below
+    // must only suppress the transform-sync + status side-effects, not the
+    // assignment itself -- otherwise the Properties panel never sees the
+    // row you clicked in the list.
+    state.selectedObject = selected;
     if (state.syncingSelection) {
         return;
     }
-    state.selectedObject = selected;
     syncTransformBuffers(state);
     if (selected.has_value() && state.stage && *selected < state.stage->objects().size()) {
         const auto& object = state.stage->objects()[*selected];
@@ -2534,10 +2539,23 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         ImGui::PopStyleVar();
 
         if (state.showToolbar) {
+            // The dock host is NoBackground, so the strip has to paint its own
+            // surface. ImGuiCol_ChildBg is only consumed by BeginChild(), hence
+            // the wrapper: drawn raw, the dark D3D clear colour showed through
+            // the gaps between buttons in the light theme. Same chrome as the
+            // status strip below.
+            ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                                  ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0F, 3.0F));
+            ImGui::BeginChild("##toolbarstrip",
+                              ImVec2(mainViewport->WorkSize.x, ImGui::GetFrameHeight() + 8.0F),
+                              ImGuiChildFlags_AlwaysUseWindowPadding,
+                              ImGuiWindowFlags_NoScrollbar);
             drawToolbar(state);
-            ImGui::Separator();
+            ImGui::EndChild();
             ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+            ImGui::Separator();
         }
 
         const float statusHeight = state.showStatusBar ? ImGui::GetFrameHeight() + 12.0F : 0.0F;

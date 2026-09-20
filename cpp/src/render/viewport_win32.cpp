@@ -495,10 +495,6 @@ bool ViewportWindow::renderIfDirty() {
     if (!dirty_ || window_ == nullptr || glContext_ == nullptr || device_ == nullptr) {
         return false;
     }
-    // Nothing to show. Stay dirty so the frame is drawn once it is revealed.
-    if (!IsWindowVisible(window_)) {
-        return false;
-    }
     drawFrame();
     // Cancel the WM_PAINT invalidate() queued, so this redraw is not repeated
     // the next time the message queue drains.

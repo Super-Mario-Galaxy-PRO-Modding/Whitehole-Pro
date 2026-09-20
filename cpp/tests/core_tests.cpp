@@ -1936,9 +1936,16 @@ void testBmdParsing() {
         expectRejected(std::move(badSize), "bmd with a bad section size was not rejected");
     }
     {
-        auto unknownSection = makeTinyBmd();
-        putText(unknownSection, 0x20, "ZZZZ");
-        expectRejected(std::move(unknownSection), "bmd with an unknown section was not rejected");
+        // Real BMD files carry sections this reader does not process yet;
+        // they must be skipped, not reject the whole file.
+        auto withUnknown = makeTinyBmd();
+        putU32(withUnknown, 0x0C, 2);            // bump section count
+        const std::size_t extra = withUnknown.size();
+        withUnknown.resize(extra + 8);           // 8-byte header for the unknown section
+        putText(withUnknown, static_cast<std::uint32_t>(extra), "ZZZZ"); // unknown tag
+        putU32(withUnknown, static_cast<std::uint32_t>(extra + 4), 8);   // section size
+        const auto parsed = whitehole::smg::parseBmd(withUnknown);
+        expect(parsed.positions.size() == 4, "unknown section should not prevent geometry parse");
     }
     {
         auto truncated = makeTinyBmd();

@@ -795,7 +795,11 @@ BmdModel parseBmd(std::span<const std::uint8_t> data) {
                 readTEX1(reader, sectionStart, size, model);
                 break;
             default:
-                throw std::runtime_error("BMD: unsupported section tag");
+                // Real BMD/BDL files carry sections this reader does not need
+                // yet (EVW1, PTH1, SRT1, IOR1, BOM1, SMP1, CLR1, PAT1, ANK1,
+                // etc.). Skip them silently — the geometry sections above are
+                // all that the viewport needs to draw the bind-pose mesh.
+                break;
         }
         position = sectionStart + size;
     }

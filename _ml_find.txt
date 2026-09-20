@@ -1,0 +1,69 @@
+﻿first findModelEntry at line 141
+const io::RarcEntry* findModelEntry(const io::RarcArchive& archive, std::string_view stem) {
+    // Count every model file first: archives with more than one model are
+    // ambiguous and refused rather than picking an arbitrary one, even when
+    // one of them happens to match the preferred game layout.
+    const io::RarcEntry* onlyModel = nullptr;
+    int modelCount = 0;
+    for (const auto& entry : archive.entries()) {
+        if (entry.directory) {
+            continue;
+        }
+        const auto path = whitehole::util::toLower(entry.path);
+        const bool isModel = path.size() > 4 &&
+                             (path.compare(path.size() - 4, 4, ".bdl") == 0 ||
+                              path.compare(path.size() - 4, 4, ".bmd") == 0);
+        if (!isModel) {
+            continue;
+        }
+        onlyModel = &entry;
+        ++modelCount;
+    }
+    if (modelCount != 1) {
+        return nullptr;
+    }
+
+    // The game layout is a directory named after the model holding a model
+    // file of the same name. BDL is preferred (it is the pre-baked display
+    // list variant the game itself draws). With a single model on disk the
+    // preferred path is that model; otherwise accept the lone file wherever
+    // the archive keeps it (root-level file, differently named directory).
+    for (const std::string_view extension : {".bdl", ".bmd"}) {
+        const std::string path = std::string(stem) + "/" + std::string(stem) + std::string(extension);
+        if (const auto* entry = archive.find(path); entry != nullptr && !entry->directory) {
+            return entry;
+        }
+    }
+
+    return onlyModel;
+}
+
+std::shared_ptr<const ModelMesh> ModelLibrary::loadModel(std::string_view objectName) {
+    try {
+        const std::string archiveName = archiveNameFor(objectName);
+        if (archiveName.empty()) {
+            return nullptr;
+        }
+        const auto bytes = filesystem_->read("/ObjectData/" + archiveName);
+        io::RarcArchive archive(bytes);
+
+        std::string stem = archiveName.substr(0, archiveName.size() - 4); // strip ".arc"
+        const auto* entry = findModelEntry(archive, stem);
+        if (entry == nullptr) {
+            return nullptr;
+        }
+        const auto modelBytes = archive.read(*entry);
+        const auto parsed = smg::parseBmd(modelBytes);
+        auto mesh = std::make_shared<ModelMesh>(buildModelMesh(parsed));
+        if (mesh->empty()) {
+            return nullptr;
+        }
+        return mesh;
+    } catch (...) {
+        // A broken archive must never take the editor down; the object just
+        // keeps its placeholder shape.
+        return nullptr;
+    }
+}
+
+} // namespace whitehole::render

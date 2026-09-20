@@ -1,0 +1,4 @@
+﻿re-running core tests build
+exit: 0
+running whitehole_core_tests.exe
+tests exit: 1

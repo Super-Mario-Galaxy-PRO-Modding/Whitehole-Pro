@@ -1,0 +1,84 @@
+﻿--- _cli_head.txt ---
+83: int objectdbQueryCommand(int argc, char** argv);
+91: void coerceAndSet(smg::BcsvTable& table, smg::BcsvRow& row, const std::string& name,
+93: std::filesystem::path editedOutputPath(const std::filesystem::path& input);
+94: std::size_t findObjectIndex(const smg::StageArchive& stage, const std::string& name);
+96: CommonFlags parseCommonFlags(int argc, char** argv, int start);
+303: return objectdbQueryCommand(argc, argv);
+393: int objectdbQueryCommand(int argc, char** argv) {
+494: const auto flags = parseCommonFlags(argc, argv, 7);
+500: const auto objectIndex = findObjectIndex(stage, argv[6]);
+515: const auto flags = parseCommonFlags(argc, argv, 9);
+521: const auto objectIndex = findObjectIndex(stage, objectName);
+523: edit::UndoStack undo;
+572: const auto flags = parseCommonFlags(argc, argv, 6);
+601: stage.saveTo(editedOutputPath(archivePath));
+615: if (!flags.inPlace) std::cout << "Output: " << editedOutputPath(archivePath).string() << '\n';
+627: const auto flags = parseCommonFlags(argc, argv, 5);
+629: const auto objectIndex = findObjectIndex(stage, objectName);
+641: stage.saveTo(editedOutputPath(archivePath));
+653: if (!flags.inPlace) std::cout << "Output: " << editedOutputPath(archivePath).string() << '\n';
+669: const auto flags = parseCommonFlags(argc, argv, 7);
+673: const auto objectIndex = findObjectIndex(stage, objectName);
+675: edit::UndoStack undo;
+703: stage.saveTo(editedOutputPath(archivePath));
+716: if (!flags.inPlace) std::cout << "Output: " << editedOutputPath(archivePath).string() << '\n';
+726: std::size_t findObjectIndex(const smg::StageArchive& stage, const std::string& name) {
+754: CommonFlags parseCommonFlags(int argc, char** argv, int start) {
+815: const auto flags = parseCommonFlags(argc, argv, 5);
+819: const auto objectIndex = findObjectIndex(stage, argv[4]);
+849: coerceAndSet(table, table.rows()[newRow], name, value);
+851: const auto outputPath = inPlace ? inputPath : editedOutputPath(inputPath);
+892: const auto outputPath = inPlace ? inputPath : editedOutputPath(inputPath);
+912: void coerceAndSet(smg::BcsvTable& table, smg::BcsvRow& row, const std::string& name,
+939: std::filesystem::path editedOutputPath(const std::filesystem::path& input) {
+968: coerceAndSet(table, table.rows()[rowIndex], fieldName, valueText);
+969: const auto outputPath = inPlace ? inputPath : editedOutputPath(inputPath);
+--- _cli_stash.txt ---
+101: int objectdbQueryCommand(int argc, char** argv);
+278: int modelsCommand(int argc, char** argv) {
+412: return objectdbQueryCommand(argc, argv);
+492: struct EditOptions {
+509: EditOptions parseEditOptions(int argc, char** argv, int start, int defaultGameType) {
+510: EditOptions options;
+542: std::filesystem::path editedPathFor(const std::filesystem::path& input) {
+549: std::size_t requireObject(const smg::StageArchive& stage, std::string_view name) {
+565: std::size_t requireField(const smg::BcsvTable& table, const smg::FieldHashes& hashes,
+582: void assignFieldValue(smg::BcsvTable& table, smg::BcsvRow& row, const smg::BcsvField& field,
+606: smg::FieldHashes loadFieldHashes(const std::filesystem::path& executable) {
+614: std::unique_ptr<db::ObjectDatabase> openObjectDatabase(const std::filesystem::path& executable,
+630: void printObjectParams(const smg::StageArchive& stage, std::size_t objectIndex,
+752: const auto fieldIndex = requireField(table, loadFieldHashes(argv[0]), fieldName);
+754: assignFieldValue(table, table.rows()[rowIndex], field, fieldName, valueText);
+755: const auto outPath = options.inPlace ? inputPath : editedPathFor(inputPath);
+807: const auto hashes = loadFieldHashes(argv[0]);
+810: const auto fieldIndex = requireField(table, hashes, name);
+812: assignFieldValue(table, table.rows()[rowIndex], field, name, value);
+814: const auto outPath = options.inPlace ? inputPath : editedPathFor(inputPath);
+853: const auto outPath = options.inPlace ? inputPath : editedPathFor(inputPath);
+879: const auto options = parseEditOptions(argc, argv, 5, 2);
+881: const auto objectIndex = requireObject(stage, argv[4]);
+882: const auto database = openObjectDatabase(argv[0], true);
+883: printObjectParams(stage, objectIndex, loadFieldHashes(argv[0]), database.get(), options.gameType,
+893: const auto options = parseEditOptions(argc, argv, 7, 2);
+895: const auto objectIndex = requireObject(stage, argv[4]);
+902: const auto fieldIndex = requireField(table, loadFieldHashes(argv[0]), argv[5]);
+904: assignFieldValue(table, table.rows()[rowIndex], field, argv[5], argv[6]);
+907: const auto outPath = options.inPlace ? stage.sourcePath() : editedPathFor(stage.sourcePath());
+931: const auto options = parseEditOptions(argc, argv, 6, 2);
+972: edit::UndoStack stack;
+975: const auto outPath = options.inPlace ? stage.sourcePath() : editedPathFor(stage.sourcePath());
+1001: const auto options = parseEditOptions(argc, argv, 5, 2);
+1021: edit::UndoStack stack;
+1028: const auto outPath = options.inPlace ? stage.sourcePath() : editedPathFor(stage.sourcePath());
+1050: int zoneGameType(const smg::GameArchive& game, const EditOptions& options) {
+1084: const auto options = parseEditOptions(argc, argv, 7, 0);
+1088: const auto objectIndex = requireObject(stage, argv[6]);
+1089: const auto database = openObjectDatabase(argv[0], true);
+1090: printObjectParams(stage, objectIndex, loadFieldHashes(argv[0]), database.get(),
+1101: parseEditOptions(argc, argv, 9, 0);
+1105: const auto objectIndex = requireObject(stage, argv[6]);
+1110: const auto fieldIndex = requireField(table, loadFieldHashes(argv[0]), argv[7]);
+1112: assignFieldValue(table, table.rows()[rowIndex], field, argv[7], argv[8]);
+1122: int objectdbQueryCommand(int argc, char** argv) {
+1321: return modelsCommand(effectiveArgc, subArgv);

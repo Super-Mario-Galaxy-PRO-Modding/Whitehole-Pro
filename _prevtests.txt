@@ -1,0 +1,8 @@
+﻿tests_exit.txt: tests exit: 0
+tests_out.txt: Test failure: bmd position indices are wrong
+test_log.txt: Test failure: objectdb.json did not load for the object model test
+test_log.txt: TESTS_EXIT_1
+_now_tests.log: All Whitehole native core tests passed
+ctest.log: 1/1 Test #1: whitehole_core_tests .............   Passed    0.08 sec
+ctest.log: 100% tests passed, 0 tests failed out of 1
+ctest.log: ctest_exit=0

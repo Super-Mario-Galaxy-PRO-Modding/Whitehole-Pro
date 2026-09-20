@@ -1,0 +1,7 @@
+﻿whitehole_core_tests.exe : Test failure: ambiguous archive must not produce a model
+At C:\Users\conta\Documents\GitHub\Whitehole-Pro\_cmp.ps1:26 char:5
++     & 'build\Release\whitehole_core_tests.exe' 2>&1 | Out-File '_test ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Test failure: a...produce a model:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

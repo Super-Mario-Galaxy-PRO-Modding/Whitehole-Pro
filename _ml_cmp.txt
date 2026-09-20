@@ -1,0 +1,3 @@
+﻿_ml_head.txt:143: // ambiguous and refused rather than picking an arbitrary one, even when
+model_library.cpp:158: // looking like an ambiguous multi-model archive.
+model_library.cpp:168: // different models (Bar.bmd + Baz.bmd) stay ambiguous and are refused

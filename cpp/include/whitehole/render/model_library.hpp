@@ -30,6 +30,27 @@ class ModelSubstitutions;
 
 namespace whitehole::render {
 
+// Stage-by-stage report for one object's model lookup, produced by
+// ModelLibrary::probe(). Lets tools (and the `models check` CLI command)
+// explain exactly why an object kept its placeholder shape instead of a
+// real game model.
+struct ModelProbe {
+    std::string objectName;
+    std::string archiveName;   // on-disk ObjectData archive used, empty when none
+    std::string modelPath;     // BMD/BDL path inside the archive
+    std::size_t modelBytes{0};
+    bool archiveFound{false};
+    bool modelFound{false};
+    bool parsed{false};        // BMD parse succeeded
+    std::size_t sceneNodes{0};
+    std::size_t batches{0};
+    std::size_t triangles{0};
+    std::size_t skippedPrimitives{0};
+    std::string error;         // first failing stage; empty when usable
+
+    [[nodiscard]] bool usable() const noexcept { return parsed && triangles != 0; }
+};
+
 class ModelLibrary {
 public:
     // Binds the game workspace the ObjectData archives live in. Passing
@@ -53,6 +74,12 @@ public:
     // Test/status hook: the ObjectData archive file name `model()` would use
     // for an object, or an empty string when no archive exists.
     [[nodiscard]] std::string archiveNameFor(std::string_view objectName) const;
+
+    // Diagnostic: run the full model pipeline for one object without touching
+    // the caches and report every stage's outcome (archive found, model entry
+    // found, BMD parsed, triangles produced). Never throws; failures are
+    // recorded in ModelProbe::error.
+    [[nodiscard]] ModelProbe probe(std::string_view objectName) const;
 
     // Status-line bookkeeping: how many distinct names resolved to a real
     // model vs. fell back to the placeholder since the last reset.

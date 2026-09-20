@@ -1,0 +1,27 @@
+﻿Zone AbekobeGalaxy: 36 objects, 25 distinct names, 0 usable game models
+
+AbekobeStartZone x1: no ObjectData archive matches this object name
+AbekobeRoofActionZone x1: no ObjectData archive matches this object name
+AbekobeLiftZone x1: no ObjectData archive matches this object name
+AbekobeBlockZone x1: no ObjectData archive matches this object name
+AbekobeWallActionZone x1: no ObjectData archive matches this object name
+AbekobeDossunZone x1: no ObjectData archive matches this object name
+AbekobePowerStarZone x1: no ObjectData archive matches this object name
+FireWoodBoxPlanetZone x1: no ObjectData archive matches this object name
+EarthenPipeRoomFZone x1: no ObjectData archive matches this object name
+PetitPorterAZone x1: no ObjectData archive matches this object name
+SwitchArea x2: no ObjectData archive matches this object name
+ViewGroupCtrlArea x1: no ObjectData archive matches this object name
+DeathArea x1: no ObjectData archive matches this object name
+BeyondTitleSky x1: BMD: read past end of file
+ScenarioStarter x1: no ObjectData archive matches this object name
+AbekobeIntroducePlanet x1: BMD: read past end of file
+EarthenPipe x2: BMD: read past end of file
+UFOKinoko x2: parsed but produced 0 triangles
+PetitPorter x1: parsed but produced 0 triangles
+PetitPorterWarpPoint x1: no ObjectData archive matches this object name
+BuildingBlocksDust x5: parsed but produced 0 triangles
+CameraArea x3: no ObjectData archive matches this object name
+GlobalPlaneGravityInBox x3: no ObjectData archive matches this object name
+Mario x1: BMD: read past end of file
+ûóôⁿù═0 x1: no ObjectData archive matches this object name

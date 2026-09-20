@@ -1,0 +1,4 @@
+﻿
+  whitehole_core.vcxproj -> C:\Users\conta\Documents\GitHub\Whitehole-Pro\build\Release\whitehole_core.lib
+  core_tests.cpp
+  whitehole_core_tests.vcxproj -> C:\Users\conta\Documents\GitHub\Whitehole-Pro\build\Release\whitehole_core_tests.exe

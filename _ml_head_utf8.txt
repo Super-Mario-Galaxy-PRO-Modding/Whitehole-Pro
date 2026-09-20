@@ -1,0 +1,208 @@
+﻿#include "whitehole/render/model_library.hpp"
+
+#include "whitehole/db/modelsubstitutions.hpp"
+#include "whitehole/io/directory_filesystem.hpp"
+#include "whitehole/io/rarc.hpp"
+#include "whitehole/smg/bmd.hpp"
+#include "whitehole/util/text.hpp"
+
+#include <algorithm>
+#include <exception>
+
+namespace whitehole::render {
+namespace {
+
+// Memory guard: a whole zone can reference hundreds of distinct models; past
+// this many cached meshes the oldest entries are evicted. Meshes still held by
+// the viewport scene survive eviction through their shared_ptr.
+constexpr std::size_t kMaxCachedMeshes = 256;
+
+} // namespace
+
+void ModelLibrary::bind(const io::DirectoryFilesystem* filesystem) {
+    if (filesystem_ == filesystem) {
+        return;
+    }
+    filesystem_ = filesystem;
+    clear();
+}
+
+void ModelLibrary::setLowPoly(bool lowPoly) {
+    if (lowPoly_ == lowPoly) {
+        return;
+    }
+    lowPoly_ = lowPoly;
+    // The Low/Middle suffix changes which archive each name resolves to.
+    clear();
+}
+
+void ModelLibrary::clear() noexcept {
+    cache_.clear();
+    cacheOrder_.clear();
+    archiveNames_.clear();
+    listingReady_ = false;
+    listingFailed_ = false;
+}
+
+void ModelLibrary::resetCounters() noexcept {
+    loadedCount_ = 0;
+    missingCount_ = 0;
+}
+
+void ModelLibrary::refreshListing() const {
+    if (listingReady_ || listingFailed_) {
+        return;
+    }
+    listingReady_ = true;
+    if (filesystem_ == nullptr) {
+        listingFailed_ = true;
+        return;
+    }
+    try {
+        for (const auto& file : filesystem_->files("ObjectData")) {
+            archiveNames_.emplace(whitehole::util::toLower(file), file);
+        }
+    } catch (...) {
+        // Workspace without an ObjectData directory: no models at all.
+        listingFailed_ = true;
+    }
+}
+
+bool ModelLibrary::archiveExists(std::string_view archiveName) const {
+    refreshListing();
+    if (listingFailed_) {
+        return false;
+    }
+    return archiveNames_.find(whitehole::util::toLower(archiveName)) != archiveNames_.end();
+}
+std::string ModelLibrary::archiveNameFor(std::string_view objectName) const {
+    if (filesystem_ == nullptr || objectName.empty()) {
+        return {};
+    }
+
+    std::string candidate(objectName);
+    if (substitutions_ != nullptr && substitutions_->isLoaded()) {
+        std::string substitution = substitutions_->substitute(objectName);
+        if (!substitution.empty()) {
+            candidate = std::move(substitution);
+        }
+    }
+
+    // Java ModelSubstitutions.getSubstitutedModelName(): the Low/Middle
+    // variants only apply while the low-poly setting is on.
+    if (lowPoly_) {
+        if (archiveExists(candidate + "Low.arc")) {
+            return candidate + "Low.arc";
+        }
+        if (archiveExists(candidate + "Middle.arc")) {
+            return candidate + "Middle.arc";
+        }
+    }
+    if (archiveExists(candidate + ".arc")) {
+        return candidate + ".arc";
+    }
+    // A substitution that does not exist on disk falls back to the object's
+    // own name, exactly like the Java editor does.
+    if (candidate != objectName && archiveExists(std::string(objectName) + ".arc")) {
+        return std::string(objectName) + ".arc";
+    }
+    return {};
+}
+
+std::shared_ptr<const ModelMesh> ModelLibrary::model(std::string_view objectName) {
+    if (filesystem_ == nullptr) {
+        return nullptr;
+    }
+    const std::string key(objectName);
+    if (const auto it = cache_.find(key); it != cache_.end()) {
+        return it->second.mesh;
+    }
+
+    auto mesh = loadModel(objectName);
+    if (mesh != nullptr) {
+        ++loadedCount_;
+    } else {
+        ++missingCount_;
+    }
+    cache_.emplace(key, CacheEntry{mesh});
+    cacheOrder_.push_back(key);
+    evictIfNeeded();
+    return mesh;
+}
+
+void ModelLibrary::evictIfNeeded() {
+    while (cacheOrder_.size() > kMaxCachedMeshes) {
+        const auto oldest = cacheOrder_.front();
+        cacheOrder_.erase(cacheOrder_.begin());
+        cache_.erase(oldest);
+    }
+}
+
+const io::RarcEntry* findModelEntry(const io::RarcArchive& archive, std::string_view stem) {
+    // Count every model file first: archives with more than one model are
+    // ambiguous and refused rather than picking an arbitrary one, even when
+    // one of them happens to match the preferred game layout.
+    const io::RarcEntry* onlyModel = nullptr;
+    int modelCount = 0;
+    for (const auto& entry : archive.entries()) {
+        if (entry.directory) {
+            continue;
+        }
+        const auto path = whitehole::util::toLower(entry.path);
+        const bool isModel = path.size() > 4 &&
+                             (path.compare(path.size() - 4, 4, ".bdl") == 0 ||
+                              path.compare(path.size() - 4, 4, ".bmd") == 0);
+        if (!isModel) {
+            continue;
+        }
+        onlyModel = &entry;
+        ++modelCount;
+    }
+    if (modelCount != 1) {
+        return nullptr;
+    }
+
+    // The game layout is a directory named after the model holding a model
+    // file of the same name. BDL is preferred (it is the pre-baked display
+    // list variant the game itself draws). With a single model on disk the
+    // preferred path is that model; otherwise accept the lone file wherever
+    // the archive keeps it (root-level file, differently named directory).
+    for (const std::string_view extension : {".bdl", ".bmd"}) {
+        const std::string path = std::string(stem) + "/" + std::string(stem) + std::string(extension);
+        if (const auto* entry = archive.find(path); entry != nullptr && !entry->directory) {
+            return entry;
+        }
+    }
+
+    return onlyModel;
+}
+
+std::shared_ptr<const ModelMesh> ModelLibrary::loadModel(std::string_view objectName) {
+    try {
+        const std::string archiveName = archiveNameFor(objectName);
+        if (archiveName.empty()) {
+            return nullptr;
+        }
+        const auto bytes = filesystem_->read("/ObjectData/" + archiveName);
+        io::RarcArchive archive(bytes);
+
+        std::string stem = archiveName.substr(0, archiveName.size() - 4); // strip ".arc"
+        const auto* entry = findModelEntry(archive, stem);
+        if (entry == nullptr) {
+            return nullptr;
+        }
+        const auto modelBytes = archive.read(*entry);
+        const auto parsed = smg::parseBmd(modelBytes);
+        auto mesh = std::make_shared<ModelMesh>(buildModelMesh(parsed));
+        if (mesh->empty()) {
+            return nullptr;
+        }
+        return mesh;
+    } catch (...) {
+        // A broken archive must never take the editor down; the object just
+        // keeps its placeholder shape.
+        return nullptr;
+    }
+}
+
+} // namespace whitehole::render

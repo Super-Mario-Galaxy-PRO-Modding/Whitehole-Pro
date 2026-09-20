@@ -22,6 +22,7 @@
 #include "whitehole/db/object_db.hpp"
 #include "whitehole/edit/commands.hpp"
 #include "whitehole/edit/undo.hpp"
+#include "whitehole/edit/validation.hpp"
 #include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/util/text.hpp"
@@ -242,7 +243,20 @@ struct EditorState {
     char fieldFilter[96]{};    // field-grid filter box (Properties panel)
     bool draggingField{false}; // an ObjectModel setter is mid-float-drag,
                                // mirroring draggingTransform for the transform rows
+    // Undo position at the last save (or load). Dirty is "the cursor has moved
+    // away from here", which is what makes undoing back to the saved state
+    // report clean again instead of nagging forever.
+    std::size_t savedUndoCursor{0};
     bool unsaved{false};
+
+    // --- Closing guard -------------------------------------------------------
+    // Exit (and opening a different archive) would throw away unsaved edits, so
+    // those actions park themselves behind a confirmation instead of going
+    // straight ahead.
+    enum class PendingAction { None, Exit, OpenMap, OpenGame };
+    bool confirmUnsaved{false};
+    PendingAction pendingAction{PendingAction::None};
+
 
     // --- Undo: one stack per editor session, cleared on load -----------------
     edit::UndoStack undoStack;
@@ -259,6 +273,10 @@ struct EditorState {
     bool showProperties{true};
     bool showViewport{true};
     bool showLog{false}; // bottom drawer, hidden until needed
+    bool showProblems{false}; // validation findings, docked beside the log
+    // Validation is not free, so it runs only when the undo cursor moves.
+    std::vector<edit::Finding> findings;
+    std::size_t findingsCursor{static_cast<std::size_t>(-1)};
     bool showStatusBar{true};
     bool showToolbar{true};
     bool showAbout{false};
@@ -569,6 +587,8 @@ bool transformWidgetsDirty(const EditorState& state) {
     return true;
 }
 
+bool markDirty(EditorState& state);
+
 // Pushes the property widgets into the selected object through the real write
 // path (BCSV row, not just the in-memory copy), then repaints the scene.
 void applyTransform(EditorState& state) {
@@ -596,7 +616,7 @@ void applyTransform(EditorState& state) {
     state.stage->writeObject(object);
     state.stage->rebuildObjects();
     refreshObjects(state);
-    state.unsaved = true;
+    markDirty(state);
     refreshViewport(state, false);
 }
 
@@ -620,6 +640,47 @@ void commitDragAsUndo(EditorState& state, const char* label) {
 
 // Perfoms undo()/redo() then rebuilds every dependent view from the tables,
 // because TransformCommand mutates BCSV rows directly.
+void requestOpenMap(EditorState& state);
+void requestOpenGame(EditorState& state);
+
+// True when the undo cursor has moved away from the last save point. That is
+// what makes undoing back to the saved state report clean again.
+bool markDirty(EditorState& state) {
+    state.unsaved = state.undoStack.cursor() != state.savedUndoCursor;
+    return state.unsaved;
+}
+
+// True when it is safe to drop the current document, i.e. nothing would be
+// lost. Otherwise the confirmation dialog records what the user asked for so it
+// can run once the choice is made.
+bool safeToDiscard(EditorState& state, EditorState::PendingAction action) {
+    if (!state.unsaved) {
+        return true;
+    }
+    state.pendingAction = action;
+    state.confirmUnsaved = true;
+    return false;
+}
+
+// Runs the action a confirmation just approved.
+void runPendingAction(EditorState& state, bool& done) {
+    const EditorState::PendingAction action = state.pendingAction;
+    state.pendingAction = EditorState::PendingAction::None;
+    switch (action) {
+    case EditorState::PendingAction::Exit:
+        done = true;
+        break;
+    case EditorState::PendingAction::OpenMap:
+        requestOpenMap(state);
+        break;
+    case EditorState::PendingAction::OpenGame:
+        requestOpenGame(state);
+        break;
+    case EditorState::PendingAction::None:
+        break;
+    }
+}
+
 void performUndo(EditorState& state) {
     if (!state.undoStack.undo()) {
         return;
@@ -628,7 +689,7 @@ void performUndo(EditorState& state) {
         state.stage->rebuildObjects();
         refreshObjects(state);
         syncTransformBuffers(state);
-        state.unsaved = true;
+        markDirty(state);
         refreshViewport(state, false);
         pushToast(state, "Undid " + state.undoStack.redoLabel() + ".");
     }
@@ -642,7 +703,7 @@ void performRedo(EditorState& state) {
         state.stage->rebuildObjects();
         refreshObjects(state);
         syncTransformBuffers(state);
-        state.unsaved = true;
+        markDirty(state);
         refreshViewport(state, false);
         pushToast(state, "Redid " + state.undoStack.undoLabel() + ".");
     }
@@ -691,6 +752,7 @@ void openMapImpl(EditorState& state, const std::filesystem::path& path) {
     state.searchBuf[0] = '\0';
     state.lastFilter.clear();
     state.undoStack.clear(); // a new map means a new history
+    state.savedUndoCursor = 0;
     refreshObjects(state);
     selectObject(state, std::nullopt);
     refreshViewport(state, true);
@@ -719,6 +781,7 @@ void openGameImpl(EditorState& state, const std::filesystem::path& path) {
     state.selectedZone = -1;
     state.selectedObject.reset();
     state.undoStack.clear(); // a new workspace means a new history
+    state.savedUndoCursor = 0;
     state.settings.lastGameDir = path.string();
     state.settings.save();
     refreshViewport(state, false);
@@ -753,6 +816,7 @@ void selectZone(EditorState& state, int index) {
     state.searchBuf[0] = '\0';
     state.lastFilter.clear();
     state.undoStack.clear(); // a new zone means a new history
+    state.savedUndoCursor = 0;
     refreshObjects(state);
     selectObject(state, std::nullopt);
     refreshViewport(state, true);
@@ -769,6 +833,7 @@ void saveStage(EditorState& state) {
     }
     applyTransform(state);
     state.stage->save();
+    state.savedUndoCursor = state.undoStack.cursor();
     state.unsaved = false;
     pushToast(state, "Saved " + state.stage->sourcePath().string());
 }
@@ -985,7 +1050,7 @@ void commitFieldWrite(EditorState& state, bool wrote) {
     state.stage->rebuildObjects();
     refreshObjects(state);
     syncTransformBuffers(state);
-    state.unsaved = true;
+    markDirty(state);
     refreshViewport(state, false);
 }
 
@@ -994,7 +1059,8 @@ bool drawFieldEntry(EditorState& state, smg::ObjectModel& model, std::size_t obj
                     const smg::ObjectField& field, const char* label,
                     const std::string& undoLabel);
 // Honest annotation for the row, plus the database description as a tooltip.
-void drawFieldStatus(EditorState& state, const smg::ObjectField& field);
+void drawFieldStatus(EditorState& state, const smg::ObjectField& field,
+                     bool widgetHovered);
 
 // The field grid under the transform rows: every object parameter the archive
 // stores, enumerated by the model and edited by the right widget for its
@@ -1069,7 +1135,7 @@ void drawObjectFieldGrid(EditorState& state, std::size_t objectIndex) {
         if (!field.present) {
             ImGui::EndDisabled();
         }
-        drawFieldStatus(state, field);
+        drawFieldStatus(state, field, ImGui::IsItemHovered());
         commitFieldWrite(state, wrote);
         ImGui::PopID();
     }
@@ -1164,7 +1230,13 @@ bool drawFieldEntry(EditorState& state, smg::ObjectModel& model, std::size_t obj
 }
 
 // Honest annotation for the row, plus the database description as a tooltip.
-void drawFieldStatus(EditorState& state, const smg::ObjectField& field) {
+// `widgetHovered` is the widget's own hover state, captured by the caller
+// right after the field widget renders — before EndDisabled() can shift the
+// "current item" to the annotation text below. The description tooltip is
+// therefore tied to hovering the widget, while the "(not in file)"/"(unused)"
+// annotation on its own text is checked inside this function.
+void drawFieldStatus(EditorState& state, const smg::ObjectField& field,
+                     bool widgetHovered) {
     (void)state;
     if (!field.present) {
         ImGui::SameLine();
@@ -1182,8 +1254,9 @@ void drawFieldStatus(EditorState& state, const smg::ObjectField& field) {
             ImGui::SetTooltip(
                 "This parameter does not apply to this object in this game.");
         }
-    } else if (!field.description.empty() &&
-               ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+    }
+    if (!field.description.empty() && widgetHovered &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
         ImGui::SetTooltip("%s", field.description.c_str());
     }
 }
@@ -1447,6 +1520,12 @@ void syncViewportChild(EditorState& state) {
 // a real File/Edit/View/Settings/Help menu and a quick-action toolbar.
 
 void requestOpenMap(EditorState& state) {
+    // Guarding here covers every entry point (menu, toolbar, tutorials,
+    // drag-and-drop) in one place. The confirmation dialog re-enters this
+    // function once the user has chosen, and by then nothing is unsaved.
+    if (!safeToDiscard(state, EditorState::PendingAction::OpenMap)) {
+        return;
+    }
     if (auto picked = pickOpenFile(state.window); picked.has_value()) {
         try {
             openMap(state, *picked);
@@ -1458,6 +1537,9 @@ void requestOpenMap(EditorState& state) {
 }
 
 void requestOpenGame(EditorState& state) {
+    if (!safeToDiscard(state, EditorState::PendingAction::OpenGame)) {
+        return;
+    }
     if (auto picked = pickFolder(state.window); picked.has_value()) {
         try {
             openGame(state, *picked);
@@ -1518,7 +1600,9 @@ void drawMenuBar(EditorState& state, bool& done) {
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4")) {
-            done = true;
+            if (safeToDiscard(state, EditorState::PendingAction::Exit)) {
+                done = true;
+            }
         }
         ImGui::EndMenu();
     }
@@ -1555,6 +1639,7 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::MenuItem("Project", nullptr, &state.showProject);
         ImGui::MenuItem("Objects", nullptr, &state.showObjects);
         ImGui::MenuItem("Properties", nullptr, &state.showProperties);
+        ImGui::MenuItem("Problems", nullptr, &state.showProblems);
         ImGui::MenuItem("3D Viewport", nullptr, &state.showViewport);
         ImGui::MenuItem("Log", nullptr, &state.showLog);
         ImGui::Separator();
@@ -1611,6 +1696,132 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::EndMenu();
     }
     ImGui::EndMainMenuBar();
+}
+
+// Confirmation for any action that would drop unsaved edits. Deliberately a
+// plain centred window rather than a popup modal: it cannot be dismissed by
+// accident, so there is no path where the editor silently carries on and loses
+// the document.
+void drawUnsavedDialog(EditorState& state, bool& done) {
+    if (!state.confirmUnsaved) {
+        return;
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking |
+                                   ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoSavedSettings;
+    ImGui::SetNextWindowFocus();
+    if (ImGui::Begin("Unsaved changes", nullptr, flags)) {
+        ImGui::TextUnformatted("This zone has unsaved changes.");
+        ImGui::TextDisabled("Continuing now would throw them away.");
+        ImGui::Separator();
+        if (ImGui::Button("Save and continue", ImVec2(150, 0))) {
+            bool saved = true;
+            try {
+                saveStage(state);
+            } catch (const std::exception& error) {
+                // A failed save keeps the dialog up so nothing is lost.
+                saved = false;
+                pushToast(state, error.what(), true);
+            }
+            if (saved) {
+                state.confirmUnsaved = false;
+                runPendingAction(state, done);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard changes", ImVec2(130, 0))) {
+            state.unsaved = false;
+            state.confirmUnsaved = false;
+            runPendingAction(state, done);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0))) {
+            state.confirmUnsaved = false;
+            state.pendingAction = EditorState::PendingAction::None;
+        }
+    }
+    ImGui::End();
+}
+
+// Re-runs stage validation, but only when something could have changed it.
+// Walking every object against the database on every frame would be waste.
+void refreshProblems(EditorState& state) {
+    if (!state.stage) {
+        state.findings.clear();
+        state.findingsCursor = 0;
+        return;
+    }
+    if (state.findingsCursor == state.undoStack.cursor()) {
+        return;
+    }
+    const int gameType = state.game ? state.game->gameType() : 2;
+    const edit::ValidationReport report =
+        edit::validateStage(*state.stage, state.objectDb, gameType);
+    state.findings = report.findings;
+    state.findingsCursor = state.undoStack.cursor();
+}
+
+// Number of findings worth flagging in the status bar: warnings and up.
+int problemCount(const EditorState& state) {
+    return static_cast<int>(state.findings.size());
+}
+
+// The validation drawer. Clicking a finding jumps to the object it is about,
+// which is the whole point: a warning you cannot act on is just noise.
+void drawProblemsPanel(EditorState& state) {
+    refreshProblems(state);
+    if (!state.showProblems) {
+        return;
+    }
+    if (!ImGui::Begin("Problems", &state.showProblems)) {
+        ImGui::End();
+        return;
+    }
+    if (!state.stage) {
+        ImGui::TextDisabled("No zone loaded, so there is nothing to check.");
+        ImGui::End();
+        return;
+    }
+    if (state.findings.empty()) {
+        ImGui::TextUnformatted("No problems found.");
+        ImGui::TextDisabled("Checks: unknown objects, game mismatches, missing "
+                            "required parameters, dangling switches, zero scale.");
+        ImGui::End();
+        return;
+    }
+    ImGui::TextDisabled("%d finding(s)", static_cast<int>(state.findings.size()));
+    ImGui::Separator();
+    ImGui::BeginChild("##findings");
+    for (std::size_t index = 0; index < state.findings.size(); ++index) {
+        const edit::Finding& finding = state.findings[index];
+        // Severity drives the chip colour; the palette keeps both readable.
+        const Rgba& ink = finding.severity == edit::Severity::Error
+                              ? themePalette(state.settings.darkMode).error
+                              : themePalette(state.settings.darkMode).unsaved;
+        const std::string severity(edit::toString(finding.severity));
+        ImGui::PushStyleColor(ImGuiCol_Text, toImVec4(ink));
+        ImGui::TextUnformatted(severity.c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        std::string label = finding.message;
+        if (!finding.hint.empty()) {
+            label += "  —  " + finding.hint;
+        }
+        if (ImGui::Selectable(label.c_str(), false,
+                              ImGuiSelectableFlags_AllowDoubleClick) &&
+            finding.objectIndex.has_value()) {
+            selectObject(state, *finding.objectIndex);
+            state.showProperties = true;
+        }
+        if (ImGui::IsItemHovered() && finding.objectIndex.has_value()) {
+            ImGui::SetTooltip("Click to select object #%zu in this zone.",
+                              *finding.objectIndex);
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 void drawToasts(EditorState& state) {
@@ -2068,6 +2279,18 @@ void drawStaleStatusBar(EditorState& state) {
             ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved), "*");
             ImGui::SameLine();
         }
+        refreshProblems(state);
+        if (!state.findings.empty()) {
+            ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved), "%d",
+                               static_cast<int>(state.findings.size()));
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "%d stage problem(s). Open View > Problems to see them, and "
+                    "click one to jump to the object.",
+                    static_cast<int>(state.findings.size()));
+            }
+            ImGui::SameLine();
+        }
         ImGui::TextDisabled("%s", state.statusText.c_str());
     }
     ImGui::End();
@@ -2349,6 +2572,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             ImGui::DockBuilderDockWindow("Properties", dockRight);
             ImGui::DockBuilderDockWindow("Log", dockBottom);
             ImGui::DockBuilderDockWindow("Tutorials", dockBottom);
+            ImGui::DockBuilderDockWindow("Problems", dockBottom);
             ImGui::DockBuilderFinish(dockSpaceId);
         }
 
@@ -2370,6 +2594,8 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         drawPreferencesDialog(state);
         drawShortcutsDialog(state);
         drawToasts(state);
+        drawProblemsPanel(state);
+        drawUnsavedDialog(state, done);
         // Position + show/hide the OpenGL child window last, once every popup for
         // this frame has been submitted.
         syncViewportChild(state);

@@ -1,0 +1,1 @@
+﻿All Whitehole native core tests passed

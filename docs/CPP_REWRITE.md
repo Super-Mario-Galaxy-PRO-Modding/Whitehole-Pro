@@ -14,10 +14,21 @@ The repository builds `whitehole-pro` (windowed editor) and `whitehole-pro-conso
 - SMG1/SMG2 game, galaxy, and stage archives;
 - placement object loading (name, layer, type, position, rotation, scale) with round-trip save;
 - galaxy/zone display names from `data/galaxies.json` and `data/zones.json`;
+- object metadata from the community object database (`data/objectdb.json`) with a
+  compiled cache, plus a non-blocking first-run download when the file is absent;
 - a Windows desktop editor that can open a game folder or a map archive, list objects, edit transforms, and save;
 - a command-line interface on every platform.
 
 The bundled `.arc` galaxy templates are part of the native test suite.
+
+`data/objectdb.json` is deliberately not committed: it is roughly 2 MB and is
+maintained by the community. The editor downloads it in the background on first
+run and reloads the editor state when it lands, so the UI never blocks on the
+network; if the download fails the editor stays fully usable with raw object
+names, reports the reason as a toast plus a Log entry, and offers a retry from
+**Settings > Update Object Database...** or
+`whitehole-pro-console objectdb update`. The Properties panel states plainly when
+no database is installed instead of showing an empty parameter grid.
 
 ## Build
 
@@ -62,6 +73,11 @@ whitehole-pro-console archive extract data/templates/SMG2BigGalaxyMap.arc extrac
 whitehole-pro-console bcsv inspect extracted/Stage/jmp/Placement/Common/ObjInfo
 whitehole-pro-console yaz0 decompress input.szs output.arc
 whitehole-pro-console hash Obj_arg0
+
+# Object database (downloads when missing; the editor does this by itself too)
+whitehole-pro-console objectdb check
+whitehole-pro-console objectdb update
+whitehole-pro-console objectdb query Kinopio
 ```
 
 In the Windows editor: **File > Open Map Archive...** and choose `data/templates/SMG2BigGalaxyMap.arc` to load objects without a full game dump. Use **File > Open Game Directory...** for an extracted SMG workspace. Edit name/position/rotation/scale, click **Apply**, then **File > Save Zone**.

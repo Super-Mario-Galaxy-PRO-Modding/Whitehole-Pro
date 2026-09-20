@@ -54,6 +54,19 @@ Use **File → Open Game Directory…** instead, then pick a galaxy.
 
 ---
 
+### The object database (automatic, one time)
+
+The friendly object names and the whole parameter grid come from the community
+[galaxydatabase](https://github.com/SMGCommunity/galaxydatabase). That
+`objectdb.json` is roughly 2 MB and deliberately **not** committed, so on first
+run the editor fetches it on a background thread and installs it into `data\`.
+Nothing blocks the UI, and if you are offline the editor still opens and edits
+normally — you just see raw object names until a database is available.
+
+Refresh it whenever you like with **Settings → Update Object Database…** (or
+`whitehole-pro-console objectdb update`). The Properties panel says so inline
+when no database is installed.
+
 ## 📦 Prerequisites — what you need first
 
 You need **exactly 2 things**. `Build.bat` checks both for you.

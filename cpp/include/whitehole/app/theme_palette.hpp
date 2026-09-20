@@ -73,6 +73,15 @@ struct Palette {
 
 [[nodiscard]] const Palette& themePalette(bool dark) noexcept;
 
+// The colour the windowing layer clears to. The shell paints most of itself,
+// but every pixel no ImGui window covers (dockspace spacing, an empty dock
+// node, the strip between two panels) would otherwise show whatever the GPU
+// back buffer was cleared with. That used to be a hard-coded dark grey, so in
+// light mode every such gap read as a black bar. Keeping the value here makes
+// it a palette fact instead of a second hard-coded constant, and lets the
+// suite assert it always matches the theme the shell is drawn in.
+[[nodiscard]] Rgba shellBackground(bool dark) noexcept;
+
 // Minimum acceptable contrast for body copy, per WCAG AA.
 inline constexpr double kTextContrastMinimum = 4.5;
 // Minimum for non-text glyphs and decoration, per WCAG AA.

@@ -1,4 +1,4 @@
-#ifndef UNICODE
+﻿#ifndef UNICODE
 #define UNICODE
 #endif
 #ifndef _UNICODE
@@ -18,6 +18,9 @@
 #include <windowsx.h>
 
 #include <GL/gl.h>
+
+
+#include "whitehole/app/theme_palette.hpp"
 
 #include <algorithm>
 #include <array>
@@ -160,7 +163,11 @@ bool ViewportWindow::create(HWND parent, int controlId, HINSTANCE instance) {
         }
         classRegistered = true;
     }
-    window_ = CreateWindowExW(0, kClassName, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 10,
+    // Created hidden: syncViewportChild reveals it once the panel has reported a
+    // real rectangle. Creating it visible used to paint a 10x10 GL surface at
+    // the top-left corner of the workspace during the boot frames before the
+    // dock layout existed.
+    window_ = CreateWindowExW(0, kClassName, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 10,
                               10, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(controlId)), instance, this);
     if (window_ == nullptr) {
         return false;
@@ -203,6 +210,14 @@ void ViewportWindow::setHover(std::optional<std::size_t> hover) {
 
 void ViewportWindow::setShowLabels(bool showLabels) noexcept {
     showLabels_ = showLabels;
+    invalidate();
+}
+
+void ViewportWindow::setOverlayTheme(bool dark) noexcept {
+    if (overlayDark_ == dark) {
+        return;
+    }
+    overlayDark_ = dark;
     invalidate();
 }
 
@@ -491,6 +506,24 @@ void ViewportWindow::paint() {
     EndPaint(window_, &paintInfo);
 }
 
+bool ViewportWindow::renderIfVisible() {
+    if (window_ == nullptr || glContext_ == nullptr || device_ == nullptr) {
+        return false;
+    }
+    // A hidden surface must not be drawn into: the contents of a hidden
+    // double-buffered GL window are undefined the moment it comes back, and the
+    // caller re-invalidates when it is revealed. Everything else repaints.
+    if (!IsWindowVisible(window_)) {
+        dirty_ = true;
+        return false;
+    }
+    drawFrame();
+    // Cancel the WM_PAINT invalidate() queued, so this redraw is not repeated
+    // the next time the message queue drains.
+    ValidateRect(window_, nullptr);
+    return true;
+}
+
 bool ViewportWindow::renderIfDirty() {
     if (!dirty_ || window_ == nullptr || glContext_ == nullptr || device_ == nullptr) {
         return false;
@@ -621,7 +654,18 @@ std::wstring toWide(std::string_view text) {
 
 void ViewportWindow::drawOverlay(HDC device) {
     // Legend + labels are GDI drawn on the visible (front) buffer after the
-    // swap, so they never flicker with the GL scene.
+    // swap, so they never flicker with the GL scene. Colours come from the
+    // palette so the overlay matches the theme the rest of the workspace uses.
+    const app::Palette& palette = app::themePalette(overlayDark_);
+    const auto toColorref = [](const app::Rgba& color) {
+        return RGB(static_cast<int>(color.r * 255.0F + 0.5F),
+                   static_cast<int>(color.g * 255.0F + 0.5F),
+                   static_cast<int>(color.b * 255.0F + 0.5F));
+    };
+    const COLORREF panelColor = toColorref(palette.panelBg);
+    const COLORREF textColor = toColorref(palette.text);
+    const COLORREF accentColor = toColorref(palette.unsaved);
+
     const HFONT oldFont = static_cast<HFONT>(SelectObject(device, GetStockObject(DEFAULT_GUI_FONT)));
     SetBkMode(device, TRANSPARENT);
 
@@ -659,7 +703,7 @@ void ViewportWindow::drawOverlay(HDC device) {
         const int legendWidth = textWidth + chipSize + 6 + padding * 2;
         const int legendHeight = legendLines * lineStep + padding * 2;
         RECT background{legendX, legendY, legendX + legendWidth, legendY + legendHeight};
-        HBRUSH backBrush = CreateSolidBrush(RGB(16, 20, 28));
+        HBRUSH backBrush = CreateSolidBrush(panelColor);
         FillRect(device, &background, backBrush);
         DeleteObject(backBrush);
 
@@ -678,7 +722,7 @@ void ViewportWindow::drawOverlay(HDC device) {
             DeleteObject(chipBrush);
             wchar_t text[128];
             _snwprintf_s(text, _TRUNCATE, L"%hs \u00D7 %d", style.label, counts[index]);
-            SetTextColor(device, RGB(235, 238, 245));
+            SetTextColor(device, textColor);
             TextOutW(device, legendX + padding + chipSize + 6, y, text, static_cast<int>(wcsnlen_s(text, 128)));
             line++;
         }
@@ -694,10 +738,10 @@ void ViewportWindow::drawOverlay(HDC device) {
             SIZE extent{};
             GetTextExtentPoint32W(device, text.c_str(), static_cast<int>(text.size()), &extent);
             RECT background{legendX, legendY, legendX + extent.cx + padding * 2, legendY + 22};
-            HBRUSH backBrush = CreateSolidBrush(RGB(16, 20, 28));
+            HBRUSH backBrush = CreateSolidBrush(panelColor);
             FillRect(device, &background, backBrush);
             DeleteObject(backBrush);
-            SetTextColor(device, RGB(255, 215, 120));
+            SetTextColor(device, accentColor);
             TextOutW(device, legendX + padding, legendY + 2, text.c_str(), static_cast<int>(text.size()));
         }
     }
@@ -725,9 +769,9 @@ void ViewportWindow::drawOverlay(HDC device) {
             GetTextExtentPoint32W(device, text.c_str(), static_cast<int>(text.size()), &extent);
             const int left = static_cast<int>(x) - extent.cx / 2;
             // Drop shadow keeps labels readable over bright geometry.
-            SetTextColor(device, RGB(10, 12, 18));
+            SetTextColor(device, overlayDark_ ? RGB(8, 10, 14) : RGB(255, 255, 255));
             TextOutW(device, left + 1, static_cast<int>(y) + 1, text.c_str(), static_cast<int>(text.size()));
-            SetTextColor(device, isSelected ? RGB(255, 220, 130) : RGB(240, 242, 248));
+            SetTextColor(device, isSelected ? accentColor : textColor);
             TextOutW(device, left, static_cast<int>(y), text.c_str(), static_cast<int>(text.size()));
         }
     }
@@ -777,3 +821,4 @@ std::optional<std::size_t> ViewportWindow::pickAt(int x, int y) {
 }
 } // namespace whitehole::render
 #endif // _WIN32
+

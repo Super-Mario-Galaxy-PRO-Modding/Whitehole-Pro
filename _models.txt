@@ -1,7 +1,0 @@
-﻿whitehole-pro-console.exe : whitehole-pro-console: models check requires a game directory and a zone name
-At line:1 char:1
-+ & 'c:\Users\conta\Documents\GitHub\Whitehole-Pro\build\Release\whiteh ...
-+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (whitehole-pro-c...and a zone name:String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 

@@ -43,8 +43,18 @@ void Settings::load() {
     if (!in) return;
     std::ostringstream buf;
     buf << in.rdbuf();
+    std::string text = buf.str();
+    // Files written by Notepad or PowerShell's Set-Content/Out-File carry a
+    // UTF-8 BOM (EF BB BF). The JSON parser rejects the byte as a syntax error,
+    // which used to make load() return silently and reset every preference to
+    // its default: theme, recent maps and all toggles. Strip it if present.
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+    }
     util::JsonValue root;
-    try { root = util::parseJson(buf.str()); } catch (...) { return; }
+    try { root = util::parseJson(text); } catch (...) { return; }
     if (!root.isObject()) return;
     lastGameDir = getS(root, "lastGameDir");
     baseGameDir = getS(root, "baseGameDir");

@@ -37,6 +37,25 @@ jobs:
       - name: Smoke test the CLI
         run: build/whitehole-pro-console.exe map objects data/templates/SMG2BigGalaxyMap.arc
 
+      - name: Smoke test the object database download
+        # Non-fatal on purpose: it exercises the same WinHTTP path the editor's
+        # first-run bootstrap uses, but a CI runner without network access must
+        # not go red for that.
+        continue-on-error: true
+        run: build/whitehole-pro-console.exe objectdb update
+
+      - name: Reject stray scratch files
+        # _*.txt / _*.ps1 diagnostics, *.tmp and *.bak copies of real sources
+        # were once committed by accident and had to be un-tracked; this keeps
+        # them out for good.
+        run: |
+          strays=$(git status --porcelain | grep -E '^\?\? (_|.*\.tmp$|.*\.bak$)' || true)
+          if [ -n "$strays" ]; then
+            echo "untracked scratch files must not be committed:"
+            echo "$strays"
+            exit 1
+          fi
+
       - name: Upload executables
         uses: actions/upload-artifact@v4
         with:

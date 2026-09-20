@@ -1,6 +1,0 @@
-﻿
-  whitehole_imgui.vcxproj -> C:\Users\conta\Documents\GitHub\Whitehole-Pro\build\Release\whitehole_imgui.lib
-  Copying runtime data into C:/Users/conta/Documents/GitHub/Whitehole-Pro/build/Release/data
-  theme_palette.cpp
-  validation.cpp
-  bmd.cpp

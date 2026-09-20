@@ -104,4 +104,6 @@ Rgba blend(const Rgba& fg, const Rgba& bg, float alpha) noexcept {
 
 const Palette& themePalette(bool dark) noexcept { return dark ? kDark : kLight; }
 
+Rgba shellBackground(bool dark) noexcept { return themePalette(dark).windowBg; }
+
 } // namespace whitehole::app

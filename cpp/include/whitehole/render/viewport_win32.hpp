@@ -47,15 +47,28 @@ public:
     void setSelected(std::optional<std::size_t> selected);
     void setHover(std::optional<std::size_t> hover);
     void setShowLabels(bool showLabels) noexcept;
+    // Legend/label ink follows the theme instead of the hard-coded dark box the
+    // overlay used to paint, which looked wrong inside a light-mode workspace.
+    void setOverlayTheme(bool dark) noexcept;
     void frameAll();
     void frameSelection();
     // Marks the surface as needing a redraw. Everything that can change what the
     // viewport looks like funnels through here, so the editor can poll one flag
     // instead of guessing when a repaint is due.
     void invalidate();
-    // Draws immediately when something invalidated the surface, and reports
-    // whether it did. Called once per editor frame: a clean viewport costs a
-    // single bool test, and an idle editor stops re-presenting the same image.
+    // Draws when the surface is visible, and reports whether it did. Called once
+    // per editor frame.
+    //
+    // Why "visible" and not "dirty": the child window is composited by Windows,
+    // not by the editor's own frame, so a frame that is drawn but never
+    // re-composited leaves the panel showing stale pixels -- the reported
+    // "blank until I click or move inside it". Repainting every visible frame
+    // costs one bool test when nothing changed and one GL frame otherwise,
+    // which is what every 3D editor does; a hidden child is skipped outright,
+    // so an occluded or closed viewport costs nothing at all.
+    bool renderIfVisible();
+    // Legacy entry point kept for callers that only want an explicit repaint
+    // (tests, one-shot draws): draws only when something invalidated the scene.
     bool renderIfDirty();
 
     void setOnSelect(SelectCallback callback) { onSelect_ = std::move(callback); }
@@ -104,6 +117,7 @@ private:
     std::optional<std::size_t> hover_;
     SelectCallback onSelect_;
     bool showLabels_{false};
+    bool overlayDark_{true};
     bool draggingLeft_{false};
     bool draggingRight_{false};
     int lastX_{0};

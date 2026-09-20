@@ -1,4 +1,4 @@
-﻿#ifndef UNICODE
+#ifndef UNICODE
 #define UNICODE
 #endif
 #ifndef _UNICODE
@@ -47,6 +47,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>      // polling a non-blocking future
+
+#include <future>      // object database download runs off the UI thread
+
 #include <charconv>
 #include <fstream>     // first-boot marker file
 #include <optional>
@@ -87,7 +91,7 @@ std::string wideToUtf8(std::wstring_view text) {
 }
 
 void showBootError(const wchar_t* what) {
-    MessageBoxW(nullptr, what, L"Whitehole Pro — startup failed",
+    MessageBoxW(nullptr, what, L"Whitehole Pro â€” startup failed",
                 MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
@@ -179,7 +183,7 @@ void showFirstBootSplash(HWND owner) {
 
 // ---------------------------------------------------------------------------
 // Editor state: everything the immediate-mode UI reads and writes. Unlike the
-// old control-based GUI there are no HWND widget fields here — panels render
+// old control-based GUI there are no HWND widget fields here â€” panels render
 // every frame straight from this struct.
 // ---------------------------------------------------------------------------
 struct Toast {
@@ -193,6 +197,13 @@ struct EditorState {
     db::NameTable galaxyNames;
     db::NameTable zoneNames;
     db::ObjectDatabase objectDb;
+    // First-run database bootstrap. `data/objectdb.json` ships out-of-band (it is
+    // regenerated from the community database), so a fresh install starts with
+    // no object names and no parameter grid at all. The download runs on a
+    // worker thread; pumpObjectDatabase() picks the result up once per frame.
+    std::future<std::string> objectDbDownload;
+    bool objectDbDownloadPending{false};
+
     db::ModelSubstitutions modelSubstitutions;
     render::ModelLibrary modelLibrary;
     Settings settings;
@@ -331,7 +342,7 @@ float dpiScaleFactor() {
 
 // Slurps a font file into a process-lifetime buffer. The atlas is handed a
 // pointer into this memory (FontDataOwnedByAtlas stays false), so it has to
-// outlive the atlas — a function-local static is freed at process exit.
+// outlive the atlas â€” a function-local static is freed at process exit.
 bool readFontBytes(const std::filesystem::path& path, std::vector<unsigned char>& out) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(path, ec);
@@ -519,6 +530,59 @@ void refreshObjects(EditorState& state) {
         state.visibleObjects.push_back(i);
     }
 }
+
+// --- object database bootstrap ----------------------------------------------
+
+// Kicks off (or re-kicks off) the community database download on a worker
+// thread. WinHTTP is blocking, so it must never run on the UI thread; the
+// future is polled once per frame by pumpObjectDatabase().
+void startObjectDatabaseDownload(EditorState& state) {
+    if (state.objectDbDownloadPending) {
+        return;
+    }
+    if (!objectDatabaseDownloadAvailable()) {
+        pushToast(state, "This build cannot download the object database; run "
+                         "\"whitehole-pro-console objectdb update\" instead.", true);
+        return;
+    }
+    state.objectDbDownloadPending = true;
+    state.objectDbDownload = std::async(std::launch::async, [dataRoot = state.dataRoot] {
+        return downloadObjectDatabase(dataRoot / "objectdb.json");
+    });
+}
+
+// Collects a finished download and reloads the database on the UI thread.
+// Called once per frame: an empty result means success, anything else is a
+// human-readable reason. Nothing here is fatal -- the editor stays usable with
+// raw object names and no parameter grid when the network is unavailable.
+void pumpObjectDatabase(EditorState& state) {
+    if (!state.objectDbDownloadPending || !state.objectDbDownload.valid()) {
+        return;
+    }
+    if (state.objectDbDownload.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        return;
+    }
+    state.objectDbDownloadPending = false;
+    const std::string failure = state.objectDbDownload.get();
+    if (!failure.empty()) {
+        pushToast(state, "Object database download failed: " + failure, true);
+        state.showLog = true;
+        return;
+    }
+    std::error_code ec;
+    const auto database = state.dataRoot / "objectdb.json";
+    const auto cachePath = Settings::defaultConfigPath().parent_path() / "objectdb.cache";
+    state.objectDb.load(database, cachePath);
+    refreshObjects(state);
+    if (state.objectDb.classCount() == 0 && state.objectDb.names().empty()) {
+        pushToast(state, "The downloaded object database could not be parsed.", true);
+        return;
+    }
+    pushToast(state, "Object database installed: " +
+                         std::to_string(state.objectDb.names().size()) + " objects, " +
+                         std::to_string(state.objectDb.classCount()) + " classes.");
+}
+
 
 void refreshViewport(EditorState& state, bool frame) {
     if (!state.viewportReady) {
@@ -727,7 +791,7 @@ void syncViewportSelection(EditorState& state, std::optional<std::size_t> select
     if (selected.has_value() && state.stage && *selected < state.stage->objects().size()) {
         const auto& object = state.stage->objects()[*selected];
         const auto& style = render::objectStyle(object.kind, object.name);
-        setStatus(state, std::string(object.name) + " — " + style.label +
+        setStatus(state, std::string(object.name) + " â€” " + style.label +
                              " (" + object.kind + "/" + object.layer + ")");
     }
 }
@@ -937,7 +1001,7 @@ void drawObjectsPanel(EditorState& state) {
     // Filter box with a clear button; filtering reruns only when the text
     // actually changes so 10k-object stages stay smooth.
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0F);
-    if (ImGui::InputTextWithHint("##search", "Search objects… (Ctrl+F)", state.searchBuf,
+    if (ImGui::InputTextWithHint("##search", "Search objectsâ€¦ (Ctrl+F)", state.searchBuf,
                                  sizeof(state.searchBuf))) {
         state.filter = state.searchBuf;
     }
@@ -1086,7 +1150,7 @@ void drawObjectFieldGrid(EditorState& state, std::size_t objectIndex) {
 
     ImGui::SeparatorText("Fields");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0F);
-    ImGui::InputTextWithHint("##fieldfilter", "Filter fields…", state.fieldFilter,
+    ImGui::InputTextWithHint("##fieldfilter", "Filter fieldsâ€¦", state.fieldFilter,
                              sizeof(state.fieldFilter));
     ImGui::SameLine();
     if (ImGui::Button("X##clearfields", ImVec2(24, 0))) {
@@ -1236,7 +1300,7 @@ bool drawFieldEntry(EditorState& state, smg::ObjectModel& model, std::size_t obj
 
 // Honest annotation for the row, plus the database description as a tooltip.
 // `widgetHovered` is the widget's own hover state, captured by the caller
-// right after the field widget renders — before EndDisabled() can shift the
+// right after the field widget renders â€” before EndDisabled() can shift the
 // "current item" to the annotation text below. The description tooltip is
 // therefore tied to hovering the widget, while the "(not in file)"/"(unused)"
 // annotation on its own text is checked inside this function.
@@ -1289,6 +1353,22 @@ void drawPropertiesPanel(EditorState& state) {
         return;
     }
     const auto& object = state.stage->objects()[*state.selectedObject];
+
+    // No object database yet: raw names, no parameter grid, no hint why. The
+    // Settings menu offers Update Object Database…; this panel advertises it
+    // inline so a user seeing either side of the UI is pointed at the fix.
+    if (state.objectDb.names().empty() && state.objectDb.classCount() == 0) {
+        ImGui::BulletText("No object database");
+        ImGui::TextWrapped("Set Status > Update Object Database… to fetch it from the "
+                            "community build. Without it you only see the raw object "
+                            "names and none of the per-object parameter fields.");
+        if (ImGui::Button("Update Object Database…")) {
+            setStatus(state, "Downloading the object database…");
+            startObjectDatabaseDownload(state);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::Separator();
+    }
 
     // Identity header: friendly name from the object database.
     const std::string friendly = state.objectDb.displayName(object.name);
@@ -1417,11 +1497,12 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         if (picked.has_value() && state.stage && *picked < state.stage->objects().size()) {
             const auto& object = state.stage->objects()[*picked];
             const auto& style = render::objectStyle(object.kind, object.name);
-            setStatus(state, std::string(object.name) + " — " + style.label +
+            setStatus(state, std::string(object.name) + " â€” " + style.label +
                                  " (" + object.kind + "/" + object.layer + ")");
         }
     });
     state.viewport.setShowLabels(state.showLabels);
+    state.viewport.setOverlayTheme(state.settings.darkMode);
     refreshViewport(state, true); // paint real content on the very first frame
     return true;
 }
@@ -1470,7 +1551,7 @@ void placeViewportChild(EditorState& state) {
         refreshViewport(state, false);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Left-drag pan  ·  Right-drag orbit  ·  Wheel zoom  ·  Click select");
+    ImGui::TextDisabled("Left-drag pan  Â·  Right-drag orbit  Â·  Wheel zoom  Â·  Click select");
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::GetContentRegionAvail();
@@ -1490,14 +1571,34 @@ void placeViewportChild(EditorState& state) {
 //
 // The child is a real HWND, so it paints above the ImGui framebuffer. That means
 // an open menu, modal or context menu drawn over the viewport would be hidden
-// behind it, so the child is temporarily hidden while any popup is up.
+// behind it, so the child is temporarily hidden while one of those is up.
+// Tooltips are excluded: they flicker open and closed as the cursor travels, and
+// hiding the GL surface for each one both blanks the viewport and leaves its
+// contents undefined when it comes back.
+bool blockingPopupOverViewport() {
+    ImGuiContext& context = *GImGui;
+    for (const ImGuiPopupData& popup : context.OpenPopupStack) {
+        const ImGuiWindow* window = popup.Window;
+        if (window == nullptr) {
+            continue;
+        }
+        // ImGui tooltips live in the popup stack, but they carry the Tooltip
+        // window flag; everything else (menus, modals, combo popups) is a
+        // surface that would be drawn behind the child.
+        if ((window->Flags & ImGuiWindowFlags_Tooltip) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void syncViewportChild(EditorState& state) {
     if (!state.viewportReady) {
         return;
     }
-    const bool popupOpen = ImGui::IsPopupOpen(
-        nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    const bool popupOpen = blockingPopupOverViewport();
     const bool wantVisible = state.viewportRectValid && !popupOpen;
+    bool moved = false;
     if (wantVisible) {
         const RECT& target = state.viewportRect;
         const RECT& applied = state.viewportRectApplied;
@@ -1506,16 +1607,22 @@ void syncViewportChild(EditorState& state) {
             MoveWindow(state.viewport.handle(), target.left, target.top,
                        target.right - target.left, target.bottom - target.top, TRUE);
             state.viewportRectApplied = target;
+            moved = true;
         }
     }
-    if (wantVisible == state.viewportChildVisible) {
-        return;
+    if (wantVisible != state.viewportChildVisible) {
+        ShowWindow(state.viewport.handle(), wantVisible ? SW_SHOWNA : SW_HIDE);
+        state.viewportChildVisible = wantVisible;
+        moved = moved || wantVisible;
     }
-    ShowWindow(state.viewport.handle(), wantVisible ? SW_SHOWNA : SW_HIDE);
-    state.viewportChildVisible = wantVisible;
-    if (wantVisible) {
-        // A hidden GL surface comes back undefined, so ask for a fresh frame the
-        // instant the child is revealed instead of waiting for an interaction.
+    if (moved && wantVisible) {
+        // Showing or resizing a GL surface orphans whatever it held: a hidden
+        // window comes back with undefined contents, and a resized one keeps
+        // the old size until something repaints. Windows only delivers WM_PAINT
+        // when a window is uncovered, so without this the panel can sit blank
+        // until the user happens to click inside it.
+        RedrawWindow(state.viewport.handle(), nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
         state.viewport.invalidate();
     }
 }
@@ -1664,7 +1771,7 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::Separator();
         ImGui::TextDisabled("Overlays");
         ImGui::TextWrapped("Renderer overlays (axis, areas, cameras, gravity, paths) "
-                           "are part of the 3D viewport owned by the renderer — "
+                           "are part of the 3D viewport owned by the renderer â€” "
                            "those toggles will light up once that support lands.");
         if (ImGui::MenuItem("Axis", nullptr, &state.settings.showAxis)) {
             state.settings.save();
@@ -1680,10 +1787,21 @@ void drawMenuBar(EditorState& state, bool& done) {
     if (ImGui::BeginMenu("Settings")) {
         if (ImGui::MenuItem("Dark Theme", nullptr, &state.settings.darkMode)) {
             applyWhiteholeTheme(state.settings.darkMode, dpiScaleFactor());
+            state.viewport.setOverlayTheme(state.settings.darkMode);
             state.settings.save();
         }
         if (ImGui::MenuItem("Preferences...")) {
             state.showPreferences = true;
+        }
+        if (ImGui::MenuItem("Update Object Database…")) {
+            if (state.objectDbDownloadPending) {
+                setStatus(state, "Retrying the object database download…");
+                state.objectDbDownload = {};
+                startObjectDatabaseDownload(state);
+            } else {
+                setStatus(state, "Downloading the object database…");
+                startObjectDatabaseDownload(state);
+            }
         }
         ImGui::EndMenu();
     }
@@ -1812,7 +1930,7 @@ void drawProblemsPanel(EditorState& state) {
         ImGui::SameLine();
         std::string label = finding.message;
         if (!finding.hint.empty()) {
-            label += "  —  " + finding.hint;
+            label += "  â€”  " + finding.hint;
         }
         if (ImGui::Selectable(label.c_str(), false,
                               ImGuiSelectableFlags_AllowDoubleClick) &&
@@ -1904,7 +2022,7 @@ void drawToolbar(EditorState& state) {
     if (searchWidth > 120.0F) {
         ImGui::SetNextItemWidth(searchWidth);
     }
-    if (ImGui::InputTextWithHint("##toolbar-search", "Search objects…  (Ctrl+F)",
+    if (ImGui::InputTextWithHint("##toolbar-search", "Search objectsâ€¦  (Ctrl+F)",
                                  state.searchBuf, sizeof(state.searchBuf))) {
         state.filter = state.searchBuf;
     }
@@ -1912,7 +2030,10 @@ void drawToolbar(EditorState& state) {
 }
 
 void drawStatusBar(EditorState& state) {
-    const float height = ImGui::GetFrameHeight() + 10.0F;
+    // One height for the reserved space in the dock host and for the strip
+    // itself; the two used to differ by two pixels, which read as a dark hairline
+    // between the dock area and the status bar in light mode.
+    const float height = ImGui::GetFrameHeight() + 12.0F;
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     // Full-bleed strip at the bottom of the host window.
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg));
@@ -1992,6 +2113,7 @@ void drawPreferencesDialog(EditorState& state) {
     ImGui::SeparatorText("Appearance");
     if (ImGui::Checkbox("Dark theme", &state.settings.darkMode)) {
         applyWhiteholeTheme(state.settings.darkMode, dpiScaleFactor());
+        state.viewport.setOverlayTheme(state.settings.darkMode);
         changed = true;
     }
     ImGui::SeparatorText("Viewport");
@@ -2109,7 +2231,7 @@ const std::vector<TutorialTopic>& tutorialTopics() {
          }},
         {"Find and select objects", "objects list search filter select find ctrl+f",
          {
-             {"Type in the search box (toolbar or Objects panel) — the list filters live.",
+             {"Type in the search box (toolbar or Objects panel) â€” the list filters live.",
               TutorialAction::FocusSearch, "Focus the search"},
              {"Click a row to select it; its transform loads into Properties.", TutorialAction::None},
              {"Double-click a row to fly the 3D camera to that object.", TutorialAction::None},
@@ -2117,9 +2239,9 @@ const std::vector<TutorialTopic>& tutorialTopics() {
          }},
         {"Move, rotate and scale", "transform position rotation scale properties drag",
          {
-             {"Drag the X/Y/Z fields in Properties — the 3D model follows live.", TutorialAction::None},
+             {"Drag the X/Y/Z fields in Properties â€” the 3D model follows live.", TutorialAction::None},
              {"Double-click a field to type an exact value (3-decimal precision).", TutorialAction::None},
-             {"Each drag is one undo step — Ctrl+Z walks back gesture by gesture.", TutorialAction::None},
+             {"Each drag is one undo step â€” Ctrl+Z walks back gesture by gesture.", TutorialAction::None},
              {"Reset restores the file values; Save Zone writes everything to disk.",
               TutorialAction::Save, "Save the zone"},
          }},
@@ -2350,7 +2472,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
 
     Settings settings;
     settings.load();
-    // NOTE: applyWhiteholeTheme must NOT be called here — it needs an ImGui
+    // NOTE: applyWhiteholeTheme must NOT be called here â€” it needs an ImGui
     // context (created below). Calling ImGui::GetStyle() with no context is a
     // null-pointer crash that silently kills the app on boot (WIN32 subsystem
     // shows no console). Theme and fonts are applied after CreateContext.
@@ -2420,11 +2542,11 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
     // crisp and correctly sized when the window moves between displays.
     io.ConfigDpiScaleFonts = true;
     // NOTE: multi-viewport (tearing windows off into OS windows) is OFF on
-    // purpose — it is what made panels float around as separate windows.
+    // purpose â€” it is what made panels float around as separate windows.
 
     // The dock layout persists across launches so a carefully arranged workspace
     // survives a restart (ImGui keeps this pointer, so it lives in a static).
-    // When no layout exists yet — or after View > Reset Layout — the default
+    // When no layout exists yet â€” or after View > Reset Layout â€” the default
     // DockBuilder arrangement is used instead.
     static std::string layoutIniPath;
     {
@@ -2463,6 +2585,14 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         const auto cachePath =
             Settings::defaultConfigPath().parent_path() / "objectdb.cache";
         state.objectDb.load(state.dataRoot / "objectdb.json", cachePath);
+        // A fresh install has no database at all (it is deliberately not
+        // committed), which used to leave the editor with raw object names and
+        // an empty parameter grid and no hint why. Fetch it once, quietly.
+        if (state.objectDb.names().empty() &&
+            !std::filesystem::exists(state.dataRoot / "objectdb.json")) {
+            setStatus(state, "Downloading the object databaseâ€¦");
+            startObjectDatabaseDownload(state);
+        }
     }
 
     // --- Hosted 3D viewport (creates the OpenGL child window) ---
@@ -2528,34 +2658,39 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         ImGui::SetNextWindowPos(mainViewport->WorkPos);
         ImGui::SetNextWindowSize(mainViewport->WorkSize);
         ImGui::SetNextWindowViewport(mainViewport->ID);
+        // The host paints ImGuiCol_WindowBg. That matters in light mode: it used
+        // to be NoBackground, so every pixel the shell did not explicitly draw
+        // (the spacing around the toolbar separator, the strip above the status
+        // bar) showed the hard-coded dark D3D clear colour as two black bars.
+        // The central dock node stays transparent via PassthruCentralNode, which
+        // is what the 3D child needs, so nothing here hides the viewport.
         const ImGuiWindowFlags hostFlags =
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
-            ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoDocking |
             ImGuiWindowFlags_NoSavedSettings;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
         ImGui::Begin("##dockhost", nullptr, hostFlags);
         ImGui::PopStyleVar();
 
         if (state.showToolbar) {
-            // The dock host is NoBackground, so the strip has to paint its own
-            // surface. ImGuiCol_ChildBg is only consumed by BeginChild(), hence
-            // the wrapper: drawn raw, the dark D3D clear colour showed through
-            // the gaps between buttons in the light theme. Same chrome as the
-            // status strip below.
+            // One strip owns the toolbar row *and* the separator below it, so
+            // the item spacing between them is painted by the strip rather than
+            // left transparent for the clear colour to show through.
             ImGui::PushStyleColor(ImGuiCol_ChildBg,
                                   ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0F, 3.0F));
+            const float stripHeight = ImGui::GetFrameHeight() + 14.0F;
             ImGui::BeginChild("##toolbarstrip",
-                              ImVec2(mainViewport->WorkSize.x, ImGui::GetFrameHeight() + 8.0F),
+                              ImVec2(mainViewport->WorkSize.x, stripHeight),
                               ImGuiChildFlags_AlwaysUseWindowPadding,
                               ImGuiWindowFlags_NoScrollbar);
             drawToolbar(state);
+            ImGui::Separator();
             ImGui::EndChild();
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
-            ImGui::Separator();
         }
 
         const float statusHeight = state.showStatusBar ? ImGui::GetFrameHeight() + 12.0F : 0.0F;
@@ -2610,18 +2745,15 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         drawTutorialsPanel(state);
         drawAboutDialog(state);
         drawPreferencesDialog(state);
+        pumpObjectDatabase(state);
         drawShortcutsDialog(state);
         drawToasts(state);
         drawProblemsPanel(state);
         drawUnsavedDialog(state, done);
         // Position + show/hide the OpenGL child window last, once every popup for
-        // this frame has been submitted.
+        // this frame has been submitted. It is drawn after the frame is
+        // presented (see the bottom of the loop).
         syncViewportChild(state);
-        // Then draw it. The child has no timer and Windows only sends WM_PAINT
-        // when it gets uncovered, so without driving the redraw from here a
-        // static scene keeps whatever was drawn last -- and shows a stale buffer
-        // after the popup logic above re-shows the window.
-        state.viewport.renderIfDirty();
 
         // --- Keyboard shortcuts ---
         const bool ctrlDown =
@@ -2649,13 +2781,26 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
 
         // --- Rendering ---
         ImGui::Render();
-        const float clearColor[4] = {0.11f, 0.11f, 0.12f, 1.0f};
+        // The shell clears to the palette's window colour, not a hard-coded
+        // grey. ImGui does not paint every pixel of the window (dock spacing,
+        // the transparent central node behind the 3D child), so whatever the
+        // clear leaves behind is visible between panels; a dark clear in light
+        // mode was the source of the black bars under the toolbar.
+        const Rgba shellColor = app::shellBackground(state.settings.darkMode);
+        const float clearColor[4] = {shellColor.r, shellColor.g, shellColor.b, 1.0F};
 
         g_context->OMSetRenderTargets(1, &g_renderTarget, nullptr);
         g_context->ClearRenderTargetView(g_renderTarget, clearColor);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
         g_swapChain->Present(1, 0); // VSync
+
+        // Draw the 3D child last. The parent's present rewrites the whole
+        // window surface after the shell, so a viewport drawn before it is
+        // composited stale or not at all -- the "blank until I click or move
+        // inside it" bug. Drawing after the present leaves the GL surface as
+        // the newest thing in the frame.
+        state.viewport.renderIfVisible();
     }
 
     // --- Cleanup ---
@@ -2723,3 +2868,5 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam
 }
 
 } // namespace whitehole::app
+
+

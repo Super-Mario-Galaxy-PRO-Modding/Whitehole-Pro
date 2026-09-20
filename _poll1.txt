@@ -1,7 +1,0 @@
-﻿size: 2940
-still running
-  model_library.cpp
-  viewport_scene.cpp
-  Generating Code...
-  whitehole_core.vcxproj -> C:\Users\conta\Documents\GitHub\Whitehole-Pro\build\Release\whitehole_core.lib
-  core_tests.cpp

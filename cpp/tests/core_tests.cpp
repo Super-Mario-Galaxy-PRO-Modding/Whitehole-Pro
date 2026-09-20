@@ -2182,6 +2182,33 @@ void testModelLibrary() {
 // or pressed frame colours to a disabled item. Decorative accent is checked
 // against the 3.0 guideline, but only on rest surfaces for the same reason:
 // there is deliberately no bright-azure escape hatch for small controls.
+// The D3D clear colour the shell paints its unused pixels with must track the
+// palette, or the bars the light theme used to show come straight back. This
+// pins that relationship so a palette edit cannot silently break it.
+void testShellBackground() {
+    using whitehole::app::Palette;
+    using whitehole::app::Rgba;
+    using whitehole::app::shellBackground;
+    using whitehole::app::themePalette;
+
+    // Rgba is a plain aggregate with no operator==, so compare the channels.
+    const auto sameColor = [](const Rgba& a, const Rgba& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    for (int theme = 0; theme < 2; ++theme) {
+        const bool dark = theme == 0;
+        const Palette& palette = themePalette(dark);
+        expect(sameColor(shellBackground(dark), palette.windowBg),
+               std::string(dark ? "dark" : "light") +
+                   " shellBackground must track windowBg");
+        // The shell is the fallback for any pixel the UI does not paint, so it
+        // has to be a real surface colour rather than an uninitialised black.
+        expect(shellBackground(dark).a > 0.0F,
+               std::string(dark ? "dark" : "light") + " shellBackground is transparent");
+    }
+}
+
 void testThemeContrast() {
     using whitehole::app::blend;
     using whitehole::app::contrastRatio;
@@ -2305,6 +2332,7 @@ int main() {
         testModelLibrary();
         testJsonRoundTrip();
         testSettingsRoundTrip();
+        testShellBackground();
         testThemeContrast();
         testObjectDatabase();
         testObjectDatabaseV2();

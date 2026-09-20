@@ -21,5 +21,11 @@ build_state.txt
 *.bak
 restore_labels.diff
 
+# Scratch artifacts that were committed by accident and had to be un-tracked.
+# `_*` covers the bulk of them (diagnostics dumps and one-off PowerShell
+# helpers); the rest are one-off copies of real sources.
+_*
+*.tmp
+
 # Visual Studio / IDE local state
 .vs/

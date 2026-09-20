@@ -27,6 +27,7 @@
 #include "whitehole/util/text.hpp"
 #include "whitehole/render/viewport_win32.hpp"
 #include "whitehole/smg/game_archive.hpp"
+#include "whitehole/smg/object_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <d3d11.h>
@@ -238,6 +239,9 @@ struct EditorState {
     // a drag commits, the before/after pair becomes one TransformCommand.
     smg::PlacementObject dragStart{};
     bool draggingTransform{false};
+    char fieldFilter[96]{};    // field-grid filter box (Properties panel)
+    bool draggingField{false}; // an ObjectModel setter is mid-float-drag,
+                               // mirroring draggingTransform for the transform rows
     bool unsaved{false};
 
     // --- Undo: one stack per editor session, cleared on load -----------------
@@ -937,6 +941,253 @@ void drawObjectsPanel(EditorState& state) {
     ImGui::End();
 }
 
+// How the field grid below shows one database value list entry. The database
+// ships entries as "Value: Notes"; matching on the "Value:" prefix finds the
+// entry for the stored value, and the full entry is previewed so 0 and 255
+// stay distinguishable without guessing.
+const char* fieldListPreview(const smg::ObjectField& field, const std::string& current) {
+    for (const auto& option : field.values) {
+        if (option.rfind(current + ":", 0) == 0) {
+            return option.c_str();
+        }
+    }
+    return current.c_str();
+}
+
+// Insertions into std::string combo entries use "Value: Notes" prefixes; the
+// leading integer is the stored value, everything after the colon is the note.
+bool parseListPrefix(const std::string& option, std::int32_t& out) {
+    std::string digits;
+    for (char ch : option) {
+        if ((ch >= '0' && ch <= '9') || (ch == '-' && digits.empty())) {
+            digits.push_back(ch);
+        } else {
+            break;
+        }
+    }
+    if (digits.empty() || (digits == "-")) {
+        return false;
+    }
+    try {
+        out = static_cast<std::int32_t>(std::stol(digits));
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// How the grid below commits one row back through the undo stack, then pulls
+// the panels up to date the same way performUndo() does.
+void commitFieldWrite(EditorState& state, bool wrote) {
+    if (!wrote) {
+        return;
+    }
+    state.stage->rebuildObjects();
+    refreshObjects(state);
+    syncTransformBuffers(state);
+    state.unsaved = true;
+    refreshViewport(state, false);
+}
+
+// Combos and free-text entry for every non-boolean, non-float kind.
+bool drawFieldEntry(EditorState& state, smg::ObjectModel& model, std::size_t objectIndex,
+                    const smg::ObjectField& field, const char* label,
+                    const std::string& undoLabel);
+// Honest annotation for the row, plus the database description as a tooltip.
+void drawFieldStatus(EditorState& state, const smg::ObjectField& field);
+
+// The field grid under the transform rows: every object parameter the archive
+// stores, enumerated by the model and edited by the right widget for its
+// declared kind. This function knows nothing about what Obj_arg0 means.
+void drawObjectFieldGrid(EditorState& state, std::size_t objectIndex) {
+    if (!state.stage || objectIndex >= state.stage->objects().size()) {
+        return;
+    }
+    const int gameType = state.game ? state.game->gameType() : 2;
+    smg::ObjectModel model(*state.stage, state.objectDb, gameType);
+    // Cheap: a handful of small strings, rebuilt per frame like everything else
+    // in this panel. Held by value so a setter mutating the row cannot disturb
+    // the list a widget is iterating.
+    const std::vector<smg::ObjectField> fields = model.fields(objectIndex);
+    if (fields.empty()) {
+        return;
+    }
+
+    ImGui::SeparatorText("Fields");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0F);
+    ImGui::InputTextWithHint("##fieldfilter", "Filter fields…", state.fieldFilter,
+                             sizeof(state.fieldFilter));
+    ImGui::SameLine();
+    if (ImGui::Button("X##clearfields", ImVec2(24, 0))) {
+        state.fieldFilter[0] = '\0';
+    }
+    const std::string needle = whitehole::util::toLower(state.fieldFilter);
+
+    for (std::size_t row = 0; row < fields.size(); ++row) {
+        const smg::ObjectField& field = fields[row];
+        if (!needle.empty()) {
+            const std::string hay =
+                whitehole::util::toLower(field.label + " " + field.identifier);
+            if (hay.find(needle) == std::string::npos) {
+                continue;
+            }
+        }
+        ImGui::PushID(static_cast<int>(row));
+        const char* label =
+            field.label.empty() ? field.identifier.c_str() : field.label.c_str();
+        const std::string undoLabel = "Set " + field.label;
+        bool wrote = false;
+        if (!field.present) {
+            ImGui::BeginDisabled();
+        }
+        if (field.kind == db::PropertyKind::Boolean) {
+            bool checked = field.flag();
+            if (ImGui::Checkbox(label, &checked)) {
+                wrote = model.setBool(objectIndex, field.identifier, checked,
+                                      state.undoStack, undoLabel);
+            }
+        } else if (field.kind == db::PropertyKind::Float) {
+            double number = 0.0;
+            // A float row normally carries a number; the flag covers a malformed
+            // archive where the value came back as text.
+            const bool numeric = field.decimal(number);
+            float value = static_cast<float>(number);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::DragFloat(numeric ? label : "##unparsable", &value, 0.1F, 0.0F, 0.0F,
+                             "%.4f");
+            if (ImGui::IsItemActive()) {
+                state.draggingField = true;
+            } else if (state.draggingField) {
+                // One drag is one undoable step, exactly like the transform rows.
+                state.draggingField = false;
+                wrote = model.setFloat(objectIndex, field.identifier, value,
+                                       state.undoStack, undoLabel);
+            }
+        } else {
+            wrote = drawFieldEntry(state, model, objectIndex, field, label, undoLabel);
+        }
+        if (!field.present) {
+            ImGui::EndDisabled();
+        }
+        drawFieldStatus(state, field);
+        commitFieldWrite(state, wrote);
+        ImGui::PopID();
+    }
+}
+
+// Combos and free-text entry for every non-boolean, non-float kind.
+bool drawFieldEntry(EditorState& state, smg::ObjectModel& model, std::size_t objectIndex,
+                    const smg::ObjectField& field, const char* label,
+                    const std::string& undoLabel) {
+    bool wrote = false;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (field.kind == db::PropertyKind::List || field.kind == db::PropertyKind::IntList ||
+        field.kind == db::PropertyKind::SwitchId) {
+        std::int32_t current = 0;
+        if (!model.getInt(objectIndex, field.identifier, current)) {
+            // Absent or non-numeric: no combo to offer, so show the row inert.
+            ImGui::TextDisabled("%s", label);
+            return false;
+        }
+        const std::string currentText = std::to_string(current);
+        if (ImGui::BeginCombo(label, fieldListPreview(field, currentText))) {
+            for (const auto& option : field.values) {
+                std::int32_t optionValue = 0;
+                if (!parseListPrefix(option, optionValue)) {
+                    continue;
+                }
+                const bool picked = optionValue == current;
+                if (ImGui::Selectable(option.c_str(), picked)) {
+                    wrote = model.setInt(objectIndex, field.identifier, optionValue,
+                                         state.undoStack, undoLabel);
+                }
+                if (picked) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        return wrote;
+    }
+
+    if (field.kind == db::PropertyKind::TextList ||
+        field.kind == db::PropertyKind::ObjectName ||
+        field.kind == db::PropertyKind::Text) {
+        std::string current;
+        if (!model.getString(objectIndex, field.identifier, current)) {
+            ImGui::TextDisabled("%s", label);
+            return false;
+        }
+        if (!field.values.empty()) {
+            if (ImGui::BeginCombo(label, fieldListPreview(field, current))) {
+                for (const auto& option : field.values) {
+                    const bool picked = option == current;
+                    if (ImGui::Selectable(option.c_str(), picked)) {
+                        wrote = model.setString(objectIndex, field.identifier, option,
+                                                state.undoStack, undoLabel);
+                    }
+                    if (picked) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            return wrote;
+        }
+        char scratch[256]{};
+        std::snprintf(scratch, sizeof(scratch), "%s", current.c_str());
+        if (ImGui::InputTextWithHint("##textvalue", field.identifier.c_str(), scratch,
+                                     sizeof(scratch), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            wrote = model.setString(objectIndex, field.identifier, std::string(scratch),
+                                    state.undoStack, undoLabel);
+        }
+        return wrote;
+    }
+
+    // Integers and bitfields: an InputInt, hex for bitfields, committed when the
+    // field loses focus so a half-typed value never escapes.
+    std::int32_t current = 0;
+    if (!model.getInt(objectIndex, field.identifier, current)) {
+        ImGui::TextDisabled("%s", label);
+        return false;
+    }
+    int shown = static_cast<int>(current);
+    const ImGuiInputTextFlags flags = field.kind == db::PropertyKind::Bitfield
+                                          ? ImGuiInputTextFlags_CharsHexadecimal
+                                          : ImGuiInputTextFlags_None;
+    ImGui::InputInt(label, &shown, 1, 100, flags);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        wrote = model.setInt(objectIndex, field.identifier,
+                             static_cast<std::int32_t>(shown), state.undoStack, undoLabel);
+    }
+    return wrote;
+}
+
+// Honest annotation for the row, plus the database description as a tooltip.
+void drawFieldStatus(EditorState& state, const smg::ObjectField& field) {
+    (void)state;
+    if (!field.present) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(not in file)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "The database knows this field, but this archive does not store "
+                "it. Editing it would mean rewriting the table layout, so it is "
+                "read-only here.");
+        }
+    } else if (!field.used) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(unused)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "This parameter does not apply to this object in this game.");
+        }
+    } else if (!field.description.empty() &&
+               ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", field.description.c_str());
+    }
+}
+
 void drawPropertiesPanel(EditorState& state) {
     if (!state.showProperties) {
         return;
@@ -945,9 +1196,17 @@ void drawPropertiesPanel(EditorState& state) {
         ImGui::End();
         return;
     }
-    if (!state.stage || !state.selectedObject ||
-        *state.selectedObject >= state.stage->objects().size()) {
-        ImGui::TextDisabled("Select an object to edit its transform.");
+    if (!state.stage) {
+        ImGui::TextDisabled("No zone loaded.");
+        ImGui::TextWrapped("Open a map archive, or pick a galaxy and zone in the "
+                           "Project panel, to see object properties here.");
+        ImGui::End();
+        return;
+    }
+    if (!state.selectedObject || *state.selectedObject >= state.stage->objects().size()) {
+        ImGui::TextDisabled("Nothing selected.");
+        ImGui::TextWrapped("Click a row in the Objects panel, or an object in the 3D "
+                           "viewport, and its properties appear here.");
         ImGui::End();
         return;
     }
@@ -1024,6 +1283,9 @@ void drawPropertiesPanel(EditorState& state) {
     if (!ImGui::IsAnyItemActive() && state.draggingTransform) {
         commitDragAsUndo(state, "Edit object");
     }
+
+    // Every other parameter the object carries, driven by the object database.
+    drawObjectFieldGrid(state, *state.selectedObject);
 
     ImGui::Separator();
     const float half = (ImGui::GetContentRegionAvail().x - 8.0F) / 2.0F;

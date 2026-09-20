@@ -161,6 +161,51 @@ std::string_view propertyKindLabel(db::PropertyKind kind) noexcept {
     return "unknown";
 }
 
+// The raw value, unformatted. Text prints itself; numbers print through
+// smg::toString so an int8_t never renders as a raw character.
+std::string ObjectField::plainValue() const { return toString(value); }
+
+// On/off interpretation: anything non-zero counts, matching the fixed-function
+// BCSV convention where booleans are stored as ordinary integers.
+bool ObjectField::flag() const noexcept {
+    if (const auto* number = std::get_if<float>(&value)) {
+        return *number != 0.0F;
+    }
+    if (const auto* number = std::get_if<std::int32_t>(&value)) {
+        return *number != 0;
+    }
+    if (const auto* number = std::get_if<std::int16_t>(&value)) {
+        return *number != 0;
+    }
+    if (const auto* number = std::get_if<std::int8_t>(&value)) {
+        return *number != 0;
+    }
+    return false;
+}
+
+// Numeric interpretation. A float is exact; an integer converts losslessly into
+// a double; free text is not a number at all, which is how callers tell the two
+// widget families apart.
+bool ObjectField::decimal(double& out) const noexcept {
+    if (const auto* number = std::get_if<float>(&value)) {
+        out = static_cast<double>(*number);
+        return true;
+    }
+    if (const auto* number = std::get_if<std::int32_t>(&value)) {
+        out = static_cast<double>(*number);
+        return true;
+    }
+    if (const auto* number = std::get_if<std::int16_t>(&value)) {
+        out = static_cast<double>(*number);
+        return true;
+    }
+    if (const auto* number = std::get_if<std::int8_t>(&value)) {
+        out = static_cast<double>(*number);
+        return true;
+    }
+    return false;
+}
+
 bool ObjectModel::getInt(std::size_t objectIndex, std::string_view field, std::int32_t& out) const {
     std::size_t tableIndex = 0;
     std::size_t rowIndex = 0;

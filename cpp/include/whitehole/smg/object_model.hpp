@@ -33,6 +33,13 @@ struct ObjectField {
     bool used{false};                // passes the game/exclusives filter
     std::vector<std::string> values; // value list, e.g. "0: Off"
     BcsvValue value{std::int32_t{0}};
+
+    // The stored value as plain text, without any database formatting.
+    [[nodiscard]] std::string plainValue() const;
+    // Interprets the stored value as an on/off flag; false for empty or zero.
+    [[nodiscard]] bool flag() const noexcept;
+    // Interprets the stored value as a decimal number; false on free text.
+    [[nodiscard]] bool decimal(double& out) const noexcept;
 };
 
 class ObjectModel {

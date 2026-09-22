@@ -8,9 +8,35 @@ void UndoStack::push(UndoEntry entry) {
     if (entry == nullptr) {
         return;
     }
+    if (group_ != nullptr) {
+        // Inside a group capture the stack is untouched until endGroup(); the
+        // redo branch is discarded there, exactly once.
+        group_->add(std::move(entry));
+        return;
+    }
     // Drop the redo branch: a new action replaces any undone future.
     entries_.resize(cursor_);
     entries_.push_back(std::move(entry));
+    cursor_ = entries_.size();
+}
+
+void UndoStack::beginGroup(std::string label) {
+    if (group_ != nullptr) {
+        return; // one level only: swallowing the outer capture would be worse
+    }
+    group_ = std::make_unique<UndoMultiEntry>(std::move(label));
+}
+
+void UndoStack::endGroup() {
+    if (group_ == nullptr) {
+        return;
+    }
+    auto group = std::move(group_);
+    if (group->empty()) {
+        return; // nothing was ever recorded: the stack stays untouched
+    }
+    entries_.resize(cursor_);
+    entries_.push_back(std::move(group));
     cursor_ = entries_.size();
 }
 
@@ -49,6 +75,7 @@ std::string UndoStack::redoLabel() const {
 void UndoStack::clear() noexcept {
     entries_.clear();
     cursor_ = 0;
+    group_.reset(); // a capture cannot outlive the history it belongs to
 }
 
 UndoMultiEntry::UndoMultiEntry(std::string label) : label_(std::move(label)) {}

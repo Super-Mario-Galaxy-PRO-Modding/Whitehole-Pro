@@ -33,6 +33,27 @@ public:
 
 using UndoEntry = std::unique_ptr<IUndo>;
 
+// A group of commands undone and redone as one user-visible action, matching
+// Java's UndoMultiEntry. Children are applied in order on redo and in reverse
+// order on undo, so nested state changes unwind correctly.
+class UndoMultiEntry final : public IUndo {
+public:
+    explicit UndoMultiEntry(std::string label = "Edit");
+    ~UndoMultiEntry() override = default;
+
+    void add(UndoEntry entry);
+    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+
+    void undo() override;
+    void redo() override;
+    [[nodiscard]] std::string label() const override;
+
+private:
+    std::string label_;
+    std::vector<UndoEntry> entries_;
+};
+
 // Linear undo stack with a cursor. Entries stay alive after an undo so they can
 // be redone; pushing a new entry after an undo discards the redo branch, which
 // is what every editor does.
@@ -40,8 +61,19 @@ class UndoStack {
 public:
     UndoStack() = default;
 
-    // Records an already-applied command. Never re-applies it.
+    // Records an already-applied command. Never re-applies it. While a group
+    // capture is open (see beginGroup) the entry is collected into the group
+    // instead of landing on the stack directly.
     void push(UndoEntry entry);
+
+    // Groups several pushes into one undo step: beginGroup() starts capturing,
+    // endGroup() wraps whatever landed in between as a single undoable action
+    // (and records nothing when nothing was ever pushed). One level only; a
+    // second begin while one is open is ignored, which keeps mis-nested callers
+    // from silently swallowing the stack.
+    void beginGroup(std::string label);
+    [[nodiscard]] bool inGroup() const noexcept { return group_ != nullptr; }
+    void endGroup();
 
     // Undoes the most recent command. False when there is nothing to undo.
     bool undo();
@@ -63,27 +95,8 @@ public:
 private:
     std::vector<UndoEntry> entries_;
     std::size_t cursor_{0}; // entries_[0, cursor_) are applied
+    std::unique_ptr<UndoMultiEntry> group_; // non-null while a group is being captured
 };
 
-// A group of commands undone and redone as one user-visible action, matching
-// Java's UndoMultiEntry. Children are applied in order on redo and in reverse
-// order on undo, so nested state changes unwind correctly.
-class UndoMultiEntry final : public IUndo {
-public:
-    explicit UndoMultiEntry(std::string label = "Edit");
-    ~UndoMultiEntry() override = default;
-
-    void add(UndoEntry entry);
-    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
-    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
-
-    void undo() override;
-    void redo() override;
-    [[nodiscard]] std::string label() const override;
-
-private:
-    std::string label_;
-    std::vector<UndoEntry> entries_;
-};
 
 } // namespace whitehole::edit

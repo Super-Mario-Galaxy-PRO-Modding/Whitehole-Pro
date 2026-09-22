@@ -10,6 +10,7 @@
 #include "whitehole/edit/document.hpp"
 #include "whitehole/edit/validation.hpp"
 #include "whitehole/db/object_db.hpp"
+#include "whitehole/edit/authoring.hpp"
 #include "whitehole/edit/commands.hpp"
 #include "whitehole/edit/undo.hpp"
 #include "whitehole/io/binary_file.hpp"
@@ -20,6 +21,7 @@
 #include "whitehole/util/text.hpp"
 #include "whitehole/math/geometry.hpp"
 #include "whitehole/render/camera.hpp"
+#include "whitehole/render/gizmo.hpp"
 #include "whitehole/render/model_mesh.hpp"
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/render/viewport_scene.hpp"
@@ -41,6 +43,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -283,6 +286,138 @@ void testViewportCamera() {
     camera.frameTarget({1.0F, 2.0F, 3.0F}, 250.0F);
     expect(std::abs(camera.target.x - 1.0F) < 0.001F && std::abs(camera.distance - 250.0F) < 0.001F,
            "viewport camera framing failed");
+}
+
+void testGizmoMath() {
+    using whitehole::render::axisDirection;
+    using whitehole::render::beginGizmoDrag;
+    using whitehole::render::GizmoDrag;
+    using whitehole::render::GizmoHandle;
+    using whitehole::render::GizmoMode;
+    using whitehole::render::gizmoAxisLength;
+    using whitehole::render::gizmoDragValue;
+    using whitehole::render::pickGizmoHandle;
+
+    // An isometric view where every axis is visibly distinct.
+    whitehole::render::ViewportCamera camera;
+    camera.target = {0.0F, 0.0F, 0.0F};
+    camera.yawRadians = 0.7853982F;
+    camera.pitchRadians = 0.6F;
+    camera.distance = 1000.0F;
+    constexpr float kWidth = 800.0F;
+    constexpr float kHeight = 600.0F;
+
+    expect(axisDirection(GizmoHandle::AxisX).x == 1.0F, "axis X direction wrong");
+    expect(axisDirection(GizmoHandle::AxisY).y == 1.0F, "axis Y direction wrong");
+    expect(axisDirection(GizmoHandle::AxisZ).z == 1.0F, "axis Z direction wrong");
+
+    // Constant-screen-size sizing: the axis must read ~80 px whatever the zoom.
+    const float axisLength = gizmoAxisLength(camera, {0.0F, 0.0F, 0.0F}, kHeight);
+    float centreX = 0.0F;
+    float centreY = 0.0F;
+    expect(camera.worldToScreen({0.0F, 0.0F, 0.0F}, kWidth, kHeight, centreX, centreY),
+           "the gizmo anchor must project");
+    float tipX = 0.0F;
+    float tipY = 0.0F;
+    expect(camera.worldToScreen({axisLength, 0.0F, 0.0F}, kWidth, kHeight, tipX, tipY),
+           "the gizmo tip must project");
+    const float screenLength = std::hypot(tipX - centreX, tipY - centreY);
+    expect(screenLength > 60.0F && screenLength < 110.0F,
+           "the gizmo axis must stay a constant on-screen size");
+
+    // Clicking on each axis tip grabs that axis.
+    for (const auto handle : {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ}) {
+        const auto direction = axisDirection(handle);
+        float grabX = 0.0F;
+        float grabY = 0.0F;
+        expect(camera.worldToScreen(
+                   {direction.x * axisLength, direction.y * axisLength, direction.z * axisLength},
+                   kWidth, kHeight, grabX, grabY),
+               "an axis tip must project");
+        const auto picked =
+            pickGizmoHandle(camera, {0.0F, 0.0F, 0.0F}, grabX, grabY, kWidth, kHeight);
+        expect(picked == handle, "picking missed the axis it clicked on");
+    }
+
+    // Empty space grabs nothing; the anchor grabs the centre.
+    expect(pickGizmoHandle(camera, {0.0F, 0.0F, 0.0F}, 40.0F, 40.0F, kWidth, kHeight) ==
+               GizmoHandle::None,
+           "picking must miss empty space");
+    expect(pickGizmoHandle(camera, {0.0F, 0.0F, 0.0F}, centreX, centreY, kWidth, kHeight) ==
+               GizmoHandle::Center,
+           "picking must grab the centre at the anchor");
+
+    // ---- translate drag --------------------------------------------------
+    GizmoDrag drag;
+    expect(beginGizmoDrag(drag, camera, {0.0F, 0.0F, 0.0F}, GizmoMode::Translate,
+                          GizmoHandle::AxisX, tipX, tipY, kWidth, kHeight),
+           "beginGizmoDrag refused the X axis");
+    // Dragging *along* the handle's screen direction moves only X, positively,
+    // proportional to the pixel travel.
+    constexpr float kTravelPx = 30.0F;
+    const auto moved = gizmoDragValue(drag, camera, tipX + drag.axisDir.x * kTravelPx,
+                                      tipY + drag.axisDir.y * kTravelPx, kWidth, kHeight);
+    expect(std::abs(moved.y) < 0.5F && std::abs(moved.z) < 0.5F,
+           "an axis drag must not leak into the other axes");
+    expect(moved.x > 5.0F, "a 30px drag along X must move the object visibly");
+    expect(std::abs(moved.x - kTravelPx * drag.worldPerPixel) < 0.5F, "axis drag mapping is off");
+
+    // Dragging back to the grab point reads exactly zero.
+    const auto rest = gizmoDragValue(drag, camera, tipX, tipY, kWidth, kHeight);
+    expect(std::abs(rest.x) < 0.01F && std::abs(rest.y) < 0.01F && std::abs(rest.z) < 0.01F,
+           "a drag returned to its start must read zero");
+
+    // An axis head-on to the camera projects to a point and cannot be picked:
+    // begin refuses instead of inventing a mapping the author cannot see.
+    whitehole::render::ViewportCamera headOn;
+    headOn.target = {0.0F, 0.0F, 0.0F};
+    headOn.yawRadians = 0.0F; // eye on +X looking down -X: the X axis is head-on
+    headOn.pitchRadians = 0.0F;
+    headOn.distance = 1000.0F;
+    float headCentreX = 0.0F;
+    float headCentreY = 0.0F;
+    expect(headOn.worldToScreen({0.0F, 0.0F, 0.0F}, kWidth, kHeight, headCentreX, headCentreY),
+           "the head-on anchor must project");
+    expect(pickGizmoHandle(headOn, {0.0F, 0.0F, 0.0F}, headCentreX, headCentreY, kWidth,
+                           kHeight) != GizmoHandle::AxisX,
+           "a view-parallel axis must not be grabbable");
+
+    // ---- centre drag -----------------------------------------------------
+    // The centre moves in the view plane through the anchor.
+    GizmoDrag centre;
+    expect(beginGizmoDrag(centre, camera, {0.0F, 0.0F, 0.0F}, GizmoMode::Translate,
+                          GizmoHandle::Center, centreX, centreY, kWidth, kHeight),
+           "beginGizmoDrag refused the centre");
+    const auto planar = gizmoDragValue(centre, camera, centreX + 40.0F, centreY, kWidth, kHeight);
+    const float planarLength = planar.length();
+    expect(planarLength > 5.0F, "a 40px centre drag must move the object visibly");
+    const auto forward = camera.forward();
+    expect(std::abs(whitehole::math::Vec3f::dot(planar, forward)) < planarLength * 0.02F,
+           "a centre drag must stay in the view plane");
+
+    // ---- scale drag ------------------------------------------------------
+    // One axis length of drag must double the scale on that axis alone.
+    GizmoDrag scale;
+    // Rebuilt from the Y axis tip, which exercises a different axis than the
+    // translate test above.
+    {
+        const auto direction = axisDirection(GizmoHandle::AxisY);
+        float grabX = 0.0F;
+        float grabY = 0.0F;
+        expect(camera.worldToScreen({direction.x * axisLength, direction.y * axisLength,
+                                     direction.z * axisLength},
+                                    kWidth, kHeight, grabX, grabY),
+               "the Y axis tip must project");
+        expect(beginGizmoDrag(scale, camera, {0.0F, 0.0F, 0.0F}, GizmoMode::Scale,
+                              GizmoHandle::AxisY, grabX, grabY, kWidth, kHeight),
+               "beginGizmoDrag refused the Y tip");
+        const auto doubled =
+            gizmoDragValue(scale, camera, grabX + scale.axisDir.x * screenLength,
+                           grabY + scale.axisDir.y * screenLength, kWidth, kHeight);
+        expect(std::abs(doubled.y - 2.0F) < 0.05F, "an axis-length drag must double the scale");
+        expect(std::abs(doubled.x - 1.0F) < 0.01F && std::abs(doubled.z - 1.0F) < 0.01F,
+               "a scale drag must not touch the other axes");
+    }
 }
 
 void testViewportScene() {
@@ -682,6 +817,49 @@ void testUndoStack() {
     expect(multi.empty(), "multi undo should unwind every child");
     group->redo();
     expect(multi == "xy", "multi redo should re-apply every child in order");
+
+    // ---- group capture ---------------------------------------------------
+    // Consecutive pushes fold into one undo step while the capture is open.
+    log.clear();
+    stack.clear();
+    stack.beginGroup("Two edits");
+    expect(stack.inGroup(), "beginGroup should open a capture");
+    log += "x";
+    stack.push(std::make_unique<TextCommand>(&log, "x", "Add x"));
+    log += "y";
+    stack.push(std::make_unique<TextCommand>(&log, "y", "Add y"));
+    expect(stack.size() == 0, "grouped pushes must not land on the stack yet");
+    expect(!stack.inGroup() == false, "the capture should still be open");
+    stack.endGroup();
+    expect(!stack.inGroup(), "endGroup should close the capture");
+    expect(stack.size() == 1, "a group must be exactly one undo entry");
+    expect(stack.undoLabel() == "Two edits", "the group must carry its own label");
+    expect(log == "xy", "grouped pushes must not re-apply the commands");
+    expect(stack.undo(), "group undo failed");
+    expect(log.empty(), "group undo did not unwind every child");
+    expect(stack.redo(), "group redo failed");
+    expect(log == "xy", "group redo did not re-apply every child");
+
+    // An empty group records nothing.
+    const auto settled = stack.size();
+    stack.beginGroup("Nothing");
+    stack.endGroup();
+    expect(stack.size() == settled, "an empty group must not record an undo entry");
+
+    // An unbalanced endGroup is a safe no-op.
+    stack.endGroup();
+    expect(stack.size() == settled, "an unbalanced endGroup must not touch the stack");
+
+    // A second begin while one is open is ignored: the outer capture owns the
+    // pushes, which keeps mis-nested callers from splitting one user action.
+    stack.beginGroup("Outer");
+    stack.beginGroup("Inner");
+    log += "z";
+    stack.push(std::make_unique<TextCommand>(&log, "z", "Add z"));
+    stack.endGroup();
+    expect(stack.undoLabel() == "Outer", "a nested begin must not steal the capture");
+    expect(stack.undo(), "outer group undo failed");
+    expect(log == "xy", "the outer group did not own its child");
 }
 
 void testStageEditCommands() {
@@ -782,6 +960,299 @@ void testStageEditCommands() {
     expect(reopened.objects().size() == stage.objects().size(),
            "the edited archive did not round-trip its object count");
     std::filesystem::remove(saved);
+}
+
+// Object authoring: the native replacement for Java's add-object workflow
+// (GalaxyEditorForm.addObject + ObjectSelectForm browsing ObjectDB + the
+// ObjIdUtil id scans).
+void testObjectAuthoring() {
+    using whitehole::edit::createObject;
+    using whitehole::edit::deleteObject;
+    using whitehole::edit::deleteObjects;
+    using whitehole::edit::duplicateObject;
+    using whitehole::edit::kindForList;
+    using whitehole::edit::listForKind;
+    using whitehole::edit::NewObject;
+    using whitehole::edit::nextFreeId;
+    using whitehole::edit::placementTargets;
+    using whitehole::edit::UndoStack;
+    using whitehole::smg::StageArchive;
+
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto stage = StageArchive::openMapFile(templates / "SMG2BigGalaxyMap.arc");
+
+    // ---- database placement list <-> native table kind -------------------
+    expect(kindForList("MapPartsInfo") == "mappart", "MapPartsInfo must map to the mappart list");
+    expect(kindForList("objinfo") == "obj", "list mapping must ignore case");
+    expect(kindForList("StartInfo") == "start", "StartInfo must map to the start list");
+    expect(listForKind("obj") == "ObjInfo", "obj must map back to ObjInfo");
+    expect(listForKind("gravity") == "PlanetObjInfo", "gravity must map back to PlanetObjInfo");
+    expect(kindForList("NotAList").empty(), "an unknown list must not map to a table kind");
+
+    // ---- the template's general-object lists -----------------------------
+    const auto general = placementTargets(stage, kindForList("ObjInfo"));
+    expect(general.size() >= 2, "the template should offer several object layers");
+    for (const auto& target : general) {
+        expect(target.tableIndex < stage.tables().size(), "a target points at a missing table");
+        expect(target.kind == "obj", "a general-object target has the wrong kind");
+        expect(target.layer == stage.tables()[target.tableIndex].layer,
+               "a target reports the wrong layer");
+        expect(target.rowCount == stage.tables()[target.tableIndex].table.rows().size(),
+               "a target reports the wrong row count");
+    }
+    expect(placementTargets(stage).size() == stage.tables().size(),
+           "an unfiltered query must list every table");
+    expect(placementTargets(stage, "child").empty(), "an absent kind must list nothing");
+
+    UndoStack stack;
+
+    // ---- create ----------------------------------------------------------
+    const std::size_t tableIndex = general.front().tableIndex;
+    const auto objectsBefore = stage.objects().size();
+    const auto rowsBefore = stage.tables()[tableIndex].table.rows().size();
+
+    NewObject request;
+    request.name = "AuthorTestObject";
+    request.position = {100.0F, 200.0F, 300.0F};
+    const auto created = createObject(stage, stack, tableIndex, request);
+    expect(created.has_value(), "createObject refused a usable placement table");
+    expect(created->rowIndex == rowsBefore, "a new object must append at the end of its table");
+    expect(stage.tables()[tableIndex].table.rows().size() == rowsBefore + 1,
+           "createObject did not grow the table");
+    expect(stage.objects().size() == objectsBefore + 1,
+           "createObject did not grow the placement list");
+    expect(created->objectIndex < stage.objects().size(), "the created index is out of range");
+
+    {
+        const auto& placed = stage.objects()[created->objectIndex];
+        expect(placed.name == "AuthorTestObject", "the new object kept the wrong name");
+        expect(placed.kind == "obj", "the new object landed in the wrong list");
+        expect(placed.layer == general.front().layer, "the new object landed in the wrong layer");
+        expect(std::abs(placed.position.x - 100.0F) < 1e-4F &&
+                   std::abs(placed.position.y - 200.0F) < 1e-4F &&
+                   std::abs(placed.position.z - 300.0F) < 1e-4F,
+               "the new object kept the wrong position");
+        expect(std::abs(placed.scale.y - 1.0F) < 1e-6F, "a new object must start at scale 1");
+        expect(std::abs(placed.rotation.y) < 1e-6F, "a new object must start unrotated");
+
+        // Java's per-type constructors cleared these to -1; a fresh row must too.
+        const auto& table = stage.tables()[tableIndex].table;
+        const auto& row = table.rows()[created->rowIndex];
+        expect(table.getInt(row, "Obj_arg0", 0) == -1, "Obj_arg0 must start at -1 (unset)");
+        expect(table.getInt(row, "SW_A", 0) == -1, "SW_A must start at -1 (unset)");
+        expect(table.getInt(row, "SW_AWAKE", 0) == -1, "SW_AWAKE must start at -1 (unset)");
+        expect(table.getInt(row, "GroupId", 0) == -1, "GroupId must start at -1 (unset)");
+        expect(std::abs(table.getFloat(row, "ParamScale", 0.0F) - 1.0F) < 1e-6F,
+               "ParamScale must start at 1");
+
+        // The id has to be unique across every row of the same list.
+        const auto id = table.getInt(row, "l_id", -1);
+        expect(id >= 0, "a new object must carry a usable l_id");
+        for (const auto& object : stage.objects()) {
+            if (object.tableIndex != tableIndex || object.rowIndex == created->rowIndex) {
+                continue;
+            }
+            expect(table.getInt(table.rows()[object.rowIndex], "l_id", -1) != id,
+                   "a new object reused an existing l_id");
+        }
+    }
+
+    // Undo unwinds the row and the placement list together.
+    expect(stack.undo(), "create undo failed");
+    expect(stage.objects().size() == objectsBefore, "create undo left the object behind");
+    expect(stack.redo(), "create redo failed");
+    expect(stage.objects().size() == objectsBefore + 1, "create redo did not restore the object");
+
+    // ---- duplicate -------------------------------------------------------
+    const auto sourceIndex = created->objectIndex;
+    const auto duplicate = duplicateObject(stage, stack, sourceIndex, {50.0F, 0.0F, 0.0F});
+    expect(duplicate.has_value(), "duplicateObject refused a live object");
+    expect(duplicate->tableIndex == tableIndex, "a duplicate must stay in its original list");
+    expect(duplicate->rowIndex == created->rowIndex + 1,
+           "a duplicate must sit right next to its original");
+    expect(stage.objects().size() == objectsBefore + 2,
+           "duplicateObject did not grow the placement list");
+    {
+        const auto& copy = stage.objects()[duplicate->objectIndex];
+        const auto& original = stage.objects()[sourceIndex];
+        expect(copy.name == original.name, "a duplicate must keep the original name");
+        expect(std::abs(copy.position.x - (original.position.x + 50.0F)) < 1e-4F,
+               "a duplicate must apply the offset");
+        expect(std::abs(copy.position.y - original.position.y) < 1e-4F,
+               "a duplicate must not move on the untouched axes");
+        const auto& table = stage.tables()[tableIndex].table;
+        const auto sourceId = table.getInt(table.rows()[original.rowIndex], "l_id", -1);
+        const auto copyId = table.getInt(table.rows()[copy.rowIndex], "l_id", -1);
+        expect(copyId != sourceId, "a duplicate must take its own l_id");
+    }
+    expect(stack.undo(), "duplicate undo failed");
+    expect(stage.objects().size() == objectsBefore + 1, "duplicate undo left the copy behind");
+    expect(stack.redo(), "duplicate redo failed");
+    expect(stage.objects().size() == objectsBefore + 2, "duplicate redo did not restore the copy");
+
+    // ---- delete one ------------------------------------------------------
+    expect(deleteObject(stage, stack, duplicate->objectIndex),
+           "deleteObject refused a live object");
+    expect(stage.objects().size() == objectsBefore + 1, "delete did not shrink the placement list");
+    expect(stack.undo(), "delete undo failed");
+    expect(stage.objects().size() == objectsBefore + 2, "delete undo did not restore the object");
+    expect(stack.redo(), "delete redo failed");
+    expect(stage.objects().size() == objectsBefore + 1, "delete redo did not remove it again");
+    // Undo once more so both objects are present for the multi-delete below.
+    expect(stack.undo(), "delete undo (restore) failed");
+    expect(stage.objects().size() == objectsBefore + 2, "delete undo did not restore the object");
+
+    // ---- delete several as a single step ---------------------------------
+    // The copy's index is re-derived rather than remembered: removing the row
+    // above it shifted every index after it, which is exactly why the editor
+    // re-syncs its selection after each edit instead of holding indexes across
+    // one.
+    const auto copyIndex = whitehole::edit::objectIndexAt(stage, tableIndex, created->rowIndex + 1);
+    expect(copyIndex.has_value(), "the duplicate vanished from the placement list");
+
+    const auto cursorBefore = stack.cursor();
+    // Reverse order plus a repeated index: exactly what a multi-selection with a
+    // duplicate entry looks like, and it must still delete the right two rows.
+    const auto removedCount =
+        deleteObjects(stage, stack, {*copyIndex, sourceIndex, sourceIndex}, "Delete 2 objects");
+    expect(removedCount == 2, "deleteObjects removed the wrong number of rows");
+    expect(stage.objects().size() == objectsBefore, "deleteObjects left objects behind");
+    expect(stack.cursor() == cursorBefore + 1, "a multi-delete must be exactly one undo step");
+    expect(stack.redoCount() == 0, "a new edit must discard the redo branch");
+    expect(stack.undo(), "multi-delete undo failed");
+    expect(stage.objects().size() == objectsBefore + 2,
+           "multi-delete undo did not restore both objects");
+    expect(stack.redo(), "multi-delete redo failed");
+    expect(stage.objects().size() == objectsBefore, "multi-delete redo did not remove both");
+
+    // A stale index is skipped rather than deleting whichever row now sits
+    // there, and nothing lands on the undo stack when nothing was removed.
+    expect(deleteObjects(stage, stack, {999999}, "Delete nothing") == 0,
+           "deleteObjects must ignore indices that no longer exist");
+    expect(stack.cursor() == cursorBefore + 1,
+           "a multi-delete that removed nothing must not record an undo entry");
+
+    // ---- a start point gets its own MarioNo ------------------------------
+    const auto starts = placementTargets(stage, "start");
+    if (!starts.empty()) {
+        const auto nextMarioNo = nextFreeId(stage, "start", "MarioNo");
+        NewObject start;
+        start.name = "Mario";
+        start.position = {10.0F, 0.0F, 0.0F};
+        const auto added = createObject(stage, stack, starts.front().tableIndex, start);
+        expect(added.has_value(), "createObject refused the start list");
+        const auto& table = stage.tables()[starts.front().tableIndex].table;
+        expect(table.getInt(table.rows()[added->rowIndex], "MarioNo", -1) == nextMarioNo,
+               "a new start point did not take the next free MarioNo");
+        expect(stack.undo(), "start undo failed");
+    }
+
+    // ---- an authored archive still round-trips through a real save --------
+    const auto saved = std::filesystem::temp_directory_path() / "whitehole_authoring.arc";
+    stage.saveTo(saved);
+    const auto reopened = StageArchive::openMapFile(saved);
+    expect(reopened.tables().size() == stage.tables().size(),
+           "the authored archive lost a table on the way to disk");
+    expect(reopened.objects().size() == stage.objects().size(),
+           "the authored archive round-tripped a different object count");
+    std::filesystem::remove(saved);
+}
+
+// Group transforms: the mouse-driven editing path that moves, rotates or
+// scales a whole selection as one undo entry (gizmo drags, arrow-key nudges).
+void testGroupTransforms() {
+    using whitehole::edit::rotateObjects;
+    using whitehole::edit::scaleObjects;
+    using whitehole::edit::translateObjects;
+    using whitehole::edit::UndoStack;
+    using whitehole::smg::StageArchive;
+
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto stage = StageArchive::openMapFile(templates / "SMG2BigGalaxyMap.arc");
+    expect(stage.objects().size() >= 2, "the template has nothing to move as a group");
+
+    UndoStack stack;
+    std::vector<std::size_t> selection;
+    for (std::size_t index = 0; index < stage.objects().size() && selection.size() < 3; ++index) {
+        // Skip start points: translating the player spawn is legal but noisy.
+        if (stage.objects()[index].kind != "start") {
+            selection.push_back(index);
+        }
+    }
+    expect(selection.size() >= 2, "the template has no moveable pair");
+
+    // ---- translate -------------------------------------------------------
+    std::vector<whitehole::smg::PlacementObject> baseline;
+    for (const auto index : selection) {
+        baseline.push_back(stage.objects()[index]);
+    }
+    const auto cursorBefore = stack.cursor();
+    expect(translateObjects(stage, stack, selection, {10.0F, -5.0F, 2.0F}),
+           "translateObjects refused a live selection");
+    for (std::size_t slot = 0; slot < selection.size(); ++slot) {
+        const auto& after = stage.objects()[selection[slot]];
+        expect(std::abs(after.position.x - (baseline[slot].position.x + 10.0F)) < 1e-4F &&
+                   std::abs(after.position.y - (baseline[slot].position.y - 5.0F)) < 1e-4F &&
+                   std::abs(after.position.z - (baseline[slot].position.z + 2.0F)) < 1e-4F,
+               "a group translate moved one object wrong");
+    }
+    expect(stack.cursor() == cursorBefore + 1, "a group translate must be one undo step");
+    expect(stack.undo(), "group translate undo failed");
+    for (std::size_t slot = 0; slot < selection.size(); ++slot) {
+        const auto& restored = stage.objects()[selection[slot]];
+        expect(std::abs(restored.position.x - baseline[slot].position.x) < 1e-4F,
+               "a group translate undo restored the wrong position");
+    }
+    expect(stack.redo(), "group translate redo failed");
+
+    // ---- a stale index never throws away the rest of the group ------------
+    auto stretched = selection;
+    stretched.push_back(999999);
+    stretched.push_back(selection.front()); // duplicates are moved exactly once
+    expect(translateObjects(stage, stack, stretched, {1.0F, 0.0F, 0.0F}, "Jog 2 objects"),
+           "a selection with stale entries must still move the rest");
+    expect(stack.undoLabel() == "Jog 2 objects", "an explicit label must survive");
+    expect(stack.undo(), "stale-selection undo failed");
+    // The duplicate entry must not have doubled the move: the row ends up where
+    // it started plus exactly one jog.
+    for (std::size_t slot = 0; slot < selection.size(); ++slot) {
+        const auto& back = stage.objects()[selection[slot]];
+        expect(std::abs(back.position.x - (baseline[slot].position.x + 10.0F)) < 1e-4F,
+               "a duplicated selection moved one object twice");
+    }
+
+    // ---- rotate ----------------------------------------------------------
+    expect(rotateObjects(stage, stack, selection, {90.0F, 0.0F, 0.0F}), "rotateObjects refused");
+    for (std::size_t slot = 0; slot < selection.size(); ++slot) {
+        const auto& turned = stage.objects()[selection[slot]];
+        expect(std::abs(turned.rotation.x - (baseline[slot].rotation.x + 90.0F)) < 1e-4F,
+               "a group rotate added the wrong degrees");
+    }
+    expect(stack.undo(), "group rotate undo failed");
+    expect(stack.undo(), "undo of the stray redo must also succeed");
+
+    // ---- scale -----------------------------------------------------------
+    // A factor of two on every axis must double each scale, and a factor of
+    // exactly zero must clamp away from the degenerate point instead.
+    expect(scaleObjects(stage, stack, selection, {2.0F, 2.0F, 2.0F}), "scaleObjects refused");
+    for (std::size_t slot = 0; slot < selection.size(); ++slot) {
+        const auto& grown = stage.objects()[selection[slot]];
+        expect(std::abs(grown.scale.x - baseline[slot].scale.x * 2.0F) < 1e-4F,
+               "a group scale did not double the stored scale");
+    }
+    expect(stack.undo(), "group scale undo failed");
+    expect(scaleObjects(stage, stack, selection, {0.0F, 0.0F, 0.0F}, "Shrink"), "zero scale refused");
+    for (std::size_t slot = 0; slot < selection.size(); ++slot) {
+        const auto& shrunk = stage.objects()[selection[slot]];
+        expect(std::abs(shrunk.scale.x) > 0.0005F, "a zero factor must clamp before the point");
+    }
+    expect(stack.undo(), "zero-scale undo failed");
+
+    // ---- nothing valid records nothing -----------------------------------
+    expect(!translateObjects(stage, stack, {999998, 999999}, {0.0F, 0.0F, 0.0F}),
+           "a fully stale group must fail");
+    expect(!rotateObjects(stage, stack, {}, {0.0F, 0.0F, 0.0F}), "an empty group must fail");
+    expect(!scaleObjects(stage, stack, {}, {1.0F, 1.0F, 1.0F}), "an empty scale group must fail");
 }
 
 // data/objectdb.json is a gitignored first-run download, so a fresh checkout
@@ -2318,7 +2789,10 @@ int main() {
         testBcsvEndianness();
         testBcsvMutation();
         testUndoStack();
+        testGizmoMath();
         testStageEditCommands();
+        testObjectAuthoring();
+        testGroupTransforms();
         testObjectModel();
         testValidation();
         testDocument();

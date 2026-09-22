@@ -4,6 +4,7 @@
 
 #include "whitehole/db/object_db.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
+#include "whitehole/edit/authoring.hpp"
 #include "whitehole/edit/commands.hpp"
 #include "whitehole/io/binary_file.hpp"
 #include "whitehole/io/rarc.hpp"
@@ -20,6 +21,7 @@
 #include "whitehole/util/text.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -73,7 +75,7 @@ void printUsage() {
         << "  whitehole-pro-console objectdb query <object-name> [--data <directory>]\n"
         << "  whitehole-pro-console map params <archive.arc> <object> [--game 1|2]\n"
         << "  whitehole-pro-console map set <archive.arc> <object> <field> <value> [--game 1|2] [--in-place]\n"
-        << "  whitehole-pro-console map add <archive.arc> <object-name> <kind> [--game 1|2] [--in-place]\n"
+        << "  whitehole-pro-console map add <archive.arc> <object-name> <kind> [--game 1|2] [--in-place] [--pos x,y,z]\n"
         << "  whitehole-pro-console map remove <archive.arc> <object> [--game 1|2] [--in-place]\n"
         << "  whitehole-pro-console zone params <game-directory> <galaxy> <zone> <object> [--game 1|2]\n"
         << "  whitehole-pro-console zone set <game-directory> <galaxy> <zone> <object> <field> <value> [--game 1|2]\n"
@@ -496,6 +498,7 @@ struct EditOptions {
     bool inPlace{false};
     bool all{false};
     std::optional<std::string> layer;
+    std::optional<math::Vec3f> position; // spawn point for map add (--pos x,y,z)
 };
 
 int parseGameType(std::string_view value) {
@@ -506,6 +509,30 @@ int parseGameType(std::string_view value) {
         return 2;
     }
     throw std::runtime_error("--game expects 1 (SMG1) or 2 (SMG2), got: " + std::string(value));
+}
+
+// "x,y,z" -> a world position for map add. Commas are required so a typo in the
+// argument cannot silently become a different coordinate.
+math::Vec3f parseVec3(std::string_view text) {
+    std::array<float, 3> parts{};
+    std::size_t component = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        if (i == text.size() || text[i] == ',') {
+            if (component >= parts.size()) {
+                throw std::runtime_error("--pos takes exactly three values (x,y,z), got: " +
+                                         std::string(text));
+            }
+            parts[component++] =
+                std::stof(std::string(text.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    if (component != parts.size()) {
+        throw std::runtime_error("--pos takes exactly three values (x,y,z), got: " +
+                                 std::string(text));
+    }
+    return {parts[0], parts[1], parts[2]};
 }
 
 EditOptions parseEditOptions(int argc, char** argv, int start, int defaultGameType) {
@@ -533,6 +560,13 @@ EditOptions parseEditOptions(int argc, char** argv, int start, int defaultGameTy
             options.layer = argv[++index];
         } else if (flag.rfind("--layer=", 0) == 0) {
             options.layer = flag.substr(8);
+        } else if (flag == "--pos") {
+            if (index + 1 >= argc) {
+                throw std::runtime_error("--pos needs a position (x,y,z)");
+            }
+            options.position = parseVec3(argv[++index]);
+        } else if (flag.rfind("--pos=", 0) == 0) {
+            options.position = parseVec3(flag.substr(6));
         } else {
             throw std::runtime_error("Unknown flag: " + flag);
         }
@@ -928,7 +962,7 @@ int mapSetCommand(int argc, char** argv) {
 int mapAddCommand(int argc, char** argv) {
     if (argc < 6) {
         throw std::runtime_error("map add requires: <archive.arc> <object-name> <kind> "
-                                 "[--game 1|2] [--in-place] [--layer <layer>]");
+                                 "[--game 1|2] [--in-place] [--layer <layer>] [--pos x,y,z]");
     }
     const auto options = parseEditOptions(argc, argv, 6, 2);
     const std::string objectName = argv[4];
@@ -955,25 +989,20 @@ int mapAddCommand(int argc, char** argv) {
         throw std::runtime_error("No placement table of kind '" + std::string(argv[5]) + "' in " +
                                  argv[3] + ". Available: " + availableLayers);
     }
-    auto& table = stage.tables()[*tableIndex].table;
-    if (table.fields().empty()) {
-        throw std::runtime_error("Table '" + stage.tables()[*tableIndex].path + "' has no fields");
-    }
-    const auto nameField = table.fieldIndex("name");
-    if (!nameField) {
+
+    // The row goes through the same authoring path as the desktop editor: a unique
+    // l_id, the -1 sentinels for the unset ids and switches, and a 1.0 scale, so
+    // a scripted add writes the same archive a click in the editor would.
+    edit::NewObject request;
+    request.name = objectName;
+    request.position = options.position.value_or(math::Vec3f{});
+    edit::UndoStack stack;
+    const auto created =
+        edit::createObject(stage, stack, *tableIndex, request, "Add " + objectName);
+    if (!created.has_value()) {
         throw std::runtime_error("Table '" + stage.tables()[*tableIndex].path +
                                  "' has no 'name' field to place the object in");
     }
-    std::vector<smg::BcsvValue> values;
-    values.reserve(table.fields().size());
-    for (const auto& field : table.fields()) {
-        values.push_back(smg::defaultValueFor(field.type));
-    }
-    values[*nameField] = objectName;
-
-    edit::UndoStack stack;
-    const auto rowIndex = edit::addObject(stage, stack, *tableIndex, std::move(values),
-                                          "Add " + objectName);
     const auto outPath = options.inPlace ? stage.sourcePath() : editedPathFor(stage.sourcePath());
     stage.saveTo(outPath);
 
@@ -983,14 +1012,14 @@ int mapAddCommand(int argc, char** argv) {
         root["object"] = objectName;
         root["kind"] = stage.tables()[*tableIndex].kind;
         root["layer"] = stage.tables()[*tableIndex].layer;
-        root["row"] = static_cast<int>(rowIndex);
+        root["row"] = static_cast<int>(created->rowIndex);
         root["output"] = outPath.string();
         root["inPlace"] = options.inPlace;
         std::cout << util::serializeJson(root) << '\n';
         return 0;
     }
     std::cout << "Added " << objectName << " to " << stage.tables()[*tableIndex].kind << '/'
-              << stage.tables()[*tableIndex].layer << " as row " << rowIndex << '\n'
+              << stage.tables()[*tableIndex].layer << " as row " << created->rowIndex << '\n'
               << "Output: " << outPath.string() << '\n';
     return 0;
 }

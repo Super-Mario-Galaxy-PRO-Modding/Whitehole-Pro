@@ -62,7 +62,8 @@ void AddObjectCommand::undo() {
 }
 
 void AddObjectCommand::redo() {
-    tableAt(*stage_, tableIndex_).insertRow(rowIndex_, values_);
+    // insertRow returns the index it used; the command already knows it.
+    (void)tableAt(*stage_, tableIndex_).insertRow(rowIndex_, values_);
     stage_->rebuildObjects();
 }
 
@@ -73,7 +74,8 @@ RemoveObjectCommand::RemoveObjectCommand(smg::StageArchive& stage, std::size_t t
       label_(std::move(label)) {}
 
 void RemoveObjectCommand::undo() {
-    tableAt(*stage_, tableIndex_).insertRow(rowIndex_, values_);
+    // insertRow returns the index it used; the command already knows it.
+    (void)tableAt(*stage_, tableIndex_).insertRow(rowIndex_, values_);
     stage_->rebuildObjects();
 }
 
@@ -113,12 +115,14 @@ bool applyTransform(smg::StageArchive& stage, UndoStack& stack,
 }
 
 std::size_t addObject(smg::StageArchive& stage, UndoStack& stack, std::size_t tableIndex,
-                      std::vector<smg::BcsvValue> values, std::string label) {
+                      std::vector<smg::BcsvValue> values, std::string label,
+                      std::optional<std::size_t> insertAt) {
     if (tableIndex >= stage.tables().size()) {
         throw std::out_of_range("Stage table index is out of range");
     }
     auto& table = stage.tables()[tableIndex].table;
-    const auto rowIndex = table.insertRow(table.rows().size(), values);
+    const auto target = insertAt.value_or(table.rows().size());
+    const auto rowIndex = table.insertRow(target, values);
     // Snapshot the materialised row so redo reproduces it exactly.
     auto stored = captureRowValues(stage, tableIndex, rowIndex);
     stage.rebuildObjects();

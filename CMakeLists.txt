@@ -61,6 +61,7 @@ add_library(whitehole_core
     cpp/src/db/modelsubstitutions.cpp
     cpp/src/db/specialrenderers.cpp
     cpp/src/app/theme_palette.cpp
+    cpp/src/edit/authoring.cpp
     cpp/src/edit/commands.cpp
     cpp/src/edit/document.cpp
     cpp/src/edit/undo.cpp
@@ -70,6 +71,7 @@ add_library(whitehole_core
     cpp/src/io/rarc.cpp
     cpp/src/io/yaz0.cpp
     cpp/src/render/camera.cpp
+    cpp/src/render/gizmo.cpp
     cpp/src/render/object_visual.cpp
     cpp/src/render/model_mesh.cpp
     cpp/src/render/model_library.cpp

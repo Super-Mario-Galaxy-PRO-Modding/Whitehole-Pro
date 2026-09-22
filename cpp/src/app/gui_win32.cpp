@@ -20,6 +20,7 @@
 #include "whitehole/db/modelsubstitutions.hpp"
 #include "whitehole/db/name_table.hpp"
 #include "whitehole/db/object_db.hpp"
+#include "whitehole/edit/authoring.hpp"
 #include "whitehole/edit/commands.hpp"
 #include "whitehole/edit/undo.hpp"
 #include "whitehole/edit/validation.hpp"
@@ -303,6 +304,34 @@ struct EditorState {
     std::vector<Toast> toasts;
     std::vector<std::string> logLines;
     std::string lastFilter; // cached so filtering only reruns on change
+
+    // --- authoring: the Add Object picker ---------------------------------
+    // Java opened a modal tree of every ObjectDB category before it would let
+    // you place anything. Here the same database is searched live in one box,
+    // and the placement list is picked from the ones this zone actually has.
+    bool showAddObject{false};
+    char addSearch[96]{};
+    std::string addFilter;                  // last needle the matches were built for
+    std::vector<const db::ObjectInfo*> addMatches;
+    std::string addChosen;                  // internal name of the object to place
+    int addTargetIndex{0};                  // row in the destination-list combo
+    // The match list is rebuilt only when the needle changes (or the picker is
+    // reopened), so a 10k-object database is filtered once per keystroke rather
+    // than once per frame.
+    bool addMatchesStale{true};
+    // Set after create/duplicate/delete so the Objects panel scrolls the new row
+    // into view on the next frame (it cannot scroll a row it has not drawn yet).
+    bool scrollToSelected{false};
+
+    // --- transform clipboard (Java Edit > Copy / Paste) -------------------
+    // Tracked per group so pasting a position never disturbs a rotation or scale
+    // the author set deliberately.
+    bool hasCopiedPosition{false};
+    bool hasCopiedRotation{false};
+    bool hasCopiedScale{false};
+    math::Vec3f copiedPosition{};
+    math::Vec3f copiedRotation{};
+    math::Vec3f copiedScale{1.0F, 1.0F, 1.0F};
 };
 
 // --- DX11 plumbing -----------------------------------------------------------
@@ -574,6 +603,11 @@ void pumpObjectDatabase(EditorState& state) {
     const auto cachePath = Settings::defaultConfigPath().parent_path() / "objectdb.cache";
     state.objectDb.load(database, cachePath);
     refreshObjects(state);
+    // The Add Object picker keeps pointers into the database; a reload swaps the
+    // whole map, so every match and the current choice have to go with it.
+    state.addMatches.clear();
+    state.addChosen.clear();
+    state.addMatchesStale = true;
     if (state.objectDb.classCount() == 0 && state.objectDb.names().empty()) {
         pushToast(state, "The downloaded object database could not be parsed.", true);
         return;
@@ -802,6 +836,194 @@ void selectObject(EditorState& state, std::optional<std::size_t> stageIndex) {
     state.syncingSelection = false;
 }
 
+// --- authoring ---------------------------------------------------------------
+// Java's add/duplicate/delete live in GalaxyEditorForm behind a modal object
+// picker. The work itself now sits in edit/authoring (one undo entry per action,
+// shared with the CLI and the tests); what is left here is deciding *where* a new
+// object goes and keeping the list, the property panel and the 3D scene in step.
+
+// Spawn point for a new object: at the selected object when there is one, else at
+// whatever the 3D camera is looking at, so the object lands in view instead of at
+// the world origin where nobody can find it.
+math::Vec3f spawnPosition(EditorState& state) {
+    if (state.stage && state.selectedObject &&
+        *state.selectedObject < state.stage->objects().size()) {
+        return state.stage->objects()[*state.selectedObject].position;
+    }
+    if (state.viewportReady) {
+        return state.viewport.camera().target;
+    }
+    return {};
+}
+
+// Re-derives everything that depends on the stage tables after an authoring edit:
+// the object list, the dirty marker and the 3D scene. The Problems panel re-runs
+// by itself once the undo cursor moves.
+void afterAuthoringEdit(EditorState& state) {
+    refreshObjects(state);
+    markDirty(state);
+    refreshViewport(state, false);
+}
+
+// Places `info` in the table at `tableIndex` and selects it. Returns false when
+// the row could not be built, with the reason already reported to the user.
+bool createObjectFromDatabase(EditorState& state, const db::ObjectInfo& info,
+                              std::size_t tableIndex) {
+    if (!state.stage || tableIndex >= state.stage->tables().size()) {
+        pushToast(state, "Open a zone before adding objects.", true);
+        return false;
+    }
+    const std::string kind = state.stage->tables()[tableIndex].kind;
+    const std::string layer = state.stage->tables()[tableIndex].layer;
+
+    edit::NewObject request;
+    request.name = info.internalName;
+    request.position = spawnPosition(state);
+    try {
+        const auto created =
+            edit::createObject(*state.stage, state.undoStack, tableIndex, request);
+        if (!created.has_value()) {
+            pushToast(state, "That list cannot hold a new object.", true);
+            return false;
+        }
+        selectObject(state, created->objectIndex);
+        state.scrollToSelected = true;
+        afterAuthoringEdit(state);
+    } catch (const std::exception& error) {
+        pushToast(state, error.what(), true);
+        state.showLog = true;
+        return false;
+    }
+    pushToast(state, "Added " + info.internalName + " to " + kind + "/" + layer + ".");
+    return true;
+}
+
+// Duplicates the selected object next to itself and selects the copy.
+bool duplicateSelection(EditorState& state) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        pushToast(state, "Select an object to duplicate first.", true);
+        return false;
+    }
+    // Finish an in-flight drag so the copy inherits exactly what is on screen.
+    if (state.draggingTransform) {
+        commitDragAsUndo(state, "Edit object");
+    }
+    const std::string name = state.stage->objects()[*state.selectedObject].name;
+    try {
+        const auto created =
+            edit::duplicateObject(*state.stage, state.undoStack, *state.selectedObject);
+        if (!created.has_value()) {
+            pushToast(state, "That object is no longer in this zone.", true);
+            return false;
+        }
+        selectObject(state, created->objectIndex);
+        state.scrollToSelected = true;
+        afterAuthoringEdit(state);
+    } catch (const std::exception& error) {
+        pushToast(state, error.what(), true);
+        return false;
+    }
+    // The copy keeps the same transform, so say so instead of leaving the author
+    // hunting for an object hidden exactly behind the original.
+    pushToast(state, "Duplicated " + name + ". Move it with the drag fields, or Ctrl+Z to undo.");
+    return true;
+}
+
+// Deletes the selected object as one undoable step.
+bool deleteSelection(EditorState& state) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        pushToast(state, "Select an object to delete first.", true);
+        return false;
+    }
+    const std::string name = state.stage->objects()[*state.selectedObject].name;
+    const auto removed = edit::deleteObjects(*state.stage, state.undoStack,
+                                             {*state.selectedObject}, "Delete " + name);
+    if (removed == 0) {
+        pushToast(state, "That object is no longer in this zone.", true);
+        return false;
+    }
+    selectObject(state, std::nullopt);
+    afterAuthoringEdit(state);
+    pushToast(state, "Deleted " + name + ". Ctrl+Z brings it back.");
+    return true;
+}
+
+// Java Edit > Copy Position / Rotation / Scale, all in one menu. The groups are
+// remembered separately so pasting a position never disturbs a deliberately set
+// rotation or scale.
+void copyTransform(EditorState& state, bool position, bool rotation, bool scale) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        return;
+    }
+    const auto& object = state.stage->objects()[*state.selectedObject];
+    if (position) {
+        state.copiedPosition = object.position;
+        state.hasCopiedPosition = true;
+    }
+    if (rotation) {
+        state.copiedRotation = object.rotation;
+        state.hasCopiedRotation = true;
+    }
+    if (scale) {
+        state.copiedScale = object.scale;
+        state.hasCopiedScale = true;
+    }
+}
+
+// Pastes the copied groups into the selected object as a single undo step.
+bool pasteTransform(EditorState& state, bool position, bool rotation, bool scale) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        pushToast(state, "Select an object to paste onto first.", true);
+        return false;
+    }
+    const bool anyPosition = position && state.hasCopiedPosition;
+    const bool anyRotation = rotation && state.hasCopiedRotation;
+    const bool anyScale = scale && state.hasCopiedScale;
+    if (!anyPosition && !anyRotation && !anyScale) {
+        pushToast(state, "Copy a transform first.", true);
+        return false;
+    }
+    // A live drag is finished first so the paste becomes its own undo step.
+    if (state.draggingTransform) {
+        commitDragAsUndo(state, "Edit object");
+    }
+    // The current transform is the "before" state of the undo entry, exactly the
+    // same contract a drag follows.
+    state.dragStart = state.stage->objects()[*state.selectedObject];
+    state.draggingTransform = true;
+    if (anyPosition) {
+        state.transform[0] = state.copiedPosition.x;
+        state.transform[1] = state.copiedPosition.y;
+        state.transform[2] = state.copiedPosition.z;
+    }
+    if (anyRotation) {
+        state.transform[3] = state.copiedRotation.x;
+        state.transform[4] = state.copiedRotation.y;
+        state.transform[5] = state.copiedRotation.z;
+    }
+    if (anyScale) {
+        state.transform[6] = state.copiedScale.x;
+        state.transform[7] = state.copiedScale.y;
+        state.transform[8] = state.copiedScale.z;
+    }
+    applyTransform(state); // writes the BCSV row and repaints the viewport
+    commitDragAsUndo(state, "Paste transform");
+
+    std::string what = anyPosition ? "position" : "";
+    if (anyRotation) {
+        what += what.empty() ? "rotation" : " + rotation";
+    }
+    if (anyScale) {
+        what += what.empty() ? "scale" : " + scale";
+    }
+    pushToast(state, "Pasted " + what + ".");
+    return true;
+}
+
 void rememberMap(EditorState& state, const std::filesystem::path& path) {
     state.settings.pushRecentMap(path.string());
     state.settings.save();
@@ -1016,6 +1238,33 @@ void drawObjectsPanel(EditorState& state) {
     }
     ImGui::TextDisabled("%d of %d", static_cast<int>(state.visibleObjects.size()),
                         state.stage ? static_cast<int>(state.stage->objects().size()) : 0);
+
+    // Authoring row: the three things a level editor is actually for. They sit
+    // above the list rather than only in a context menu, so a new user finds them
+    // without having to guess that rows are right-clickable.
+    const float halfWidth = (ImGui::GetContentRegionAvail().x - 6.0F) * 0.5F;
+    ImGui::BeginDisabled(!state.stage.has_value());
+    if (ImGui::Button("Add Object…##objects", ImVec2(halfWidth, 0))) {
+        state.showAddObject = true;
+        state.addMatchesStale = true;
+    }
+    ImGui::SetItemTooltip("Place a new object in this zone  (Shift+A)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!state.selectedObject.has_value());
+    if (ImGui::Button("Duplicate##objects", ImVec2(halfWidth, 0))) {
+        duplicateSelection(state);
+    }
+    ImGui::SetItemTooltip("Copy the selected object next to itself  (Ctrl+D)");
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!state.stage.has_value() || !state.selectedObject.has_value());
+    if (ImGui::Button("Delete##objects", ImVec2(halfWidth, 0))) {
+        deleteSelection(state);
+    }
+    ImGui::SetItemTooltip("Remove the selected object — undoable with Ctrl+Z  (Del)");
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("every change is undoable");
     ImGui::Separator();
 
     if (!state.stage) {
@@ -1028,6 +1277,16 @@ void drawObjectsPanel(EditorState& state) {
     ImGui::BeginChild("##objectlist");
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(state.visibleObjects.size()));
+    // After an add/duplicate the new row must be visible even when it sits far
+    // outside the current scroll window, so it is exempted from clipping.
+    if (state.scrollToSelected && state.selectedObject.has_value()) {
+        for (std::size_t row = 0; row < state.visibleObjects.size(); ++row) {
+            if (state.visibleObjects[row] == *state.selectedObject) {
+                clipper.IncludeItemByIndex(static_cast<int>(row));
+                break;
+            }
+        }
+    }
     while (clipper.Step()) {
         for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
             const std::size_t stageIndex = state.visibleObjects[static_cast<std::size_t>(row)];
@@ -1056,12 +1315,25 @@ void drawObjectsPanel(EditorState& state) {
                     state.viewport.frameSelection();
                 }
             }
-            // Right-click: focus in the 3D view or discard local edits.
+            if (selected && state.scrollToSelected) {
+                ImGui::SetScrollHereY(0.5F);
+            }
+            // Right-click: the same authoring actions plus the view helpers.
             if (ImGui::BeginPopupContextItem("##objctx")) {
                 if (ImGui::MenuItem("Focus in viewport", "F", false, state.viewportReady)) {
                     selectObject(state, stageIndex);
                     state.viewport.frameSelection();
                 }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+                    selectObject(state, stageIndex);
+                    duplicateSelection(state);
+                }
+                if (ImGui::MenuItem("Delete", "Del")) {
+                    selectObject(state, stageIndex);
+                    deleteSelection(state);
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Reset transform")) {
                     selectObject(state, stageIndex);
                     syncTransformBuffers(state);
@@ -1072,7 +1344,190 @@ void drawObjectsPanel(EditorState& state) {
         }
     }
     ImGui::EndChild();
+    state.scrollToSelected = false; // consumed once, for this frame's list only
     ImGui::End();
+}
+
+// The Add Object picker: Java's ObjectSelectForm rebuilt around live search. One
+// box filters every object the database knows for this game, a second chooses
+// which of the zone's placement lists the new row goes into, and Enter places it.
+// Nothing here knows what any object *does* — all of that comes from the
+// database, so a newly documented community object appears without a code change.
+void drawAddObjectDialog(EditorState& state) {
+    if (!state.showAddObject) {
+        return;
+    }
+    const int gameType = state.game ? state.game->gameType() : 2;
+    ImGui::OpenPopup("Add Object");
+    ImGui::SetNextWindowSize(ImVec2(560.0F * dpiScaleFactor(), 430.0F * dpiScaleFactor()),
+                             ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Add Object", &state.showAddObject,
+                                ImGuiWindowFlags_NoSavedSettings)) {
+        return;
+    }
+    const auto closeDialog = [&] {
+        state.showAddObject = false;
+        ImGui::CloseCurrentPopup();
+    };
+
+    // A fresh install has no database at all (it is downloaded on first run), and
+    // without it there is no object list to pick from. Say so instead of showing
+    // an empty box with a dead Add button.
+    if (state.objectDb.names().empty()) {
+        ImGui::TextUnformatted("No object database is installed yet.");
+        ImGui::TextWrapped("Object names, their parameters and this list all come from the "
+                           "community database. Install it once and this picker fills up.");
+        ImGui::Separator();
+        ImGui::BeginDisabled(state.objectDbDownloadPending);
+        if (ImGui::Button("Download now", ImVec2(140, 0))) {
+            startObjectDatabaseDownload(state);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(100, 0))) {
+            closeDialog();
+        }
+        ImGui::EndPopup();
+        return;
+    }
+
+    const bool canPlace = state.stage.has_value();
+    if (ImGui::IsWindowAppearing()) {
+        // Typing is what the user came here to do, so start in the search box.
+        ImGui::SetKeyboardFocusHere();
+        state.addMatchesStale = true;
+    }
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    const bool submitted =
+        ImGui::InputTextWithHint("##addsearch", "Search an object: name, class or internal name",
+                                 state.addSearch, sizeof(state.addSearch),
+                                 ImGuiInputTextFlags_EnterReturnsTrue);
+
+    const std::string needle = whitehole::util::toLower(state.addSearch);
+    if (state.addMatchesStale || needle != state.addFilter) {
+        state.addFilter = needle;
+        state.addMatchesStale = false;
+        // An empty needle matches everything, which is the "show me what I can
+        // place" default Java's category tree opened with.
+        state.addMatches = state.objectDb.search(needle, gameType);
+    }
+    ImGui::TextDisabled("%d object%s available for SMG%d", static_cast<int>(state.addMatches.size()),
+                        state.addMatches.size() == 1 ? "" : "s", gameType);
+
+    ImGui::BeginChild("##addlist", ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 13.0F),
+                      ImGuiChildFlags_Borders);
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(state.addMatches.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            const auto& info = *state.addMatches[static_cast<std::size_t>(row)];
+            std::string label = info.internalName;
+            if (info.name != info.internalName) {
+                label += "  (" + info.name + ")";
+            }
+            if (const auto* objectClass = state.objectDb.classForObject(info.internalName, gameType);
+                objectClass != nullptr && !objectClass->name.empty()) {
+                label += "  — " + objectClass->name;
+            }
+            ImGui::PushID(row);
+            if (ImGui::Selectable(label.c_str(), state.addChosen == info.internalName)) {
+                if (state.addChosen != info.internalName) {
+                    state.addChosen = info.internalName;
+                    state.addTargetIndex = 0; // the destination list may differ per object
+                }
+            }
+            ImGui::PopID();
+            if (ImGui::IsItemHovered()) {
+                // Description plus class: the class is what tells two similarly
+                // named objects apart, and it costs nothing (already in memory).
+                const auto* infoClass = state.objectDb.classForObject(info.internalName, gameType);
+                const std::string className = infoClass != nullptr ? infoClass->name : std::string();
+                ImGui::SetTooltip("%s\n%s\n%s", info.internalName.c_str(),
+                                  info.description.empty() ? "(no description in the database)"
+                                                           : info.description.c_str(),
+                                  className.empty() ? "(class unknown to the database)"
+                                                    : className.c_str());
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    // Enter with nothing clicked yet picks the top match, so the full flow is:
+    // type a few letters, press Enter, and the object is placed.
+    if (submitted && state.addChosen.empty() && !state.addMatches.empty()) {
+        state.addChosen = state.addMatches.front()->internalName;
+    }
+
+    // Where the row goes: the database names the placement list ("MapPartsInfo"),
+    // and edit/authoring maps that onto the tables this zone actually has. Java
+    // needed one hand-written branch per object type to do the same thing.
+    const db::ObjectInfo* chosen =
+        state.addChosen.empty() ? nullptr : state.objectDb.find(state.addChosen);
+    std::vector<edit::PlacementTarget> targets;
+    if (chosen != nullptr && canPlace) {
+        targets = edit::placementTargets(*state.stage, edit::kindForList(chosen->list(gameType)));
+    }
+    if (state.addTargetIndex < 0 ||
+        static_cast<std::size_t>(state.addTargetIndex) >= targets.size()) {
+        state.addTargetIndex = 0;
+    }
+    const bool canAdd = canPlace && chosen != nullptr && !targets.empty();
+
+    ImGui::Separator();
+    if (!canPlace) {
+        ImGui::TextWrapped("Open a zone or map archive first — a new object needs one of the "
+                           "zone's placement lists to live in.");
+    } else if (chosen == nullptr) {
+        ImGui::TextDisabled("Pick an object above, then choose where it goes.");
+    } else if (targets.empty()) {
+        const std::string_view list = chosen->list(gameType);
+        ImGui::TextWrapped("This zone has no \"%s\" list, so \"%s\" cannot be placed here.",
+                           list.empty() ? "(unknown)" : std::string(list).c_str(),
+                           chosen->internalName.c_str());
+    } else {
+        const auto& target = targets[static_cast<std::size_t>(state.addTargetIndex)];
+        const std::string preview =
+            target.kind + "/" + target.layer + "  (" + std::to_string(target.rowCount) + " rows)";
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55F);
+        if (ImGui::BeginCombo("##addtarget", preview.c_str())) {
+            for (std::size_t index = 0; index < targets.size(); ++index) {
+                const std::string label = targets[index].kind + "/" + targets[index].layer + "  (" +
+                                          std::to_string(targets[index].rowCount) + " rows)";
+                if (ImGui::Selectable(label.c_str(),
+                                      static_cast<std::size_t>(state.addTargetIndex) == index)) {
+                    state.addTargetIndex = static_cast<int>(index);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        const math::Vec3f spawn = spawnPosition(state);
+        ImGui::TextDisabled("at %.0f, %.0f, %.0f", static_cast<double>(spawn.x),
+                            static_cast<double>(spawn.y), static_cast<double>(spawn.z));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("New objects land on the selected object, or on whatever the 3D "
+                              "camera is looking at when nothing is selected.");
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!canAdd);
+    if (ImGui::Button("Add", ImVec2(120, 0)) || (submitted && canAdd)) {
+        const auto tableIndex = targets[static_cast<std::size_t>(state.addTargetIndex)].tableIndex;
+        if (createObjectFromDatabase(state, *chosen, tableIndex)) {
+            closeDialog();
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Place the object and select it  (Enter)");
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+        closeDialog();
+    }
+    if (!ImGui::IsAnyItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        closeDialog();
+    }
+    ImGui::EndPopup();
 }
 
 // How the field grid below shows one database value list entry. The database
@@ -1734,12 +2189,59 @@ void drawMenuBar(EditorState& state, bool& done) {
             ImGui::SetTooltip("%s", state.undoStack.redoLabel().c_str());
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Focus Search", "Ctrl+F", false, state.stage.has_value())) {
+        const bool hasStage = state.stage.has_value();
+        const bool hasSelection = state.selectedObject.has_value();
+        if (ImGui::MenuItem("Add Object...", "Shift+A", false, hasStage)) {
+            state.showAddObject = true;
+            state.addMatchesStale = true;
+        }
+        if (ImGui::MenuItem("Duplicate Object", "Ctrl+D", false, hasStage && hasSelection)) {
+            duplicateSelection(state);
+        }
+        if (ImGui::MenuItem("Delete Object", "Del", false, hasStage && hasSelection)) {
+            deleteSelection(state);
+        }
+        ImGui::Separator();
+        // Java's Edit > Copy / Paste, one group at a time so aligning objects does
+        // not disturb the rotations and scales they were given on purpose.
+        if (ImGui::BeginMenu("Copy", hasStage && hasSelection)) {
+            if (ImGui::MenuItem("Position")) {
+                copyTransform(state, true, false, false);
+            }
+            if (ImGui::MenuItem("Rotation")) {
+                copyTransform(state, false, true, false);
+            }
+            if (ImGui::MenuItem("Scale")) {
+                copyTransform(state, false, false, true);
+            }
+            if (ImGui::MenuItem("All", "Ctrl+C")) {
+                copyTransform(state, true, true, true);
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Paste", hasStage && hasSelection)) {
+            const bool anyCopied =
+                state.hasCopiedPosition || state.hasCopiedRotation || state.hasCopiedScale;
+            if (ImGui::MenuItem("Position", nullptr, false, state.hasCopiedPosition)) {
+                pasteTransform(state, true, false, false);
+            }
+            if (ImGui::MenuItem("Rotation", nullptr, false, state.hasCopiedRotation)) {
+                pasteTransform(state, false, true, false);
+            }
+            if (ImGui::MenuItem("Scale", nullptr, false, state.hasCopiedScale)) {
+                pasteTransform(state, false, false, true);
+            }
+            if (ImGui::MenuItem("All", "Ctrl+V", false, anyCopied)) {
+                pasteTransform(state, true, true, true);
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Focus Search", "Ctrl+F", false, hasStage)) {
             state.focusSearch = true;
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Reset Object Transform", nullptr, false,
-                            state.selectedObject.has_value())) {
+        if (ImGui::MenuItem("Reset Object Transform", nullptr, false, hasSelection)) {
             syncTransformBuffers(state);
         }
         ImGui::EndMenu();
@@ -2001,6 +2503,29 @@ void drawToolbar(EditorState& state) {
     if (ImGui::Button("Save")) {
         requestSave(state);
     }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+    ImGui::SameLine();
+    // Authoring, reachable without taking a hand off the 3D view.
+    ImGui::BeginDisabled(!state.stage.has_value());
+    if (ImGui::Button("Add")) {
+        state.showAddObject = true;
+        state.addMatchesStale = true;
+    }
+    ImGui::SetItemTooltip("Add an object to this zone  (Shift+A)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!state.selectedObject.has_value());
+    if (ImGui::Button("Duplicate")) {
+        duplicateSelection(state);
+    }
+    ImGui::SetItemTooltip("Duplicate the selected object  (Ctrl+D)");
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) {
+        deleteSelection(state);
+    }
+    ImGui::SetItemTooltip("Delete the selected object  (Del)");
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
@@ -2281,9 +2806,23 @@ const std::vector<TutorialTopic>& tutorialTopics() {
              {"Your layout is saved automatically and restored on launch.", TutorialAction::None},
              {"Settings > Dark Theme switches the whole palette instantly.", TutorialAction::None},
          }},
+        {"Build a level", "add create place duplicate copy delete object author level build shift+a",
+         {
+             {"Open a zone, then press Shift+A (or Objects > Add Object…) to place something new.",
+              TutorialAction::None},
+             {"Search by name, class or internal name; Enter places the highlighted object.",
+              TutorialAction::None},
+             {"The destination box picks the list it goes into, e.g. obj/Common or obj/LayerA.",
+              TutorialAction::None},
+             {"New objects land on the selected object (or the camera's focus) so you can see them.",
+              TutorialAction::None},
+             {"Ctrl+D duplicates, Del deletes, and every one of them is a single Ctrl+Z away from undone.",
+              TutorialAction::None},
+         }},
         {"Keyboard shortcuts", "shortcut keys keyboard help",
          {
              {"Ctrl+O opens a map, Ctrl+S saves, Ctrl+F finds, Ctrl+Z / Ctrl+Y undo and redo.", TutorialAction::None},
+             {"Shift+A adds an object, Ctrl+D duplicates it, Del deletes it.", TutorialAction::None},
              {"F frames the selected object in the 3D view.", TutorialAction::None},
              {"The full list lives under Help > Keyboard Shortcuts...", TutorialAction::None},
          }}}; // MARKER-MORE-TOPICS
@@ -2368,6 +2907,10 @@ void drawShortcutsDialog(EditorState& state) {
         {"Ctrl+O", "Open map archive"},
         {"Ctrl+S", "Save current zone"},
         {"Ctrl+F", "Focus the object search"},
+        {"Shift+A", "Add an object to this zone"},
+        {"Ctrl+D", "Duplicate the selected object"},
+        {"Del", "Delete the selected object (undoable)"},
+        {"Ctrl+C / Ctrl+V", "Copy / paste the selected object's transform"},
         {"F", "Frame the selected object"},
         {"Double-click", "Frame object in the 3D viewport"},
     };
@@ -2747,6 +3290,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         drawPreferencesDialog(state);
         pumpObjectDatabase(state);
         drawShortcutsDialog(state);
+        drawAddObjectDialog(state);
         drawToasts(state);
         drawProblemsPanel(state);
         drawUnsavedDialog(state, done);
@@ -2777,6 +3321,28 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         if ((GetAsyncKeyState('F') & 1) && !ctrlDown && state.viewportReady &&
             state.selectedObject) {
             state.viewport.frameSelection();
+        }
+        // Authoring shortcuts. They stay out of the way while a text field has
+        // focus, so typing "A" in an object name never opens the picker and Del
+        // never deletes an object while the author is editing text.
+        const bool typing = ImGui::GetIO().WantTextInput;
+        if (!typing && ctrlDown && (GetAsyncKeyState('D') & 1)) {
+            duplicateSelection(state);
+        }
+        if (!typing && ctrlDown && (GetAsyncKeyState('C') & 1)) {
+            copyTransform(state, true, true, true);
+        }
+        if (!typing && ctrlDown && (GetAsyncKeyState('V') & 1) &&
+            (state.hasCopiedPosition || state.hasCopiedRotation || state.hasCopiedScale)) {
+            pasteTransform(state, true, true, true);
+        }
+        if (!typing && (GetAsyncKeyState(VK_DELETE) & 1) && state.selectedObject) {
+            deleteSelection(state);
+        }
+        if (!typing && !ctrlDown && (GetAsyncKeyState('A') & 1) &&
+            (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) {
+            state.showAddObject = true;
+            state.addMatchesStale = true;
         }
 
         // --- Rendering ---

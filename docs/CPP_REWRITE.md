@@ -17,6 +17,7 @@ The repository builds `whitehole-pro` (windowed editor) and `whitehole-pro-conso
 - object metadata from the community object database (`data/objectdb.json`) with a
   compiled cache, plus a non-blocking first-run download when the file is absent;
 - a Windows desktop editor that can open a game folder or a map archive, list objects, edit transforms, and save;
+- object authoring in that editor: a searchable Add Object picker fed by the community database, duplicate, delete, and the transform copy/paste from the Java Edit menu — each one a single undo step, shared with the CLI (`map add` writes the same rows the editor does);
 - a command-line interface on every platform.
 
 The bundled `.arc` galaxy templates are part of the native test suite.
@@ -88,10 +89,9 @@ The existing `src/` Java tree remains the behavioral reference until its equival
 
 Still to migrate:
 
-1. BMD/BTI/KCL parsing and animation data.
-2. Full per-class object models, paths, and undo.
-3. A native GPU renderer and asset caches.
-4. The remaining desktop editors (BCSV spreadsheet, world map, galaxy creation).
-5. Cross-platform GUI packaging, then removal of the Java/Ant build.
+1. KCL collision and animation data (BMD/BTI parsing already feeds the viewport).
+2. Path and path-point editing, and the remaining specialised object models. Undo, selection and object creation/duplication/deletion are done.
+3. The remaining desktop editors (BCSV spreadsheet, world map, galaxy creation).
+4. Cross-platform GUI packaging, then removal of the Java/Ant build.
 
 Each stage should replace a complete vertical slice. Java is removed only when the native replacement can open, edit, save, and reopen representative SMG1 and SMG2 data without loss.

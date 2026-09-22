@@ -195,11 +195,41 @@ void ViewportWindow::setScene(ViewportScene scene) {
     if (hover_.has_value() && *hover_ >= scene_.boxes().size()) {
         hover_.reset();
     }
+    // A rebuild re-indexes every box, so the multi-selection cannot survive it.
+    selection_.clear();
     invalidate();
 }
 
 void ViewportWindow::setSelected(std::optional<std::size_t> selected) {
     selected_ = selected;
+    selection_.clear();
+    if (selected.has_value()) {
+        selection_.push_back(*selected);
+    }
+    invalidate();
+}
+
+void ViewportWindow::setSelection(std::vector<std::size_t> selected) {
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+    selection_ = std::move(selected);
+    selected_ = selection_.empty() ? std::optional<std::size_t>{} : selection_.front();
+    invalidate();
+}
+
+void ViewportWindow::setGizmoMode(GizmoMode mode) noexcept {
+    if (gizmoMode_ == mode) {
+        return;
+    }
+    gizmoMode_ = mode;
+    invalidate();
+}
+
+void ViewportWindow::setGizmoEnabled(bool enabled) noexcept {
+    if (gizmoEnabled_ == enabled) {
+        return;
+    }
+    gizmoEnabled_ = enabled;
     invalidate();
 }
 
@@ -230,11 +260,48 @@ void ViewportWindow::frameAll() {
 }
 
 void ViewportWindow::frameSelection() {
-    if (!selected_.has_value() || *selected_ >= scene_.boxes().size()) {
+    if (selection_.empty()) {
         frameAll();
         return;
     }
-    camera_.frameTarget(scene_.boxes()[*selected_].center, 300.0F);
+    // Frame the whole selection, not just the first object: a two-object
+    // selection framed as one object would still leave the other off-screen.
+    math::Vec3f low{0.0F, 0.0F, 0.0F};
+    math::Vec3f high{0.0F, 0.0F, 0.0F};
+    bool any = false;
+    for (const auto index : selection_) {
+        if (index >= scene_.boxes().size()) {
+            continue;
+        }
+        const auto& box = scene_.boxes()[index];
+        if (!any) {
+            low = {box.center.x - box.halfExtents.x, box.center.y - box.halfExtents.y,
+                   box.center.z - box.halfExtents.z};
+            high = {box.center.x + box.halfExtents.x, box.center.y + box.halfExtents.y,
+                    box.center.z + box.halfExtents.z};
+            any = true;
+            continue;
+        }
+        low = {std::min(low.x, box.center.x - box.halfExtents.x),
+               std::min(low.y, box.center.y - box.halfExtents.y),
+               std::min(low.z, box.center.z - box.halfExtents.z)};
+        high = {std::max(high.x, box.center.x + box.halfExtents.x),
+                std::max(high.y, box.center.y + box.halfExtents.y),
+                std::max(high.z, box.center.z + box.halfExtents.z)};
+    }
+    if (!any) {
+        frameAll();
+        return;
+    }
+    const math::Vec3f center{(low.x + high.x) * 0.5F, (low.y + high.y) * 0.5F,
+                             (low.z + high.z) * 0.5F};
+    const math::Vec3f extent{high.x - low.x, high.y - low.y, high.z - low.z};
+    const float radius = std::max(std::max(extent.x, extent.y), extent.z) * 0.5F;
+    // Distance so the selection fills the view: 45 degrees at the FOV's half
+    // angle, with a margin so it never touches the screen edge.
+    const float framed = radius > 0.0F ? radius / std::tan(ViewportCamera::kFieldOfView * 0.5F) * 1.6F
+                                       : 300.0F;
+    camera_.frameTarget(center, std::max(framed, 300.0F));
     invalidate();
 }
 
@@ -272,21 +339,67 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         return 0;
     case WM_ERASEBKGND:
         return 1;
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
         SetFocus(window_);
         SetCapture(window_);
         draggingLeft_ = true;
         leftMoved_ = false;
         lastX_ = GET_X_LPARAM(lParam);
         lastY_ = GET_Y_LPARAM(lParam);
+        // The gizmo claims the gesture when the click lands on one of its
+        // handles; a miss falls through to the plain camera pan.
+        draggingGizmo_ = false;
+        if (gizmoEnabled_ && !selection_.empty()) {
+            const auto anchor = gizmoAnchor();
+            RECT rect{};
+            GetClientRect(window_, &rect);
+            const float width = static_cast<float>(rect.right - rect.left);
+            const float height = static_cast<float>(rect.bottom - rect.top);
+            const auto handle =
+                pickGizmoHandle(camera_, anchor, static_cast<float>(lastX_),
+                                static_cast<float>(lastY_), width, height);
+            if (handle != GizmoHandle::None &&
+                beginGizmoDrag(gizmoDrag_, camera_, anchor, gizmoMode_, handle,
+                               static_cast<float>(lastX_), static_cast<float>(lastY_), width,
+                               height)) {
+                draggingGizmo_ = true;
+                gizmoGrabX_ = lastX_;
+                gizmoGrabY_ = lastY_;
+            }
+        }
         return 0;
+    }
     case WM_LBUTTONUP:
+        if (draggingGizmo_) {
+            draggingGizmo_ = false;
+            ReleaseCapture();
+            if (onGizmo_) {
+                RECT rect{};
+                GetClientRect(window_, &rect);
+                const float width = static_cast<float>(rect.right - rect.left);
+                const float height = static_cast<float>(rect.bottom - rect.top);
+                GizmoEdit edit;
+                edit.phase = GizmoPhase::End;
+                edit.mode = gizmoDrag_.mode;
+                edit.handle = gizmoDrag_.handle;
+                edit.value = gizmoDragValue(gizmoDrag_, camera_, static_cast<float>(lastX_),
+                                            static_cast<float>(lastY_), width, height);
+                onGizmo_(edit);
+            }
+            return 0;
+        }
         if (draggingLeft_) {
             ReleaseCapture();
             draggingLeft_ = false;
-            if (!leftMoved_ && (wParam & (MK_SHIFT | MK_CONTROL)) == 0) {
-                if (onSelect_) {
-                    onSelect_(pickAt(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)));
+            // A click (no drag) picks: plain click replaces the selection,
+            // Ctrl/Shift-click toggles it, matching every 3D editor.
+            if (!leftMoved_) {
+                const auto picked = pickAt(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                const bool additive = (wParam & (MK_SHIFT | MK_CONTROL)) != 0;
+                if (onSelectMany_) {
+                    onSelectMany_(picked, additive);
+                } else if (onSelect_ && !additive) {
+                    onSelect_(picked);
                 }
             }
         }
@@ -322,7 +435,25 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         const int dy = y - lastY_;
         lastX_ = x;
         lastY_ = y;
-        if (draggingLeft_ && (wParam & MK_LBUTTON) != 0) {
+        if (draggingGizmo_ && (wParam & MK_LBUTTON) != 0) {
+            // Live gizmo drag: the selection follows the cursor frame by frame;
+            // the editor turns the Begin/Update/End messages into one undo step.
+            if (onGizmo_) {
+                RECT rect{};
+                GetClientRect(window_, &rect);
+                const float width = static_cast<float>(rect.right - rect.left);
+                const float height = static_cast<float>(rect.bottom - rect.top);
+                GizmoEdit edit;
+                edit.phase = draggingGizmoStarted_ ? GizmoPhase::Update : GizmoPhase::Begin;
+                draggingGizmoStarted_ = true;
+                edit.mode = gizmoDrag_.mode;
+                edit.handle = gizmoDrag_.handle;
+                edit.value = gizmoDragValue(gizmoDrag_, camera_, static_cast<float>(x),
+                                            static_cast<float>(y), width, height);
+                onGizmo_(edit);
+            }
+            invalidate();
+        } else if (draggingLeft_ && (wParam & MK_LBUTTON) != 0) {
             if (dx != 0 || dy != 0) {
                 leftMoved_ = true;
             }
@@ -468,27 +599,15 @@ void ViewportWindow::drawFrame() {
         glEnable(GL_NORMALIZE);
         pruneModelLists();
         for (const auto& box : scene_.boxes()) {
-            const bool selected = selected_.has_value() && *selected_ == box.objectIndex;
+            const bool selected =
+                std::find(selection_.begin(), selection_.end(), box.objectIndex) != selection_.end();
             const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
             drawShape(box, selected, hovered);
         }
-        if (selected_.has_value() && *selected_ < scene_.boxes().size()) {
-            const auto& box = scene_.boxes()[*selected_];
+        if (!selection_.empty()) {
             glDisable(GL_LIGHTING);
             glDisable(GL_DEPTH_TEST);
-            glLineWidth(2.0F);
-            glBegin(GL_LINES);
-            glColor3f(1, 0.2F, 0.2F);
-            glVertex3f(box.center.x - 60, box.center.y, box.center.z);
-            glVertex3f(box.center.x + 60, box.center.y, box.center.z);
-            glColor3f(0.2F, 1, 0.2F);
-            glVertex3f(box.center.x, box.center.y - 60, box.center.z);
-            glVertex3f(box.center.x, box.center.y + 60, box.center.z);
-            glColor3f(0.3F, 0.5F, 1);
-            glVertex3f(box.center.x, box.center.y, box.center.z - 60);
-            glVertex3f(box.center.x, box.center.y, box.center.z + 60);
-            glEnd();
-            glLineWidth(1.0F);
+            drawGizmo();
             glEnable(GL_DEPTH_TEST);
         }
         SwapBuffers(device_);
@@ -818,6 +937,168 @@ std::optional<std::size_t> ViewportWindow::pickAt(int x, int y) {
     const float width = static_cast<float>(rect.right - rect.left);
     const float height = static_cast<float>(rect.bottom - rect.top);
     return scene_.pick(camera_, static_cast<float>(x), static_cast<float>(y), width, height);
+}
+
+// The gizmo sits on the centroid of the selection, so a multi-selection pivots
+// around what the author sees as "the middle" instead of an arbitrary member.
+// While a drag is in flight the anchor stays frozen at its grab point, which is
+// what keeps the drag mapping (captured at Begin) valid.
+math::Vec3f ViewportWindow::gizmoAnchor() const noexcept {
+    math::Vec3f sum{};
+    std::size_t count = 0;
+    for (const auto index : selection_) {
+        if (index < scene_.boxes().size()) {
+            sum = {sum.x + scene_.boxes()[index].center.x, sum.y + scene_.boxes()[index].center.y,
+                   sum.z + scene_.boxes()[index].center.z};
+            ++count;
+        }
+    }
+    if (count == 0) {
+        return {};
+    }
+    return {sum.x / static_cast<float>(count), sum.y / static_cast<float>(count),
+            sum.z / static_cast<float>(count)};
+}
+
+// A small cone used for the gizmo's arrowheads: 8 segments is plenty at this
+// size and legacy GL builds it from raw triangles with no extra state.
+void drawGizmoCone(const math::Vec3f& base, const math::Vec3f& direction, float radius,
+                   float length) {
+    const math::Vec3f tip{base.x + direction.x * length, base.y + direction.y * length,
+                          base.z + direction.z * length};
+    // Any vector not parallel to the direction serves as the first ring basis.
+    math::Vec3f helper{0.0F, 1.0F, 0.0F};
+    if (std::abs(math::Vec3f::dot(helper, direction)) > 0.9F) {
+        helper = {1.0F, 0.0F, 0.0F};
+    }
+    const math::Vec3f side = math::Vec3f::cross(direction, helper).normalized();
+    const math::Vec3f up = math::Vec3f::cross(side, direction).normalized();
+
+    constexpr int kSegments = 8;
+    glBegin(GL_TRIANGLES);
+    for (int segment = 0; segment < kSegments; ++segment) {
+        const float a0 = static_cast<float>(segment) / kSegments * 6.2831853F;
+        const float a1 = static_cast<float>(segment + 1) / kSegments * 6.2831853F;
+        const math::Vec3f p0{base.x + (side.x * std::cos(a0) + up.x * std::sin(a0)) * radius,
+                             base.y + (side.y * std::cos(a0) + up.y * std::sin(a0)) * radius,
+                             base.z + (side.z * std::cos(a0) + up.z * std::sin(a0)) * radius};
+        const math::Vec3f p1{base.x + (side.x * std::cos(a1) + up.x * std::sin(a1)) * radius,
+                             base.y + (side.y * std::cos(a1) + up.y * std::sin(a1)) * radius,
+                             base.z + (side.z * std::cos(a1) + up.z * std::sin(a1)) * radius};
+        glVertex3f(p0.x, p0.y, p0.z);
+        glVertex3f(p1.x, p1.y, p1.z);
+        glVertex3f(tip.x, tip.y, tip.z);
+    }
+    glEnd();
+}
+
+// One unit-cube pass for the gizmo's centre handle (a grab affordance rather
+// than a pretty box, so plain GL quads are fine here).
+void drawGizmoCube(const math::Vec3f& centre, float half) {
+    glBegin(GL_QUADS);
+    // +X / -X
+    glVertex3f(centre.x + half, centre.y - half, centre.z - half);
+    glVertex3f(centre.x + half, centre.y + half, centre.z - half);
+    glVertex3f(centre.x + half, centre.y + half, centre.z + half);
+    glVertex3f(centre.x + half, centre.y - half, centre.z + half);
+    glVertex3f(centre.x - half, centre.y - half, centre.z + half);
+    glVertex3f(centre.x - half, centre.y + half, centre.z + half);
+    glVertex3f(centre.x - half, centre.y + half, centre.z - half);
+    glVertex3f(centre.x - half, centre.y - half, centre.z - half);
+    // +Y / -Y
+    glVertex3f(centre.x - half, centre.y + half, centre.z - half);
+    glVertex3f(centre.x + half, centre.y + half, centre.z - half);
+    glVertex3f(centre.x + half, centre.y + half, centre.z + half);
+    glVertex3f(centre.x - half, centre.y + half, centre.z + half);
+    glVertex3f(centre.x - half, centre.y - half, centre.z + half);
+    glVertex3f(centre.x + half, centre.y - half, centre.z + half);
+    glVertex3f(centre.x + half, centre.y - half, centre.z - half);
+    glVertex3f(centre.x - half, centre.y - half, centre.z - half);
+    // +Z / -Z
+    glVertex3f(centre.x - half, centre.y - half, centre.z + half);
+    glVertex3f(centre.x + half, centre.y - half, centre.z + half);
+    glVertex3f(centre.x + half, centre.y + half, centre.z + half);
+    glVertex3f(centre.x - half, centre.y + half, centre.z + half);
+    glVertex3f(centre.x + half, centre.y - half, centre.z - half);
+    glVertex3f(centre.x - half, centre.y - half, centre.z - half);
+    glVertex3f(centre.x - half, centre.y + half, centre.z - half);
+    glVertex3f(centre.x + half, centre.y + half, centre.z - half);
+    glEnd();
+}
+
+// The transform gizmo: three axis arrows from the selection centroid plus a
+// centre cube. Sized in pixels via gizmoAxisLength so it reads the same at any
+// camera distance, and drawn without depth test so it is never swallowed by
+// geometry it is standing on. The active/hovered handle brightens to yellow so
+// the author always knows which one the next click will grab.
+void ViewportWindow::drawGizmo() {
+    const math::Vec3f anchor = gizmoAnchor();
+    const float axisLength = gizmoAxisLength(camera_, anchor, static_cast<float>(height_));
+    if (axisLength <= 0.0F) {
+        return;
+    }
+    // Hover highlight: only worth projecting when the cursor is over us and no
+    // drag is running (during a drag the grabbed handle is highlighted anyway).
+    GizmoHandle highlighted = GizmoHandle::None;
+    if (draggingGizmo_) {
+        highlighted = gizmoDrag_.handle;
+    } else if (trackingMouse_) {
+        POINT cursor{};
+        if (GetCursorPos(&cursor) && ScreenToClient(window_, &cursor)) {
+            highlighted =
+                pickGizmoHandle(camera_, anchor, static_cast<float>(cursor.x),
+                                static_cast<float>(cursor.y), static_cast<float>(width_),
+                                static_cast<float>(height_));
+        }
+    }
+
+    glLineWidth(3.0F);
+    glBegin(GL_LINES);
+    for (const auto handle : {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ}) {
+        const math::Vec3f direction = axisDirection(handle);
+        if (handle == highlighted) {
+            glColor3f(1.0F, 0.9F, 0.2F);
+        } else if (handle == GizmoHandle::AxisX) {
+            glColor3f(0.95F, 0.25F, 0.25F);
+        } else if (handle == GizmoHandle::AxisY) {
+            glColor3f(0.3F, 0.9F, 0.3F);
+        } else {
+            glColor3f(0.3F, 0.5F, 1.0F);
+        }
+        glVertex3f(anchor.x, anchor.y, anchor.z);
+        glVertex3f(anchor.x + direction.x * axisLength, anchor.y + direction.y * axisLength,
+                   anchor.z + direction.z * axisLength);
+    }
+    glEnd();
+    glLineWidth(1.0F);
+
+    // Arrowheads so the direction of each axis reads at a glance.
+    constexpr float kConeRadius = 0.045F;
+    constexpr float kConeLength = 0.14F;
+    for (const auto handle : {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ}) {
+        const math::Vec3f direction = axisDirection(handle);
+        if (handle == highlighted) {
+            glColor3f(1.0F, 0.9F, 0.2F);
+        } else if (handle == GizmoHandle::AxisX) {
+            glColor3f(0.95F, 0.25F, 0.25F);
+        } else if (handle == GizmoHandle::AxisY) {
+            glColor3f(0.3F, 0.9F, 0.3F);
+        } else {
+            glColor3f(0.3F, 0.5F, 1.0F);
+        }
+        drawGizmoCone({anchor.x + direction.x * axisLength * 0.86F,
+                       anchor.y + direction.y * axisLength * 0.86F,
+                       anchor.z + direction.z * axisLength * 0.86F},
+                      direction, axisLength * kConeRadius, axisLength * kConeLength);
+    }
+
+    // Centre cube: drag it to move the selection freely in the view plane.
+    if (highlighted == GizmoHandle::Center) {
+        glColor3f(1.0F, 0.9F, 0.2F);
+    } else {
+        glColor3f(0.85F, 0.85F, 0.9F);
+    }
+    drawGizmoCube(anchor, axisLength * 0.055F);
 }
 } // namespace whitehole::render
 #endif // _WIN32

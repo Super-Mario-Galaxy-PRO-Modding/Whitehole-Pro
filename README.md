@@ -265,31 +265,24 @@ Whitehole Neo is great but aging; Starforge could be the future but still in dee
 ---
 
 ## Controls
-- Left Click: Select/Deselect object (hold <kbd>Shift</kbd> or <kbd>Ctrl</kbd> to select multiple)
-- Left Click Drag: Pan camera, Move object
-- Right Click Drag: Rotate camera
-- Scroll Wheel: Move camera forward/backward, Move object forward/backward
-- Arrow Keys + <kbd>PageUp</kbd>/<kbd>PageDown</kbd>: (Can switch to <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> + <kbd>E</kbd>/<kbd>Q</kbd> in the settings)
-  - Hold <kbd>G</kbd> to move selected objects (Letter can be changed in the settings)
-  - Hold <kbd>R</kbd> to rotate selected objects (Letter can be changed in the settings)
-  - Hold <kbd>S</kbd> to scale selected objects (Letter can be changed in the settings)
+- Left Click: Select object
+- Left Click Drag: Pan camera
+- Right Click Drag: Orbit camera
+- Scroll Wheel: Zoom the camera in/out
+- Drag the X/Y/Z fields in Properties (or double-click to type): move/rotate/scale the selection
+- Double-click an object in the list: fly the 3D camera to it
 
 ## Useful Keyboard Shortcuts
-- <kbd>Ctrl</kbd>+<kbd>C</kbd>: Copy selected objects
-- <kbd>Ctrl</kbd>+<kbd>V</kbd>: Paste copied objects (positioned at the mouse)
-- <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>: Paste copied objects (positioned at the position in the copy data)
-- <kbd>Ctrl</kbd>+<kbd>Z</kbd>: Undo previous action
-- <kbd>Shift</kbd>+<kbd>A</kbd>: Add object quick access menu
-- <kbd>Space</kbd>: Jump camera to selected object(s)
-- <kbd>Shift</kbd>+<kbd>Space</kbd>: Jump camera to selected zone
-- <kbd>H</kbd>: Hide/Unhide selected objects
-- <kbd>Alt</kbd>+<kbd>H</kbd>: Unhide All hidden objects
-- <kbd>Delete</kbd>: Delete selected objects
-- <kbd>Ctrl</kbd>+<kbd>N</kbd>: Truncate an object's positional values to remove the decimal parts
-- <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>: Reset the selected path point control handles
-- <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>: Reverse the selected path points
-- <kbd>L</kbd>: Link the selected worldmap points together
-- <kbd>P</kbd>: Switch worldmap points and links between their Yellow and Pink variants
+- <kbd>Ctrl</kbd>+<kbd>O</kbd>: Open a map archive
+- <kbd>Ctrl</kbd>+<kbd>S</kbd>: Save the current zone
+- <kbd>Ctrl</kbd>+<kbd>F</kbd>: Focus the object search
+- <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd>: Undo / redo — adding, duplicating and deleting objects are all one undo step each
+- <kbd>Shift</kbd>+<kbd>A</kbd>: Add Object picker (type to search, Enter places the top match)
+- <kbd>Ctrl</kbd>+<kbd>D</kbd>: Duplicate the selected object
+- <kbd>Delete</kbd>: Delete the selected object (undoable with Ctrl+Z)
+- <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd>: Copy / paste the selected object's transform (Edit → Copy / Paste also offers position, rotation or scale only)
+- <kbd>F</kbd>: Frame the selected object in the 3D viewport
+- <kbd>Space</kbd>: Jump the camera to the selected object
 
 ## Libraries
 - **jogamp**: https://jogamp.org/

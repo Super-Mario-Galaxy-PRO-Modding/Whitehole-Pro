@@ -14,6 +14,7 @@
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -116,9 +117,13 @@ private:
                                  std::vector<smg::PlacementObject> after, std::string label);
 
 // Appends an object row and returns its new row index, or nullopt on failure.
+// `insertAt` places the row before that index instead of at the end (used by
+// duplicate, which keeps the copy next to its original); out-of-range values are
+// clamped to the end by BcsvTable::insertRow.
 [[nodiscard]] std::size_t addObject(smg::StageArchive& stage, UndoStack& stack,
                                    std::size_t tableIndex, std::vector<smg::BcsvValue> values,
-                                   std::string label);
+                                   std::string label,
+                                   std::optional<std::size_t> insertAt = std::nullopt);
 
 [[nodiscard]] bool removeObject(smg::StageArchive& stage, UndoStack& stack, std::size_t tableIndex,
                                std::size_t rowIndex, std::string label);

@@ -15,6 +15,7 @@
 #ifdef _WIN32
 
 #include "whitehole/render/camera.hpp"
+#include "whitehole/render/gizmo.hpp"
 #include "whitehole/render/model_mesh.hpp"
 #include "whitehole/render/viewport_scene.hpp"
 
@@ -37,6 +38,11 @@ public:
     ViewportWindow& operator=(ViewportWindow&&) = delete;
 
     using SelectCallback = std::function<void(std::optional<std::size_t>)>;
+    // Multi-select callback: additive picks (Ctrl/Shift) arrive with
+    // `additive` set, so the editor can extend rather than replace the set.
+    using SelectManyCallback = std::function<void(std::optional<std::size_t>, bool additive)>;
+    // One message from a gizmo drag (Begin/Update/End), already in world units.
+    using GizmoCallback = std::function<void(const GizmoEdit&)>;
 
     bool create(HWND parent, int controlId, HINSTANCE instance);
     void destroy() noexcept;
@@ -45,8 +51,15 @@ public:
 
     void setScene(ViewportScene scene);
     void setSelected(std::optional<std::size_t> selected);
+    // The full multi-selection. The gizmo anchors on the first entry.
+    void setSelection(std::vector<std::size_t> selected);
     void setHover(std::optional<std::size_t> hover);
     void setShowLabels(bool showLabels) noexcept;
+    // Which transform handles the gizmo shows: move, rotate or scale (W/E/R).
+    void setGizmoMode(GizmoMode mode) noexcept;
+    // Hides the gizmo when no handle should be offered (no selection, or a
+    // text field has focus).
+    void setGizmoEnabled(bool enabled) noexcept;
     // Legend/label ink follows the theme instead of the hard-coded dark box the
     // overlay used to paint, which looked wrong inside a light-mode workspace.
     void setOverlayTheme(bool dark) noexcept;
@@ -72,6 +85,8 @@ public:
     bool renderIfDirty();
 
     void setOnSelect(SelectCallback callback) { onSelect_ = std::move(callback); }
+    void setOnSelectMany(SelectManyCallback callback) { onSelectMany_ = std::move(callback); }
+    void setOnGizmo(GizmoCallback callback) { onGizmo_ = std::move(callback); }
     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
 
 private:
@@ -95,6 +110,7 @@ private:
     void updateSize(int width, int height);
     void applyCameraToGL(int width, int height);
     void drawShape(const ViewportBox& box, bool selected, bool hovered);
+    void drawGizmo();
     void drawModelTriangles(const ModelMesh& mesh, bool bakeColors);
     unsigned int modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain);
     void pruneModelLists() noexcept;
@@ -114,10 +130,27 @@ private:
     ViewportCamera camera_{};
     ViewportScene scene_{};
     std::optional<std::size_t> selected_;
+    std::vector<std::size_t> selection_; // full multi-selection (contains selected_)
     std::optional<std::size_t> hover_;
     SelectCallback onSelect_;
+    SelectManyCallback onSelectMany_;
+    GizmoCallback onGizmo_;
     bool showLabels_{false};
     bool overlayDark_{true};
+    GizmoMode gizmoMode_{GizmoMode::Translate};
+    bool gizmoEnabled_{true};
+    // A gizmo drag in flight. While it runs, left-drag moves the selection
+    // instead of panning the camera, exactly like every 3D editor.
+    bool draggingGizmo_{false};
+    GizmoDrag gizmoDrag_{};
+    // Screen point and handle where the current gizmo gesture started, so the
+    // click that begins a drag can be told apart from a plain pan.
+    int gizmoGrabX_{0};
+    int gizmoGrabY_{0};
+    bool draggingGizmoStarted_{false};
+    // Where the gizmo sits: the first selected object, or the centroid of the
+    // whole selection when several are active.
+    [[nodiscard]] math::Vec3f gizmoAnchor() const noexcept;
     bool draggingLeft_{false};
     bool draggingRight_{false};
     int lastX_{0};

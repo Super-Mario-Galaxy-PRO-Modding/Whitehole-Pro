@@ -35,6 +35,10 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> read(const RarcEntry& entry) const;
     [[nodiscard]] std::vector<std::uint8_t> read(std::string_view path) const;
     void replace(std::string_view path, std::vector<std::uint8_t> data);
+    // Adds a new file under an existing directory (or replaces it when the
+    // path already exists). The path keeps its given casing so a new entry
+    // reads like its siblings; lookups stay case-insensitive.
+    void insert(std::string_view path, std::vector<std::uint8_t> data);
     [[nodiscard]] std::vector<std::uint8_t> serialize(bool compress) const;
 
     void extractAll(const std::filesystem::path& destination) const;

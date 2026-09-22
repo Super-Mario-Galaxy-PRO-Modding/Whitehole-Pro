@@ -64,6 +64,191 @@ math::Matrix4 placementRotation(const smg::PlacementObject& object) noexcept {
 
 } // namespace
 
+// Stable per-rail colour (see header). The hue walks the golden ratio from
+// l_id and every channel is lifted off zero so even dark hues stay visible
+// against the grid.
+std::uint32_t railPathColor(std::int32_t lId) noexcept {
+    float hue = std::fmod(static_cast<float>(lId) * 0.61803398875F, 1.0F);
+    if (hue < 0.0F) {
+        hue += 1.0F;
+    }
+    const float scaled = hue * 6.0F;
+    const int sector = static_cast<int>(scaled) % 6;
+    const float fraction = scaled - static_cast<int>(scaled);
+    float red = 0.0F;
+    float green = 0.0F;
+    float blue = 0.0F;
+    switch (sector) {
+        case 0: red = 1.0F; green = fraction; break;
+        case 1: red = 1.0F - fraction; green = 1.0F; break;
+        case 2: green = 1.0F; blue = fraction; break;
+        case 3: green = 1.0F - fraction; blue = 1.0F; break;
+        case 4: red = fraction; blue = 1.0F; break;
+        default: red = 1.0F; blue = 1.0F - fraction; break;
+    }
+    const auto channel = [](float value) {
+        const auto lifted = std::clamp(0.40F + value * 0.60F, 0.0F, 1.0F);
+        return static_cast<std::uint32_t>(lifted * 255.0F + 0.5F);
+    };
+    return (channel(red) << 24) | (channel(green) << 16) | (channel(blue) << 8) | 0xFFu;
+}
+
+namespace {
+
+OverlayBatch makeBatch(std::uint32_t color, float width = 1.0F) {
+    OverlayBatch batch;
+    batch.color = color;
+    batch.width = width;
+    return batch;
+}
+
+// Axis-aligned wire box pushed through a world matrix (12 edges).
+void appendBoxWire(OverlayBatch& batch, const math::Matrix4& world, const math::Vec3f& half) {
+    math::Vec3f corners[8];
+    for (int index = 0; index < 8; ++index) {
+        corners[index] = world.transformPoint({(index & 1) != 0 ? half.x : -half.x,
+                                               (index & 2) != 0 ? half.y : -half.y,
+                                               (index & 4) != 0 ? half.z : -half.z});
+    }
+    constexpr int edges[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7},
+                                  {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto& edge : edges) {
+        batch.segments.push_back({corners[edge[0]], corners[edge[1]]});
+    }
+}
+
+// Small wire cube around a point: Java drew every rail point as a CubeRenderer
+// box (size 100 for the point, 50 for the handles).
+void appendCubeAt(OverlayBatch& batch, const math::Vec3f& center, float half) {
+    appendBoxWire(batch, math::Matrix4::translation(center), {half, half, half});
+}
+
+bool coincident(const math::Vec3f& left, const math::Vec3f& right) noexcept {
+    return (left - right).length() <= 0.001F;
+}
+
+// The rail polyline: straight sections collapse to one segment (Java's
+// roughlyEqual shortcut), curved sections tessellate at Java's 0.01 step.
+void appendRailCurve(OverlayBatch& batch, const smg::RailPath& path) {
+    const auto& points = path.points;
+    if (points.size() < 2) {
+        return;
+    }
+    const std::size_t sections = points.size() - 1 + (path.closed ? 1 : 0);
+    for (std::size_t section = 0; section < sections; ++section) {
+        const auto& current = points[section];
+        const auto& next = (section + 1 < points.size()) ? points[section + 1] : points[0];
+        const auto& a = current.position;
+        const auto& b = current.control2;
+        const auto& c = next.control1;
+        const auto& d = next.position;
+        if (coincident(a, b) && coincident(c, d)) {
+            batch.segments.push_back({a, d});
+            continue;
+        }
+        math::Vec3f previous = a;
+        constexpr int kSteps = 100;
+        for (int step = 1; step < kSteps; ++step) {
+            const auto sample = smg::bezierPoint(static_cast<float>(step) / kSteps, a, b, c, d);
+            batch.segments.push_back({previous, sample});
+            previous = sample;
+        }
+        batch.segments.push_back({previous, d});
+    }
+}
+
+// Control handles and point cubes for one rail.
+void appendRailPoints(OverlayBatch& batch, const smg::RailPath& path) {
+    for (const auto& point : path.points) {
+        if (!coincident(point.position, point.control1)) {
+            batch.segments.push_back({point.position, point.control1});
+        }
+        if (!coincident(point.position, point.control2)) {
+            batch.segments.push_back({point.position, point.control2});
+        }
+        appendCubeAt(batch, point.position, 50.0F);
+        appendCubeAt(batch, point.control1, 25.0F);
+        appendCubeAt(batch, point.control2, 25.0F);
+    }
+}
+
+// Placement transform with a visibility floor: hair-thin area cubes (scale
+// 0.001) would otherwise be impossible to find on the map.
+math::Matrix4 overlayWorld(const smg::PlacementObject& object) noexcept {
+    constexpr float kMinimumExtent = 15.0F;
+    const auto safe = [](float value) {
+        const auto magnitude = std::abs(value);
+        if (magnitude > kMinimumExtent) {
+            return value < 0.0F ? -magnitude : magnitude;
+        }
+        return kMinimumExtent;
+    };
+    return math::Matrix4::scale({safe(object.scale.x), safe(object.scale.y), safe(object.scale.z)}) *
+           placementRotation(object) * math::Matrix4::translation(object.position);
+}
+
+// Generates every enabled overlay family. Runs after the box pass so the
+// axis can be sized from frameDistance_.
+void buildOverlays(const std::vector<smg::PlacementObject>& objects, OverlayFlags flags,
+                   const std::vector<smg::RailPath>& paths, float frameDistance,
+                   std::vector<OverlayBatch>& out) {
+    if (flags.axis) {
+        const float length = std::clamp(frameDistance, 300.0F, 5000.0F);
+        const math::Vec3f origin{};
+        auto xAxis = makeBatch(0xE05050FFu, 1.5F);
+        xAxis.segments.push_back({origin, {length, 0.0F, 0.0F}});
+        auto yAxis = makeBatch(0x50D060FFu, 1.5F);
+        yAxis.segments.push_back({origin, {0.0F, length, 0.0F}});
+        auto zAxis = makeBatch(0x5080E0FFu, 1.5F);
+        zAxis.segments.push_back({origin, {0.0F, 0.0F, length}});
+        out.push_back(std::move(xAxis));
+        out.push_back(std::move(yAxis));
+        out.push_back(std::move(zAxis));
+    }
+
+    const auto collect = [&objects, &out](bool enabled, const char* kind, std::uint32_t color) {
+        if (!enabled) {
+            return;
+        }
+        auto batch = makeBatch(color);
+        for (const auto& object : objects) {
+            if (object.kind == kind) {
+                appendBoxWire(batch, overlayWorld(object), {1.0F, 1.0F, 1.0F});
+            }
+        }
+        if (!batch.segments.empty()) {
+            out.push_back(std::move(batch));
+        }
+    };
+    collect(flags.cameras, "camera", 0x58C8E8FFu); // cyan
+    collect(flags.areas, "area", 0xD060C0FFu);     // magenta
+    collect(flags.gravity, "gravity", 0x70E090FFu); // green
+
+    if (flags.paths) {
+        for (std::size_t pathIndex = 0; pathIndex < paths.size(); ++pathIndex) {
+            const auto& path = paths[pathIndex];
+            if (path.points.empty()) {
+                continue;
+            }
+            const auto color = railPathColor(path.lId);
+            auto curve = makeBatch(color, 1.5F);
+            curve.railIndex = pathIndex;
+            appendRailCurve(curve, path);
+            if (!curve.segments.empty()) {
+                out.push_back(std::move(curve));
+            }
+            auto handles = makeBatch(color);
+            handles.railIndex = pathIndex;
+            appendRailPoints(handles, path);
+            if (!handles.segments.empty()) {
+                out.push_back(std::move(handles));
+            }
+        }
+    }
+}
+
+} // namespace
+
 math::Matrix4 placementWorldMatrix(const smg::PlacementObject& object) noexcept {
     const math::Vec3f safeScale{std::abs(object.scale.x) > 0.000001F ? object.scale.x : 1.0F,
                                 std::abs(object.scale.y) > 0.000001F ? object.scale.y : 1.0F,
@@ -161,8 +346,15 @@ std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) no
     return tMin;
 }
 
-void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models) {
+void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models,
+                            const std::vector<smg::RailPath>* paths, OverlayFlags overlays) {
     boxes_.clear();
+    overlayBatches_.clear();
+    paths_.clear();
+    pathsPickable_ = overlays.paths;
+    if (paths != nullptr) {
+        paths_ = *paths;
+    }
     boxes_.reserve(objects.size());
     math::Vec3f sum{0.0F, 0.0F, 0.0F};
     for (std::size_t index = 0; index < objects.size(); ++index) {
@@ -218,12 +410,64 @@ void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, Mo
         center_ = {};
         frameDistance_ = 800.0F;
     }
+    buildOverlays(objects, overlays, paths_, frameDistance_, overlayBatches_);
 }
 
 void ViewportScene::clear() noexcept {
     boxes_.clear();
+    overlayBatches_.clear();
+    paths_.clear();
+    pathsPickable_ = false;
     center_ = {};
     frameDistance_ = 800.0F;
+}
+
+std::optional<RailPointRef> ViewportScene::pickRailPoint(const ViewportCamera& camera, float screenX,
+                                                         float screenY, float width, float height,
+                                                         float maxDistance) const noexcept {
+    if (!pathsPickable_ || width <= 0.0F || height <= 0.0F) {
+        return std::nullopt;
+    }
+    const auto ray = camera.screenToRay(screenX, screenY, width, height);
+    // Cube half-sizes from the overlay pass (50 for a point, 25 for a handle),
+    // padded slightly so the pick target is at least as friendly as it looks.
+    struct Part {
+        const math::Vec3f* center;
+        float radius;
+        int part;
+    };
+    std::optional<RailPointRef> best;
+    float bestDistance = maxDistance;
+    for (std::size_t pathIndex = 0; pathIndex < paths_.size(); ++pathIndex) {
+        const auto& points = paths_[pathIndex].points;
+        for (std::size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
+            const auto& point = points[pointIndex];
+            const Part parts[] = {{&point.position, 70.0F, 0},
+                                  {&point.control1, 45.0F, 1},
+                                  {&point.control2, 45.0F, 2}};
+            for (const auto& part : parts) {
+                const auto offset = ray.origin - *part.center;
+                const auto projected = math::Vec3f::dot(offset, ray.direction);
+                const auto closest = math::Vec3f::dot(offset, offset) -
+                                     part.radius * part.radius;
+                const auto discriminant = projected * projected - closest;
+                if (discriminant < 0.0F) {
+                    continue;
+                }
+                const auto root = std::sqrt(discriminant);
+                float distance = -projected - root;
+                if (distance < 0.0F) {
+                    distance = -projected + root;
+                }
+                if (distance < 0.0F || distance >= bestDistance) {
+                    continue;
+                }
+                bestDistance = distance;
+                best = RailPointRef{pathIndex, pointIndex, part.part};
+            }
+        }
+    }
+    return best;
 }
 
 std::optional<std::size_t> ViewportScene::pick(const ViewportCamera& camera, float screenX, float screenY, float width,

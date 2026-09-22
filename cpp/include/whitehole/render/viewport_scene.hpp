@@ -9,9 +9,11 @@
 #include "whitehole/render/camera.hpp"
 #include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
+#include "whitehole/smg/path.hpp"
 #include "whitehole/smg/placement.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -41,14 +43,63 @@ struct ViewportBox {
     std::shared_ptr<const ModelMesh> model;
 };
 
+// Sentinel rail index: an overlay batch that belongs to no rail.
+inline constexpr std::size_t kNoRail = static_cast<std::size_t>(-1);
+
+// One straight overlay line: the primitive every overlay shape (rails, boxes,
+// the axis) is built from. The renderer draws each batch as one GL_LINES pass.
+struct OverlaySegment {
+    math::Vec3f from;
+    math::Vec3f to;
+};
+
+// One colour + line width group of segments -- one draw call in the renderer.
+struct OverlayBatch {
+    std::uint32_t color{0xFFFFFFFFu}; // 0xRRGGBBAA
+    float width{1.0F};
+    std::size_t railIndex{kNoRail};   // rail this batch draws, or kNoRail
+    std::vector<OverlaySegment> segments;
+};
+
+// One pickable rail point: which rail, which point, and which of its three
+// vectors (0 = pnt0 position, 1 = control1, 2 = control2).
+struct RailPointRef {
+    std::size_t pathIndex{0};
+    std::size_t pointIndex{0};
+    int part{0};
+
+    [[nodiscard]] bool operator==(const RailPointRef& other) const noexcept = default;
+};
+
+// Which overlay families a rebuild generates. The View menu toggles map onto
+// these one-to-one, so a disabled family produces no geometry at all instead
+// of geometry the renderer has to filter.
+struct OverlayFlags {
+    bool axis{true};
+    bool areas{true};
+    bool cameras{true};
+    bool gravity{true};
+    bool paths{true};
+};
+
+// Stable colour for one rail: the hue walks the golden ratio from l_id, so a
+// path keeps the same colour across sessions and across rebuilds (Java drew a
+// fresh random colour every run, which made screenshots incomparable).
+[[nodiscard]] std::uint32_t railPathColor(std::int32_t lId) noexcept;
+
 class ViewportScene {
 public:
-    void rebuild(const std::vector<smg::PlacementObject>& objects,
-                 ModelLibrary* models = nullptr);
+    // `paths` feeds the rail overlays (null = no rails); `overlays` selects
+    // which families to generate. Both default so existing callers keep
+    // compiling unchanged.
+    void rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models = nullptr,
+                 const std::vector<smg::RailPath>* paths = nullptr, OverlayFlags overlays = {});
     void clear() noexcept;
 
     [[nodiscard]] const std::vector<ViewportBox>& boxes() const noexcept { return boxes_; }
     [[nodiscard]] bool empty() const noexcept { return boxes_.empty(); }
+    [[nodiscard]] const std::vector<OverlayBatch>& overlays() const noexcept { return overlayBatches_; }
+    [[nodiscard]] const std::vector<smg::RailPath>& railPaths() const noexcept { return paths_; }
 
     // Closest box hit by a camera ray. Returns the object index, if any.
     // `maxDistance` keeps far-away misclicks from selecting across the map.
@@ -60,8 +111,18 @@ public:
     [[nodiscard]] math::Vec3f center() const noexcept { return center_; }
     [[nodiscard]] float frameDistance() const noexcept { return frameDistance_; }
 
+    // Closest rail point under the cursor -- point cubes and handle cubes are
+    // pickable while the paths overlay is on. nullopt when the overlay is off
+    // (picking invisible geometry would feel like a bug) or nothing is hit.
+    [[nodiscard]] std::optional<RailPointRef> pickRailPoint(const ViewportCamera& camera, float screenX,
+                                                            float screenY, float width, float height,
+                                                            float maxDistance = 20000.0F) const noexcept;
+
 private:
     std::vector<ViewportBox> boxes_;
+    std::vector<OverlayBatch> overlayBatches_;
+    std::vector<smg::RailPath> paths_;
+    bool pathsPickable_{false};
     math::Vec3f center_{};
     float frameDistance_{800.0F};
 };

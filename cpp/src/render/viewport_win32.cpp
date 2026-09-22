@@ -391,9 +391,25 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         if (draggingLeft_) {
             ReleaseCapture();
             draggingLeft_ = false;
-            // A click (no drag) picks: plain click replaces the selection,
-            // Ctrl/Shift-click toggles it, matching every 3D editor.
+            // A click (no drag) picks: rail point cubes claim the click first
+            // (they are small, deliberate targets), otherwise the plain object
+            // flow runs -- plain click replaces the selection, Ctrl/Shift-click
+            // toggles it, matching every 3D editor.
             if (!leftMoved_) {
+                RECT rect{};
+                GetClientRect(window_, &rect);
+                const float width = static_cast<float>(rect.right - rect.left);
+                const float height = static_cast<float>(rect.bottom - rect.top);
+                const auto railHit = scene_.pickRailPoint(
+                    camera_, static_cast<float>(GET_X_LPARAM(lParam)),
+                    static_cast<float>(GET_Y_LPARAM(lParam)), width, height);
+                if (railHit.has_value()) {
+                    if (onSelectRail_) {
+                        onSelectRail_(*railHit);
+                    }
+                    invalidate();
+                    return 0;
+                }
                 const auto picked = pickAt(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                 const bool additive = (wParam & (MK_SHIFT | MK_CONTROL)) != 0;
                 if (onSelectMany_) {
@@ -604,6 +620,11 @@ void ViewportWindow::drawFrame() {
             const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
             drawShape(box, selected, hovered);
         }
+        // World overlays (rails, cameras, areas, gravity, axis): unlit lines
+        // that depth-test against the models so rails hide behind geometry.
+        glDisable(GL_LIGHTING);
+        drawOverlays();
+        glEnable(GL_LIGHTING);
         if (!selection_.empty()) {
             glDisable(GL_LIGHTING);
             glDisable(GL_DEPTH_TEST);
@@ -769,6 +790,87 @@ std::wstring toWide(std::string_view text) {
     std::wstring result(static_cast<std::size_t>(size), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), size);
     return result;
+}
+
+void ViewportWindow::setRailHighlight(std::optional<RailPointRef> highlight) noexcept {
+    railHighlight_ = highlight;
+    invalidate();
+}
+
+void ViewportWindow::drawOverlays() {
+    // One glBegin/glEnd per batch: batches carry a single colour and width, so
+    // this stays one state change + one draw call per overlay group. Geometry
+    // was tessellated at scene-rebuild time, never here.
+    glDepthMask(GL_TRUE);
+    for (const auto& batch : scene_.overlays()) {
+        if (batch.segments.empty()) {
+            continue;
+        }
+        float red = static_cast<float>((batch.color >> 24) & 0xFFu) / 255.0F;
+        float green = static_cast<float>((batch.color >> 16) & 0xFFu) / 255.0F;
+        float blue = static_cast<float>((batch.color >> 8) & 0xFFu) / 255.0F;
+        const float alpha = static_cast<float>(batch.color & 0xFFu) / 255.0F;
+        float width = batch.width;
+        const bool highlighted = batch.railIndex != kNoRail && railHighlight_.has_value()
+                                 && railHighlight_->pathIndex == batch.railIndex;
+        if (highlighted) {
+            // Brighten and thicken the selected rail so it reads instantly
+            // against its siblings, whatever the theme.
+            red = red + (1.0F - red) * 0.45F;
+            green = green + (1.0F - green) * 0.45F;
+            blue = blue + (1.0F - blue) * 0.45F;
+            width = std::max(width * 2.0F, 3.0F);
+        }
+        glColor4f(red, green, blue, alpha);
+        // Implementations clamp wide aliased lines to 1.0 silently; asking for
+        // 1.5 still matches Java's glLineWidth(1.5) wherever it is honoured.
+        glLineWidth(width);
+        glBegin(GL_LINES);
+        for (const auto& segment : batch.segments) {
+            glVertex3f(segment.from.x, segment.from.y, segment.from.z);
+            glVertex3f(segment.to.x, segment.to.y, segment.to.z);
+        }
+        glEnd();
+    }
+    // Ring around the selected point (or control handle): one bright cube so
+    // the selection is findable even when its rail is long.
+    if (railHighlight_.has_value() && railHighlight_->pointIndex != kNoRail) {
+        const auto& paths = scene_.railPaths();
+        if (railHighlight_->pathIndex < paths.size()) {
+            const auto& points = paths[railHighlight_->pathIndex].points;
+            if (railHighlight_->pointIndex < points.size()) {
+                const auto& point = points[railHighlight_->pointIndex];
+                const math::Vec3f* center = &point.position;
+                if (railHighlight_->part == 1) {
+                    center = &point.control1;
+                } else if (railHighlight_->part == 2) {
+                    center = &point.control2;
+                }
+                glColor4f(1.0F, 0.92F, 0.25F, 1.0F);
+                glLineWidth(2.0F);
+                const float half = 65.0F;
+                glBegin(GL_LINES);
+                const math::Vec3f corners[8] = {
+                    {center->x - half, center->y - half, center->z - half},
+                    {center->x + half, center->y - half, center->z - half},
+                    {center->x - half, center->y + half, center->z - half},
+                    {center->x + half, center->y + half, center->z - half},
+                    {center->x - half, center->y - half, center->z + half},
+                    {center->x + half, center->y - half, center->z + half},
+                    {center->x - half, center->y + half, center->z + half},
+                    {center->x + half, center->y + half, center->z + half}};
+                constexpr int edges[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7},
+                                              {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                for (const auto& edge : edges) {
+                    glVertex3f(corners[edge[0]].x, corners[edge[0]].y, corners[edge[0]].z);
+                    glVertex3f(corners[edge[1]].x, corners[edge[1]].y, corners[edge[1]].z);
+                }
+                glEnd();
+                glLineWidth(1.0F);
+            }
+        }
+    }
+    glLineWidth(1.0F);
 }
 
 void ViewportWindow::drawOverlay(HDC device) {

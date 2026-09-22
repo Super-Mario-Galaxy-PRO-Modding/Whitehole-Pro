@@ -2,7 +2,10 @@
 
 #include "whitehole/io/binary_file.hpp"
 #include "whitehole/smg/hash.hpp"
+#include "whitehole/smg/path.hpp"
+#include "whitehole/util/text.hpp"
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 
@@ -43,6 +46,14 @@ std::string mapFilesystemPath(std::string_view stageName, int gameType) {
 void StageArchive::loadTable(std::string_view path, std::string kind, std::string layer) {
     if (!archive_ || !archive_->fileExists(path)) {
         return;
+    }
+    // One table per file: two path rows sharing a `no` must not register the
+    // same points file twice (the second registration would clobber the first
+    // on save).
+    for (const auto& existing : tables_) {
+        if (util::equalIgnoreCase(existing.path, path)) {
+            return;
+        }
     }
     try {
         ObjectTable table;
@@ -86,9 +97,15 @@ PlacementObject StageArchive::readObject(std::size_t tableIndex, std::size_t row
 void StageArchive::rebuildObjects() {
     // Objects are a projection of the tables: table `t` (in insertion order)
     // contributes its rows in order, which is exactly how they were loaded.
+    // Rails live in their own list (loadPaths) exactly like Java, so the two
+    // path kinds never surface as placeable objects.
     objects_.clear();
     for (std::size_t tableIndex = 0; tableIndex < tables_.size(); ++tableIndex) {
-        const auto rowCount = tables_[tableIndex].table.rows().size();
+        const auto& table = tables_[tableIndex];
+        if (table.kind == "path" || table.kind == "pathpoint") {
+            continue;
+        }
+        const auto rowCount = table.table.rows().size();
         objects_.reserve(objects_.size() + rowCount);
         for (std::size_t row = 0; row < rowCount; ++row) {
             objects_.push_back(readObject(tableIndex, row));
@@ -134,6 +151,27 @@ void StageArchive::loadFromArchive() {
         }
     }
     loadTable("/Stage/jmp/Path/CommonPathInfo", "path", "Common");
+    // Point tables are addressed by each path row's `no` field. Collect every
+    // reference first, then load: loadTable pushes to tables_ (which can
+    // reallocate), so no table reference may be live across those calls.
+    // loadTable also skips paths already present, so two rows sharing one
+    // file share one table.
+    std::vector<std::int32_t> pointFiles;
+    for (std::size_t tableIndex = 0; tableIndex < tables_.size(); ++tableIndex) {
+        const auto& table = tables_[tableIndex];
+        if (table.kind != "path") {
+            continue;
+        }
+        for (const auto& row : table.table.rows()) {
+            const auto no = table.table.getInt(row, "no", -1);
+            if (no >= 0) {
+                pointFiles.push_back(no);
+            }
+        }
+    }
+    for (const auto no : pointFiles) {
+        loadTable(pathPointFile(no), "pathpoint", "Common");
+    }
     rebuildObjects();
 }
 
@@ -166,6 +204,45 @@ void StageArchive::applyEdits() {
     for (const auto& object : objects_) {
         writeObject(object);
     }
+    // Every path row's num_pnt mirrors its point table right before saving, so
+    // a stale count can never ship (Java did the same in PathObj.save()).
+    for (std::size_t tableIndex = 0; tableIndex < tables_.size(); ++tableIndex) {
+        auto& table = tables_[tableIndex];
+        if (table.kind != "path" || !table.table.hasField("num_pnt")) {
+            continue;
+        }
+        for (auto& row : table.table.rows()) {
+            const auto no = table.table.getInt(row, "no", -1);
+            std::int32_t count = 0;
+            if (no >= 0) {
+                const auto pointIndex = pathPointTableIndex(*this, no);
+                if (pointIndex != kNoPointTable) {
+                    count = static_cast<std::int32_t>(tables_[pointIndex].table.rows().size());
+                }
+            }
+            table.table.setInt(row, "num_pnt", count);
+        }
+    }
+    // Java's PathPointObj.save() wrote each point's id to its index within the
+    // path's id-sorted point list, so the file that lands on disk is sorted by
+    // id first (pairing intact) and only then normalized to 0..n-1. Renumbering
+    // in raw row order without the sort would silently re-pair ids with the
+    // wrong positions whenever a hand-made file was not already sorted, which
+    // changes the rail's traversal order in game.
+    for (auto& table : tables_) {
+        if (table.kind != "pathpoint" || !table.table.hasField("id")) {
+            continue;
+        }
+        auto& rows = table.table.rows();
+        std::stable_sort(rows.begin(), rows.end(),
+                         [&table](const BcsvRow& left, const BcsvRow& right) {
+                             return table.table.getInt(left, "id", 0) <
+                                    table.table.getInt(right, "id", 0);
+                         });
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            table.table.setInt(rows[index], "id", static_cast<std::int32_t>(index));
+        }
+    }
 }
 
 void StageArchive::saveTo(const std::filesystem::path& path) {
@@ -174,7 +251,10 @@ void StageArchive::saveTo(const std::filesystem::path& path) {
         throw std::runtime_error("No map archive is loaded");
     }
     for (const auto& table : tables_) {
-        archive_->replace(table.path, table.table.serialize());
+        auto bytes = table.table.serialize();
+        // insert() writes brand-new files (a path created since the archive
+        // was opened) and falls back to replace() for the ones already there.
+        archive_->insert(table.path, std::move(bytes));
     }
     io::writeFile(path, archive_->serialize(archive_->wasCompressed()));
     sourcePath_ = path;
@@ -187,7 +267,8 @@ void StageArchive::save() {
             throw std::runtime_error("No map archive is loaded");
         }
         for (const auto& table : tables_) {
-            archive_->replace(table.path, table.table.serialize());
+            auto bytes = table.table.serialize();
+            archive_->insert(table.path, std::move(bytes));
         }
         filesystem_->write(filesystemPath_, archive_->serialize(archive_->wasCompressed()));
         return;

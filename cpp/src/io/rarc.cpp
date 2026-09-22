@@ -394,6 +394,45 @@ void RarcArchive::replace(std::string_view path, std::vector<std::uint8_t> data)
     throw std::runtime_error("RARC file does not exist: " + std::string(path));
 }
 
+void RarcArchive::insert(std::string_view path, std::vector<std::uint8_t> data) {
+    const auto wanted = normalizePath(path);
+    if (wanted.empty()) {
+        throw std::runtime_error("RARC insert path is empty");
+    }
+    if (find(wanted) != nullptr) {
+        replace(wanted, std::move(data));
+        return;
+    }
+
+    // Keep the caller's casing for the stored entry (siblings keep theirs too);
+    // every lookup path lowercases before comparing, so this stays invisible
+    // to find()/read()/replace().
+    std::string stored(path);
+    for (auto& character : stored) {
+        if (character == '\\') {
+            character = '/';
+        }
+    }
+    while (stored.size() > 1 && stored.front() == '/') {
+        stored.erase(stored.begin());
+    }
+    if (!rootName_.empty() && !whitehole::util::equalIgnoreCase(stored, rootName_)
+        && !whitehole::util::equalIgnoreCase(stored.substr(0, rootName_.size() + 1), rootName_ + "/")) {
+        stored.insert(0, "/");
+        stored.insert(0, rootName_);
+    }
+
+    const auto* parent = find(parentPath(stored));
+    if (parent == nullptr || !parent->directory
+        || !whitehole::util::equalIgnoreCase(parent->path, parentPath(wanted))) {
+        throw std::runtime_error("RARC directory does not exist: " + parentPath(wanted));
+    }
+
+    entries_.push_back({stored, false, data.size(), 0});
+    replacements_.push_back(std::move(data));
+    buildLookup();
+}
+
 std::vector<std::uint8_t> RarcArchive::serialize(bool compress) const {
     struct Node {
         std::string path;

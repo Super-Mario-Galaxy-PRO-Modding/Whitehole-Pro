@@ -14,6 +14,7 @@
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -127,5 +128,16 @@ private:
 
 [[nodiscard]] bool removeObject(smg::StageArchive& stage, UndoStack& stack, std::size_t tableIndex,
                                std::size_t rowIndex, std::string label);
+
+
+// Runs `mutate` against one row and records the before/after pair as a single
+// undo step. Records nothing (and returns false) when the row did not change,
+// so a drag gesture that ends where it started leaves the stack clean. The
+// rail editors use this to edit arbitrary BCSV fields without one command
+// class per field.
+[[nodiscard]] bool mutateRow(smg::StageArchive& stage, UndoStack& stack, std::size_t tableIndex,
+                             std::size_t rowIndex,
+                             const std::function<void(smg::BcsvTable&, smg::BcsvRow&)>& mutate,
+                             std::string label);
 
 } // namespace whitehole::edit

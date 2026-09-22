@@ -148,4 +148,26 @@ bool removeObject(smg::StageArchive& stage, UndoStack& stack, std::size_t tableI
     return true;
 }
 
+bool mutateRow(smg::StageArchive& stage, UndoStack& stack, std::size_t tableIndex,
+               std::size_t rowIndex,
+               const std::function<void(smg::BcsvTable&, smg::BcsvRow&)>& mutate, std::string label) {
+    if (tableIndex >= stage.tables().size()) {
+        return false;
+    }
+    auto& table = stage.tables()[tableIndex].table;
+    if (rowIndex >= table.rows().size()) {
+        return false;
+    }
+    auto before = captureRowValues(stage, tableIndex, rowIndex);
+    mutate(table, table.rows()[rowIndex]);
+    auto after = captureRowValues(stage, tableIndex, rowIndex);
+    if (before == after) {
+        return false;
+    }
+    stage.rebuildObjects();
+    stack.push(std::make_unique<RowEditCommand>(stage, tableIndex, rowIndex, std::move(before),
+                                                std::move(after), std::move(label)));
+    return true;
+}
+
 } // namespace whitehole::edit

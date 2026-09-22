@@ -1,4 +1,4 @@
-#ifndef UNICODE
+﻿#ifndef UNICODE
 #define UNICODE
 #endif
 #ifndef _UNICODE
@@ -26,6 +26,7 @@
 #include "whitehole/edit/validation.hpp"
 #include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
+#include "whitehole/smg/path.hpp"
 #include "whitehole/util/text.hpp"
 #include "whitehole/render/viewport_win32.hpp"
 #include "whitehole/smg/game_archive.hpp"
@@ -53,6 +54,7 @@
 #include <future>      // object database download runs off the UI thread
 
 #include <charconv>
+#include <cstring>
 #include <fstream>     // first-boot marker file
 #include <optional>
 #include <stdexcept>
@@ -212,6 +214,9 @@ struct EditorState {
     std::vector<std::string> galaxies;
     std::vector<std::string> zones;
     std::optional<smg::StageArchive> stage;
+    // Rails of the open zone, loaded beside the stage so the viewport rebuild
+    // and the (future) Paths list share one snapshot per refresh.
+    std::vector<smg::RailPath> stagePaths;
     std::string filter;
     // Visible object rows after the search filter; maps list row -> stage index.
     std::vector<std::size_t> visibleObjects;
@@ -255,6 +260,31 @@ struct EditorState {
     char fieldFilter[96]{};    // field-grid filter box (Properties panel)
     bool draggingField{false}; // an ObjectModel setter is mid-float-drag,
                                // mirroring draggingTransform for the transform rows
+    // Editing a rail point's position or a control vector, mirrored off the
+    // transform drag gesture but against one BCSV row instead of a whole object.
+    std::size_t railEditTableIndex{0};
+    std::size_t railEditRowIndex{0};
+    int railEditVector{0};      // 0 = position, 1 = control1, 2 = control2
+    float railEditCurrent[9]{}; // live values for the three axes of the vector
+    float railEditStart[9]{};   // baseline snapshot when the drag began
+    bool draggingRailEdit{false};
+    char railEditField[3][16]{}; // "pnt0_x".."pnt2_z", computed when the edit starts
+    static constexpr const char* railEditVectorNames[3] = {"pnt0", "pnt1", "pnt2"};
+    std::vector<smg::BcsvValue> railEditStartBcsv; // row values when the drag began
+
+    // Selection on a rail (path) or one of its points. Mutually exclusive with
+    // selectedObject so object and rail editing don't fight for the same slot.
+    // Sentinel for "the path itself, not one of its points". Declared before
+    // RailSelection so its default member initializer can name it.
+    static constexpr std::size_t kNoRailPointIndex = static_cast<std::size_t>(-1);
+
+    struct RailSelection {
+        std::size_t pathIndex{0};
+        std::size_t pointIndex{kNoRailPointIndex};
+        int pointPart{0}; // 0 = the point, 1 = control1, 2 = control2
+    };
+    std::optional<RailSelection> selectedRail;
+    char railNameBuf[160]{}; // path name (committed on Enter)
     // Undo position at the last save (or load). Dirty is "the cursor has moved
     // away from here", which is what makes undoing back to the saved state
     // report clean again instead of nagging forever.
@@ -623,16 +653,29 @@ void refreshViewport(EditorState& state, bool frame) {
         return;
     }
     if (state.stage) {
+        // Rails load with every rebuild: cheap next to the BCSV work and it
+        // keeps overlay geometry in step with path edits automatically.
+        state.stagePaths = smg::loadPaths(*state.stage);
+        render::OverlayFlags overlays;
+        overlays.axis = state.settings.showAxis;
+        overlays.areas = state.settings.showAreas;
+        overlays.cameras = state.settings.showCameras;
+        overlays.gravity = state.settings.showGravity;
+        overlays.paths = state.settings.showPaths;
         // Game models come from the open workspace's ObjectData archives; a
         // standalone map archive without one keeps the placeholder shapes.
         if (state.modelLibrary.bound()) {
             state.modelLibrary.resetCounters();
-            state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary);
+            state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary, &state.stagePaths,
+                                        overlays);
         } else {
-            state.viewportScene.rebuild(state.stage->objects());
+            state.viewportScene.rebuild(state.stage->objects(), nullptr, &state.stagePaths, overlays);
         }
     } else {
+        state.stagePaths.clear();
         state.viewportScene.clear();
+        state.selectedRail.reset(); // no zone left to select a rail in
+        state.viewport.setRailHighlight(std::nullopt);
     }
     state.viewport.setScene(state.viewportScene);
     if (!state.stage || state.stage->objects().empty()) {
@@ -740,6 +783,9 @@ void commitDragAsUndo(EditorState& state, const char* label) {
 // because TransformCommand mutates BCSV rows directly.
 void requestOpenMap(EditorState& state);
 void requestOpenGame(EditorState& state);
+// Re-reads the selected rail's row into the property widgets (defined with the
+// other rail helpers below).
+void refreshRailBuffers(EditorState& state);
 
 // True when the undo cursor has moved away from the last save point. That is
 // what makes undoing back to the saved state report clean again.
@@ -789,6 +835,9 @@ void performUndo(EditorState& state) {
         syncTransformBuffers(state);
         markDirty(state);
         refreshViewport(state, false);
+        if (state.selectedRail) {
+            refreshRailBuffers(state); // the undo may have moved the row being edited
+        }
         pushToast(state, "Undid " + state.undoStack.redoLabel() + ".");
     }
 }
@@ -803,11 +852,16 @@ void performRedo(EditorState& state) {
         syncTransformBuffers(state);
         markDirty(state);
         refreshViewport(state, false);
+        if (state.selectedRail) {
+            refreshRailBuffers(state); // the redo may have moved the row being edited
+        }
         pushToast(state, "Redid " + state.undoStack.undoLabel() + ".");
     }
 }
 
 void syncViewportSelection(EditorState& state, std::optional<std::size_t> selected) {
+
+// --- authoring ---
     state.viewportSelected = selected;
     if (state.viewportReady) {
         state.viewport.setSelected(selected);
@@ -818,6 +872,12 @@ void syncViewportSelection(EditorState& state, std::optional<std::size_t> select
     // assignment itself -- otherwise the Properties panel never sees the
     // row you clicked in the list.
     state.selectedObject = selected;
+    // Object and rail selection are mutually exclusive: taking the object side
+    // also drops any rail pick and the viewport highlight that marks it.
+    state.selectedRail.reset();
+    if (state.viewportReady) {
+        state.viewport.setRailHighlight(std::nullopt);
+    }
     if (state.syncingSelection) {
         return;
     }
@@ -834,6 +894,199 @@ void selectObject(EditorState& state, std::optional<std::size_t> stageIndex) {
     state.syncingSelection = true;
     syncViewportSelection(state, stageIndex);
     state.syncingSelection = false;
+}
+
+// Rail point editing, mirroring applyTransform / commitDragAsUndo but for one
+// BCSV row in a path's point table. Live writes during the drag keep the 3D
+// model in step with the cursor; only the before/after snapshots land on the
+// undo stack, so Ctrl+Z is one gesture per drag just like object transforms.
+
+void syncRailBuffers(EditorState& state) {
+    if (!state.selectedRail || !state.stage) {
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
+        return;
+    }
+    const auto& sel = *state.selectedRail;
+    if (sel.pathIndex >= state.stagePaths.size()) {
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
+        return;
+    }
+    const auto& path = state.stagePaths[sel.pathIndex];
+    if (sel.pointIndex != EditorState::kNoRailPointIndex
+        && (path.points.empty() || sel.pointIndex >= path.points.size())) {
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
+        return;
+    }
+    // Sync the path name into the edit buffer.
+    std::snprintf(state.railNameBuf, sizeof(state.railNameBuf), "%s", path.name.c_str());
+    if (sel.pointIndex != EditorState::kNoRailPointIndex) {
+        if (path.pointTableIndex == smg::kNoPointTable
+            || path.pointTableIndex >= state.stage->tables().size()) {
+            // The points file never loaded: there is no row to edit, so drop the
+            // pick instead of indexing tables()[SIZE_MAX].
+            state.selectedRail.reset();
+            state.viewport.setRailHighlight(std::nullopt);
+            return;
+        }
+        state.railEditTableIndex = path.pointTableIndex;
+        state.railEditRowIndex = path.points[sel.pointIndex].rowIndex;
+        auto& table = state.stage->tables()[state.railEditTableIndex].table;
+        auto& row = table.rows()[state.railEditRowIndex];
+        // Baseline row values for the undo command's "before" snapshot.
+        state.railEditStartBcsv = row.values;
+        // Current point coordinates into the float edit buffers.
+        const char* base = EditorState::railEditVectorNames[sel.pointPart];
+        state.railEditCurrent[0] = table.getFloat(row, std::string(base) + "_x", 0.0F);
+        state.railEditCurrent[1] = table.getFloat(row, std::string(base) + "_y", 0.0F);
+        state.railEditCurrent[2] = table.getFloat(row, std::string(base) + "_z", 0.0F);
+        // Cached field names for applyRailEdit.
+        std::snprintf(state.railEditField[0], sizeof(state.railEditField[0]), "%s_x", base);
+        std::snprintf(state.railEditField[1], sizeof(state.railEditField[1]), "%s_y", base);
+        std::snprintf(state.railEditField[2], sizeof(state.railEditField[2]), "%s_z", base);
+        state.railEditStart[0] = state.railEditCurrent[0];
+        state.railEditStart[1] = state.railEditCurrent[1];
+        state.railEditStart[2] = state.railEditCurrent[2];
+    } else {
+        state.railEditTableIndex = 0;
+        state.railEditRowIndex = 0;
+        state.railEditCurrent[0] = state.railEditCurrent[1] = state.railEditCurrent[2] = 0.0F;
+    }
+    state.draggingRailEdit = false;
+}
+
+void applyRailEdit(EditorState& state) {
+    if (!state.stage || !state.draggingRailEdit ||
+        state.railEditTableIndex >= state.stage->tables().size() ||
+        state.railEditRowIndex >= state.stage->tables()[state.railEditTableIndex].table.rows().size()) {
+        return;
+    }
+    auto& table = state.stage->tables()[state.railEditTableIndex].table;
+    auto& row = table.rows()[state.railEditRowIndex];
+    table.setFloat(row, state.railEditField[0], state.railEditCurrent[0]);
+    table.setFloat(row, state.railEditField[1], state.railEditCurrent[1]);
+    table.setFloat(row, state.railEditField[2], state.railEditCurrent[2]);
+    state.stage->rebuildObjects();
+    refreshViewport(state, false);
+}
+
+void commitRailEditAsUndo(EditorState& state, const char* label) {
+    if (!state.draggingRailEdit || !state.stage ||
+        state.railEditTableIndex >= state.stage->tables().size() ||
+        state.railEditRowIndex >= state.stage->tables()[state.railEditTableIndex].table.rows().size()) {
+        state.draggingRailEdit = false;
+        return;
+    }
+    auto after = state.stage->tables()[state.railEditTableIndex].table.rows()[state.railEditRowIndex].values;
+    if (state.railEditStartBcsv.empty() || state.railEditStartBcsv == after) {
+        // A click that never moved the value must not push an empty "before"
+        // row, which would corrupt the row if it were ever restored.
+        state.draggingRailEdit = false;
+        return;
+    }
+    auto command = std::make_unique<edit::RowEditCommand>(
+        *state.stage, state.railEditTableIndex, state.railEditRowIndex,
+        std::move(state.railEditStartBcsv), std::move(after), label);
+    state.undoStack.push(std::move(command));
+    state.draggingRailEdit = false;
+}
+
+void selectRail(EditorState& state, std::size_t pathIndex, std::size_t pointIndex, int pointPart) {
+    if (!state.stage || pathIndex >= state.stagePaths.size()) {
+        return; // stale pick from a zone that has since been closed or replaced
+    }
+    const auto previous = state.selectedRail;
+    state.syncingSelection = true;
+    state.selectedRail = EditorState::RailSelection{pathIndex, pointIndex, pointPart};
+    syncRailBuffers(state);
+    if (!state.selectedRail) {
+        // syncRailBuffers rejected the pick (points file missing, index stale):
+        // keep whatever was selected before and say why.
+        state.selectedRail = previous;
+        if (previous) {
+            state.viewport.setRailHighlight(render::RailPointRef{
+                previous->pathIndex, previous->pointIndex, previous->pointPart});
+        }
+        state.syncingSelection = false;
+        pushToast(state, "That path's points file did not load, so its points cannot be edited.",
+                  true);
+        return;
+    }
+    state.selectedObject.reset();
+    state.viewportSelected.reset();
+    state.viewport.setSelected(std::nullopt);
+    state.viewport.setRailHighlight(render::RailPointRef{pathIndex, pointIndex, pointPart});
+    state.syncingSelection = false;
+    const auto& path = state.stagePaths[pathIndex];
+    std::string label = path.label();
+    if (pointIndex != EditorState::kNoRailPointIndex) {
+        label += " — Point " + std::to_string(pointIndex);
+        if (pointPart == 1) {
+            label += " (Control 1)";
+        } else if (pointPart == 2) {
+            label += " (Control 2)";
+        }
+    }
+    setStatus(state, label);
+}
+
+void refreshRailBuffers(EditorState& state) {
+    syncRailBuffers(state);
+}
+
+// Applies a new path name to the path's own CommonPathInfo row as one undo
+// entry, mirroring how applyTransform records object edits.
+void applyPathName(EditorState& state, std::size_t pathIndex, const char* name) {
+    if (!state.stage || pathIndex >= state.stagePaths.size()) {
+        return;
+    }
+    auto& path = state.stagePaths[pathIndex];
+    if (name == nullptr || name[0] == '\0' || path.name == name) {
+        return;
+    }
+    if (path.tableIndex >= state.stage->tables().size()) {
+        pushToast(state, "That path has no readable row to rename.", true);
+        return;
+    }
+    auto& table = state.stage->tables()[path.tableIndex].table;
+    if (path.rowIndex >= table.rows().size() ||
+        table.rawValue(table.rows()[path.rowIndex], "name") == nullptr) {
+        pushToast(state, "That path has no name field to rename.", true);
+        return;
+    }
+    auto before = table.rows()[path.rowIndex].values;
+    table.setString(table.rows()[path.rowIndex], "name", name);
+    auto after = table.rows()[path.rowIndex].values;
+    const std::string newName(name);
+    path.name = newName;
+    state.undoStack.push(std::make_unique<edit::RowEditCommand>(
+        *state.stage, path.tableIndex, path.rowIndex, std::move(before), std::move(after),
+        "Rename path"));
+    markDirty(state);
+    // Relabels the list and viewport; reloads stagePaths, so no reference into
+    // it may be held across this call.
+    refreshViewport(state, false);
+    pushToast(state, "Renamed path to " + newName + ".");
+}
+
+// Color for rail rendering / list chips: deterministic from the path, so a path
+// keeps the same color across sessions (the Java viewer pre-multiplied once per
+// draw frame and so never settled on a stable shade).
+ImU32 paletteForPath(const smg::Path& path) {
+    // Hash the path id into 0..2^24, then bin it into the editor palette so rails
+    // are readable even when many share a stage.
+    const std::size_t bucket = (static_cast<std::size_t>(path.lId) * 2654435761ULL) % 12;
+    static const ImU32 palette[12] = {
+        IM_COL32(0xE0, 0x6C, 0x00, 0xFF), IM_COL32(0x00, 0x9E, 0xDB, 0xFF),
+        IM_COL32(0x7B, 0xC4, 0x00, 0xFF), IM_COL32(0x9B, 0x5D, 0xE5, 0xFF),
+        IM_COL32(0xDC, 0x35, 0x45, 0xFF), IM_COL32(0x00, 0xBF, 0x7F, 0xFF),
+        IM_COL32(0xFF, 0xB3, 0x00, 0xFF), IM_COL32(0x4A, 0x90, 0xD9, 0xFF),
+        IM_COL32(0xC0, 0x39, 0x2B, 0xFF), IM_COL32(0x27, 0xAE, 0x60, 0xFF),
+        IM_COL32(0x8E, 0x44, 0xAD, 0xFF), IM_COL32(0x17, 0xA5, 0x89, 0xFF),
+    };
+    return palette[bucket % 12];
 }
 
 // --- authoring ---------------------------------------------------------------
@@ -1345,7 +1598,86 @@ void drawObjectsPanel(EditorState& state) {
     }
     ImGui::EndChild();
     state.scrollToSelected = false; // consumed once, for this frame's list only
+
+    // Rail path list: every path this zone has. The path label selects the path
+    // itself (name + parameters); each point row selects that point for editing
+    // in the Properties panel.
+    if (!state.stagePaths.empty()) {
+        if (ImGui::CollapsingHeader("Paths", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (std::size_t p = 0; p < state.stagePaths.size(); ++p) {
+                const auto& path = state.stagePaths[p];
+                ImGui::PushID(static_cast<int>(p));
+                const bool pathPicked = state.selectedRail &&
+                                        state.selectedRail->pathIndex == p &&
+                                        state.selectedRail->pointIndex == EditorState::kNoRailPointIndex;
+                const ImU32 railInk = paletteForPath(path);
+                if (pathPicked) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.36F, 0.66F, 1.0F, 1.0F));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                           ImVec4(((railInk >> 24) & 0xFFu) / 255.0F,
+                                                  ((railInk >> 16) & 0xFFu) / 255.0F,
+                                                  ((railInk >> 8) & 0xFFu) / 255.0F, 1.0F));
+                }
+                ImGui::TextUnformatted(path.label().c_str());
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s\nClick to edit this path's name and parameters.",
+                                      path.label().c_str());
+                }
+                if (ImGui::IsItemClicked()) {
+                    selectRail(state, p, EditorState::kNoRailPointIndex, 0);
+                }
+                ImGui::SameLine();
+                const std::string pathLabel = path.type + " / " + path.usage + " / " +
+                                              std::to_string(path.points.size()) + " pts";
+                ImGui::TextDisabled("%s", pathLabel.c_str());
+                ImGui::Separator();
+                if (path.points.empty()) {
+                    ImGui::TextDisabled("  No points.");
+                } else {
+                    for (std::size_t q = 0; q < path.points.size(); ++q) {
+                        const auto& pt = path.points[q];
+                        ImGui::PushID(static_cast<int>(p) * 10000 + static_cast<int>(q));
+                        ImGui::Indent(ImGui::GetStyle().IndentSpacing);
+                        const bool pointPicked = state.selectedRail &&
+                                                 state.selectedRail->pathIndex == p &&
+                                                 state.selectedRail->pointIndex == q;
+                        if (pointPicked) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.36F, 0.66F, 1.0F, 1.0F));
+                        }
+                        ImGui::Text("Point %zu", q);
+                        if (pointPicked) {
+                            ImGui::PopStyleColor();
+                        }
+                        const bool clickedPoint = ImGui::IsItemClicked();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "id %d\npos (%.0f, %.0f, %.0f)\nc1 (%.0f, %.0f, %.0f)  "
+                                "c2 (%.0f, %.0f, %.0f)\nClick to edit this point.",
+                                static_cast<int>(pt.id), static_cast<double>(pt.position.x),
+                                static_cast<double>(pt.position.y), static_cast<double>(pt.position.z),
+                                static_cast<double>(pt.control1.x), static_cast<double>(pt.control1.y),
+                                static_cast<double>(pt.control1.z), static_cast<double>(pt.control2.x),
+                                static_cast<double>(pt.control2.y), static_cast<double>(pt.control2.z));
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(%.0f, %.0f, %.0f)", static_cast<double>(pt.position.x),
+                                            static_cast<double>(pt.position.y),
+                                            static_cast<double>(pt.position.z));
+                        if (clickedPoint) {
+                            selectRail(state, p, q, 0);
+                        }
+                        ImGui::Unindent(ImGui::GetStyle().IndentSpacing);
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::PopID();
+            }
+        }
+    }
     ImGui::End();
+
 }
 
 // The Add Object picker: Java's ObjectSelectForm rebuilt around live search. One
@@ -1800,6 +2132,134 @@ void drawPropertiesPanel(EditorState& state) {
         ImGui::End();
         return;
     }
+    if (state.selectedRail) {
+        if (state.selectedRail->pathIndex >= state.stagePaths.size()) {
+            // The zone was closed or swapped out from under the pick.
+            state.selectedRail.reset();
+            state.viewport.setRailHighlight(std::nullopt);
+            ImGui::TextDisabled("Nothing selected.");
+            ImGui::End();
+            return;
+        }
+        const auto& sel = *state.selectedRail;
+        const auto& path = state.stagePaths[sel.pathIndex];
+        // Captured as a value: the rename box below can rebuild stagePaths and
+        // invalidate the `path` reference mid-frame.
+        const std::size_t pointCount = path.points.size();
+        ImGui::SeparatorText(path.label().c_str());
+        ImGui::TextDisabled("%s \u00b7 %d points \u00b7 usage %s", path.type.c_str(),
+                            static_cast<int>(pointCount), path.usage.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", path.label().c_str());
+        }
+
+        // Path name: applies to the path row, not to any point.
+        ImGui::SeparatorText("Path");
+        if (ImGui::InputTextWithHint("##pathname", "Path name (Enter to apply)",
+                                     state.railNameBuf, sizeof(state.railNameBuf),
+                                     ImGuiInputTextFlags_EnterReturnsTrue)) {
+            applyPathName(state, sel.pathIndex, state.railNameBuf);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Renames the path. Press Enter to commit.");
+        }
+
+        // Point-level editing: position + the two control vectors, each as its own
+        // drag group so they can be worked independently.
+        if (sel.pointIndex != EditorState::kNoRailPointIndex && sel.pointIndex < pointCount) {
+            // Re-read through the index: the rename box above may have rebuilt
+            // stagePaths, so the earlier `path` reference cannot be used here.
+            const auto& pt = state.stagePaths[sel.pathIndex].points[sel.pointIndex];
+            ImGui::SeparatorText(
+                ("Point " + std::to_string(sel.pointIndex) + " (id " + std::to_string(pt.id) + ")")
+                    .c_str());
+
+            // The three vectors share one drag-gesture lifecycle: a gesture on any
+            // of them is one undo step, exactly like object transform rows.
+            auto railVecRow = [&](const char* label, int vectorPart, const char* undoLabel) {
+                float values[3];
+                values[0] = state.railEditCurrent[vectorPart * 3 + 0];
+                values[1] = state.railEditCurrent[vectorPart * 3 + 1];
+                values[2] = state.railEditCurrent[vectorPart * 3 + 2];
+                static constexpr const char* kAxes[3] = {"X", "Y", "Z"};
+                ImGui::SeparatorText(label);
+                ImGui::PushID(label);
+                const float itemWidth = (ImGui::GetContentRegionAvail().x - 24.0F) / 3.0F;
+                bool changed = false;
+                bool active = false;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (axis != 0) {
+                        ImGui::SameLine();
+                    }
+                    ImGui::SetNextItemWidth(itemWidth);
+                    changed |= ImGui::DragFloat((std::string("##v") + std::to_string(axis)).c_str(),
+                                                &values[axis], 0.5F, 0.0F, 0.0F, "%.3f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s %s\nDrag or double-click a field to type.", label,
+                                           kAxes[axis]);
+                    } else if (ImGui::IsItemActive()) {
+                        ImGui::SetTooltip("%s %s = %.3f", label, kAxes[axis],
+                                           static_cast<double>(values[axis]));
+                    }
+                    active |= ImGui::IsItemActive();
+                }
+                if (active && !state.draggingRailEdit) {
+                    state.draggingRailEdit = true;
+                    state.railEditVector = vectorPart;
+                    std::memcpy(state.railEditStart, state.railEditCurrent, sizeof(state.railEditStart));
+                    // Fresh "before" snapshot for this gesture: the previous
+                    // commit moved the last one away, and every drag must be
+                    // exactly one undo step.
+                    if (state.stage && state.railEditTableIndex < state.stage->tables().size() &&
+                        state.railEditRowIndex < state.stage->tables()[state.railEditTableIndex]
+                                                       .table.rows()
+                                                       .size()) {
+                        state.railEditStartBcsv =
+                            state.stage->tables()[state.railEditTableIndex]
+                                .table.rows()[state.railEditRowIndex]
+                                .values;
+                    }
+                }
+                if (changed) {
+                    // The widgets edited the locals; push them back so the BCSV
+                    // write carries the NEW numbers, not this frame's old ones.
+                    for (int axis = 0; axis < 3; ++axis) {
+                        state.railEditCurrent[vectorPart * 3 + axis] = values[axis];
+                    }
+                    applyRailEdit(state);
+                }
+                ImGui::PopID();
+                if (!active && state.draggingRailEdit && state.railEditVector == vectorPart) {
+                    // Only commit when the vector that started the gesture releases.
+                    commitRailEditAsUndo(state, undoLabel);
+                }
+                return active;
+            };
+
+            railVecRow("Position", 0, "Move point");
+            railVecRow("Control 1", 1, "Move control 1");
+            railVecRow("Control 2", 2, "Move control 2");
+
+            // Commit any gesture still in flight once no rail widget is active.
+            if (!ImGui::IsAnyItemActive() && state.draggingRailEdit) {
+                commitRailEditAsUndo(state, "Edit rail point");
+            }
+        } else if (sel.pointIndex == EditorState::kNoRailPointIndex) {
+            // Path-level fields when the path itself is selected (no point).
+            // Fresh fetch: the rename box above may have rebuilt stagePaths.
+            const auto& pathNow = state.stagePaths[sel.pathIndex];
+            ImGui::SeparatorText("Path parameters");
+            ImGui::TextDisabled("Type: %s  Usage: %s  Points: %zu", pathNow.type.c_str(),
+                                pathNow.usage.c_str(), pathNow.points.size());
+            ImGui::TextDisabled("Closed: %s", pathNow.closed ? "yes" : "no");
+            ImGui::TextDisabled("Path_ID: %d", pathNow.pathId);
+            ImGui::TextDisabled("num_pnt: %d", static_cast<int>(pathNow.points.size()));
+        }
+
+        ImGui::End();
+        return;
+    }
+
     if (!state.selectedObject || *state.selectedObject >= state.stage->objects().size()) {
         ImGui::TextDisabled("Nothing selected.");
         ImGui::TextWrapped("Click a row in the Objects panel, or an object in the 3D "
@@ -1947,6 +2407,10 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         state.selectedObject = picked;
         state.viewportSelected = picked;
         state.viewport.setSelected(picked);
+        // Rail picks arrive through their own callback, so anything reaching
+        // here is object-world (or empty space): drop any rail selection too.
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
         syncTransformBuffers(state);
         state.syncingSelection = false;
         if (picked.has_value() && state.stage && *picked < state.stage->objects().size()) {
@@ -1955,6 +2419,12 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
             setStatus(state, std::string(object.name) + " â€” " + style.label +
                                  " (" + object.kind + "/" + object.layer + ")");
         }
+    });
+    state.viewport.setOnSelectRail([&state](const render::RailPointRef& hit) {
+        if (state.syncingSelection) {
+            return;
+        }
+        selectRail(state, hit.pathIndex, hit.pointIndex, hit.part);
     });
     state.viewport.setShowLabels(state.showLabels);
     state.viewport.setOverlayTheme(state.settings.darkMode);
@@ -2271,18 +2741,27 @@ void drawMenuBar(EditorState& state, bool& done) {
             refreshViewport(state, false);
         }
         ImGui::Separator();
-        ImGui::TextDisabled("Overlays");
-        ImGui::TextWrapped("Renderer overlays (axis, areas, cameras, gravity, paths) "
-                           "are part of the 3D viewport owned by the renderer â€” "
-                           "those toggles will light up once that support lands.");
+        // Every overlay here rebuilds the viewport immediately: a toggle that
+        // only took effect on the next edit would feel broken.
         if (ImGui::MenuItem("Axis", nullptr, &state.settings.showAxis)) {
             state.settings.save();
+            refreshViewport(state, false);
+        }
+        if (ImGui::MenuItem("Areas", nullptr, &state.settings.showAreas)) {
+            state.settings.save();
+            refreshViewport(state, false);
         }
         if (ImGui::MenuItem("Cameras", nullptr, &state.settings.showCameras)) {
             state.settings.save();
+            refreshViewport(state, false);
+        }
+        if (ImGui::MenuItem("Gravity", nullptr, &state.settings.showGravity)) {
+            state.settings.save();
+            refreshViewport(state, false);
         }
         if (ImGui::MenuItem("Paths", nullptr, &state.settings.showPaths)) {
             state.settings.save();
+            refreshViewport(state, false);
         }
         ImGui::EndMenu();
     }
@@ -2687,6 +3166,9 @@ void drawPreferencesDialog(EditorState& state) {
     ImGui::EndPopup();
     if (changed) {
         state.settings.save();
+        // Overlay/label/quality toggles change what the viewport draws, so the
+        // scene has to be rebuilt for them to show up without another edit.
+        refreshViewport(state, false);
     }
 }
 
@@ -3434,5 +3916,6 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam
 }
 
 } // namespace whitehole::app
+
 
 

@@ -31,6 +31,7 @@
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/object_model.hpp"
+#include "whitehole/smg/path.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <algorithm>
@@ -2776,6 +2777,231 @@ void testThemeContrast() {
     }
 }
 
+// ---- rails (paths) --------------------------------------------------------
+// Port coverage for RailUtil: bezier maths against known values.
+
+void testRailMath() {
+    namespace rail = whitehole::smg;
+    // Straight line 0 -> 400 on X with handles a third of the way along.
+    rail::PathPoint start;
+    start.position = {0.0F, 0.0F, 0.0F};
+    start.control2 = {400.0F / 3.0F, 0.0F, 0.0F};
+    rail::PathPoint end;
+    end.position = {400.0F, 0.0F, 0.0F};
+    end.control1 = {800.0F / 3.0F, 0.0F, 0.0F};
+
+    const auto atZero = rail::bezierPoint(0.0F, start.position, start.control2, end.control1, end.position);
+    expect(atZero.length() < 0.001F, "bezier t=0 must return the first point");
+    const auto atOne = rail::bezierPoint(1.0F, start.position, start.control2, end.control1, end.position);
+    expect((atOne - whitehole::math::Vec3f{400.0F, 0.0F, 0.0F}).length() < 0.001F,
+           "bezier t=1 must return the last point");
+    const auto atHalf = rail::bezierPoint(0.5F, start.position, start.control2, end.control1, end.position);
+    expect(std::abs(atHalf.x - 200.0F) < 0.5F, "bezier midpoint is off the straight line");
+
+    expect(std::abs(rail::pathSectionLength(start, end) - 400.0) < 1.0,
+           "straight section length must match its chord");
+
+    std::vector<rail::PathPoint> line{start, end};
+    expect(std::abs(rail::pathLength(line, false) - 400.0) < 1.0, "open two-point length is wrong");
+    const auto midway = rail::posAtCoord(200.0, line, false);
+    expect(midway.has_value() && std::abs(midway->x - 200.0F) < 1.0F, "posAtCoord(200) must sit mid-line");
+    expect(!rail::posAtCoord(401.0, line, false).has_value(), "coords past an open path must miss");
+    const auto tangent = rail::dirAtCoord(100.0, line, false);
+    expect(tangent.has_value() && std::abs(tangent->x - 1.0F) < 0.001F,
+           "straight tangent must point along +X");
+
+    // Closed square with coincident handles: four sides of 100.
+    std::vector<rail::PathPoint> square(4);
+    square[0].position = {0.0F, 0.0F, 0.0F};
+    square[1].position = {100.0F, 0.0F, 0.0F};
+    square[2].position = {100.0F, 100.0F, 0.0F};
+    square[3].position = {0.0F, 100.0F, 0.0F};
+    for (auto& point : square) {
+        point.control1 = point.position;
+        point.control2 = point.position;
+    }
+    expect(std::abs(rail::pathLength(square, true) - 400.0) < 2.0, "closed square perimeter is wrong");
+    expect(std::abs(rail::pathLength(square, false) - 300.0) < 2.0, "open square length is wrong");
+
+    // Reverse [0, 1]: positions swap and each moved point swaps its handles.
+    std::vector<rail::PathPoint> three(3);
+    three[0].position = {10.0F, 0.0F, 0.0F};
+    three[0].control1 = {11.0F, 0.0F, 0.0F};
+    three[0].control2 = {12.0F, 0.0F, 0.0F};
+    three[1].position = {20.0F, 0.0F, 0.0F};
+    three[1].control1 = {21.0F, 0.0F, 0.0F};
+    three[1].control2 = {22.0F, 0.0F, 0.0F};
+    three[2].position = {30.0F, 0.0F, 0.0F};
+    expect(rail::reversePoints(three, 0, 1), "reverse of a valid range must succeed");
+    expect(three[0].position.x == 20.0F && three[1].position.x == 10.0F,
+           "reversed range must swap positions");
+    expect(three[0].control1.x == 22.0F && three[0].control2.x == 21.0F,
+           "reversed point must swap its handles");
+    expect(three[2].position.x == 30.0F, "points outside the range must stay put");
+    expect(!rail::reversePoints(three, 0, 99), "out-of-range reverse must fail");
+}
+
+// Load/save round trip for rails: creates a path row and a points file the
+// template archive never had, so saving also exercises RarcArchive::insert.
+
+void testPathData() {
+    using namespace whitehole::smg;
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto stage = StageArchive::openMapFile(templates / "SMG2BigGalaxyMap.arc");
+    expect(loadPaths(stage).empty(), "the template must start without rails");
+
+    std::size_t pathTable = kNoPointTable;
+    for (std::size_t index = 0; index < stage.tables().size(); ++index) {
+        if (stage.tables()[index].kind == "path") {
+            pathTable = index;
+        }
+    }
+    expect(pathTable != kNoPointTable, "template CommonPathInfo did not load");
+
+    const auto objectsBefore = stage.objects().size();
+
+    // A brand-new rail row. Add both rows first: the second addRow() may
+    // reallocate the row vector, so references are taken afterwards.
+    auto& info = stage.tables()[pathTable].table;
+    const auto rowIndex = info.addRow();
+    const auto missingIndex = info.addRow();
+    auto& row = info.rows()[rowIndex];
+    auto& missing = info.rows()[missingIndex];
+    info.setString(row, "name", "TestRail");
+    info.setString(row, "type", "Bezier");
+    info.setString(row, "closed", "OPEN");
+    info.setString(row, "usage", "General");
+    info.setInt(row, "l_id", 7);
+    info.setInt(row, "no", 0);
+    info.setInt(row, "Path_ID", -1);
+    // A second rail whose points file does not exist: loading must tolerate it.
+    info.setString(missing, "name", "MissingRail");
+    info.setInt(missing, "l_id", 8);
+    info.setInt(missing, "no", 9);
+
+    stage.rebuildObjects();
+    expect(stage.objects().size() == objectsBefore, "rail rows leaked into the placement object list");
+
+    // A points file the template never had -- saving must insert it.
+    ObjectTable points;
+    points.path = pathPointFile(0);
+    points.kind = "pathpoint";
+    points.layer = "Common";
+    ensurePathPointSchema(points.table);
+    const auto addPoint = [&points](std::int16_t id, whitehole::math::Vec3f position) {
+        const auto index = points.table.addRow();
+        auto& row = points.table.rows()[index];
+        points.table.setInt(row, "id", id);
+        for (const char* set : {"pnt0", "pnt1", "pnt2"}) {
+            points.table.setFloat(row, std::string(set) + "_x", position.x);
+            points.table.setFloat(row, std::string(set) + "_y", position.y);
+            points.table.setFloat(row, std::string(set) + "_z", position.z);
+        }
+        points.table.setInt(row, "point_arg0", 500); // Speed
+    };
+    // Deliberately out of order: loading must sort by id like Java did.
+    addPoint(2, {200.0F, 0.0F, 0.0F});
+    addPoint(0, {0.0F, 0.0F, 0.0F});
+    addPoint(1, {100.0F, 50.0F, 0.0F});
+    stage.tables().push_back(std::move(points));
+
+    auto paths = loadPaths(stage);
+    expect(paths.size() == 2, "loadPaths must see both rails");
+    expect(paths[0].name == "TestRail" && paths[0].lId == 7, "rail fields did not load");
+    expect(paths[0].points.size() == 3, "rail points did not load");
+    expect(paths[0].points[0].id == 0 && paths[0].points[1].id == 1 && paths[0].points[2].id == 2,
+           "points must sort by id");
+    expect(paths[0].points[1].position.x == 100.0F && paths[0].points[1].position.y == 50.0F,
+           "point coordinates did not load");
+    expect(paths[0].points[0].args[0] == 500, "point_arg0 did not load");
+    expect(paths[1].points.empty(), "a missing points file must yield an empty rail, not a throw");
+    expect(paths[0].label() == "[7] TestRail", "rail label must match Java's toString");
+
+    TemporaryDirectory temporary;
+    const auto output = temporary.path / "WithRails.arc";
+    stage.saveTo(output);
+
+    auto reloaded = StageArchive::openMapFile(output);
+    auto again = loadPaths(reloaded);
+    expect(again.size() == 2, "rails did not survive the save");
+    expect(again[0].points.size() == 3, "the inserted points file did not survive the save");
+    expect(again[0].points[2].position.x == 200.0F, "saved point coordinates changed");
+    expect(again[0].pointTableIndex != kNoPointTable, "the reloaded rail has no point table");
+    // num_pnt was never set by hand: saving must have synced it to 3.
+    const auto& infoAgain = reloaded.tables()[again[0].tableIndex].table;
+    expect(infoAgain.getInt(infoAgain.rows()[again[0].rowIndex], "num_pnt", -1) == 3,
+           "num_pnt was not synced to the point count on save");
+    expect(again[1].points.empty(), "a rail with a missing file gained phantom points");
+    for (const auto& object : reloaded.objects()) {
+        expect(object.kind != "path" && object.kind != "pathpoint",
+               "rail rows reappeared in the object list");
+    }
+}
+
+// ---- viewport overlays ----------------------------------------------------
+// The View menu's overlay toggles must actually produce (or omit) geometry.
+
+void testOverlayScene() {
+    using namespace whitehole::render;
+    using whitehole::smg::PathPoint;
+    using whitehole::smg::PlacementObject;
+    using whitehole::smg::RailPath;
+
+    PlacementObject camera;
+    camera.kind = "camera";
+    camera.name = "Cam";
+    PlacementObject area;
+    area.kind = "area";
+    area.name = "Zone";
+    PlacementObject gravity;
+    gravity.kind = "gravity";
+    gravity.name = "Planet";
+    gravity.scale = {100.0F, 100.0F, 100.0F};
+    PlacementObject plain;
+    plain.kind = "obj";
+    plain.name = "Kuribo";
+
+    RailPath rail;
+    rail.name = "Rail";
+    rail.lId = 3;
+    PathPoint start;
+    start.position = {0.0F, 0.0F, 0.0F};
+    PathPoint end;
+    end.position = {400.0F, 0.0F, 0.0F};
+    rail.points = {start, end};
+    RailPath emptyRail; // no points: must contribute nothing, not crash
+    emptyRail.lId = 4;
+    const std::vector<RailPath> rails{rail, emptyRail};
+
+    ViewportScene scene;
+    OverlayFlags off;
+    off.axis = off.areas = off.cameras = off.gravity = off.paths = false;
+    scene.rebuild({camera, area, gravity, plain}, nullptr, &rails, off);
+    expect(scene.overlays().empty(), "disabled overlay flags still produced geometry");
+    expect(scene.railPaths().size() == 2, "the scene dropped the rail list");
+
+    // Paths alone: one curve batch + one handles batch, nothing else.
+    OverlayFlags pathsOnly;
+    pathsOnly.axis = pathsOnly.areas = pathsOnly.cameras = pathsOnly.gravity = false;
+    scene.rebuild({camera, area, gravity, plain}, nullptr, &rails, pathsOnly);
+    expect(scene.overlays().size() == 2, "paths-only rebuild produced the wrong batches");
+
+    OverlayFlags on;
+    scene.rebuild({camera, area, gravity, plain}, nullptr, &rails, on);
+    // axis x3 + camera + area + gravity + rail curve + rail handles = 8.
+    expect(scene.overlays().size() == 8, "unexpected overlay batch count with every flag on");
+    std::size_t segments = 0;
+    for (const auto& batch : scene.overlays()) {
+        segments += batch.segments.size();
+    }
+    expect(segments >= 100, "overlay geometry is suspiciously thin");
+
+    // Rail colours are stable per l_id and differ between rails.
+    expect(railPathColor(3) == railPathColor(3), "rail colour is not deterministic");
+    expect(railPathColor(3) != railPathColor(4), "two rails received the same colour");
+    expect((railPathColor(7) & 0xFFu) == 0xFFu, "rail colour must be opaque");
+}
+
 int main() {
     try {
         testBinaryData();
@@ -2814,6 +3040,9 @@ int main() {
         testRealObjectDatabase();
         testDataHolderRoundTrip();
         testDbHelpersRoundTrip();
+        testRailMath();
+        testPathData();
+        testOverlayScene();
         std::cout << "All Whitehole native core tests passed\n";
         return 0;
     } catch (const std::exception& error) {

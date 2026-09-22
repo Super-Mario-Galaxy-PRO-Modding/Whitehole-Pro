@@ -221,3 +221,14 @@ events:
         - "C:\\Users\\conta\\.dotnet\\tools"
         - "c:\\Users\\conta\\.vscode\\extensions\\ms-python.debugpy-2026.6.0-win32-x64\\bundled\\scripts\\noConfigScripts"
 ...
+
+---
+events:
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/opt/devkitpro/msys2/usr/share/cmake/Modules/CMakeDetermineSystem.cmake:205 (message)"
+      - "CMakeLists.txt:3 (project)"
+    message: |
+      The system is: MSYS - 3.6.9-01d6c708.x86_64 - x86_64
+...

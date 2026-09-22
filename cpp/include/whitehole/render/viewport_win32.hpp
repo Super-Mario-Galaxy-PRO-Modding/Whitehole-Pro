@@ -41,6 +41,8 @@ public:
     // Multi-select callback: additive picks (Ctrl/Shift) arrive with
     // `additive` set, so the editor can extend rather than replace the set.
     using SelectManyCallback = std::function<void(std::optional<std::size_t>, bool additive)>;
+    // A rail point picked in the 3D view (point cube or control handle).
+    using SelectRailCallback = std::function<void(const RailPointRef&)>;
     // One message from a gizmo drag (Begin/Update/End), already in world units.
     using GizmoCallback = std::function<void(const GizmoEdit&)>;
 
@@ -86,6 +88,11 @@ public:
 
     void setOnSelect(SelectCallback callback) { onSelect_ = std::move(callback); }
     void setOnSelectMany(SelectManyCallback callback) { onSelectMany_ = std::move(callback); }
+    void setOnSelectRail(SelectRailCallback callback) { onSelectRail_ = std::move(callback); }
+    // Highlights one rail (pathIndex only) or one of its points (full ref);
+    // nullopt clears. The draw pass thickens the matching batches and rings
+    // the selected cube, so selection is visible without a gizmo.
+    void setRailHighlight(std::optional<RailPointRef> highlight) noexcept;
     void setOnGizmo(GizmoCallback callback) { onGizmo_ = std::move(callback); }
     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
 
@@ -111,6 +118,7 @@ private:
     void applyCameraToGL(int width, int height);
     void drawShape(const ViewportBox& box, bool selected, bool hovered);
     void drawGizmo();
+    void drawOverlays();
     void drawModelTriangles(const ModelMesh& mesh, bool bakeColors);
     unsigned int modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain);
     void pruneModelLists() noexcept;
@@ -134,6 +142,8 @@ private:
     std::optional<std::size_t> hover_;
     SelectCallback onSelect_;
     SelectManyCallback onSelectMany_;
+    SelectRailCallback onSelectRail_;
+    std::optional<RailPointRef> railHighlight_;
     GizmoCallback onGizmo_;
     bool showLabels_{false};
     bool overlayDark_{true};

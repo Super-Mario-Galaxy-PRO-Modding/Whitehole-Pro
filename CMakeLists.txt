@@ -63,6 +63,7 @@ add_library(whitehole_core
     cpp/src/app/theme_palette.cpp
     cpp/src/edit/authoring.cpp
     cpp/src/edit/commands.cpp
+    cpp/src/edit/rails.cpp
     cpp/src/edit/document.cpp
     cpp/src/edit/undo.cpp
     cpp/src/edit/validation.cpp
@@ -84,6 +85,7 @@ add_library(whitehole_core
     cpp/src/smg/bti.cpp
     cpp/src/smg/bmd.cpp
     cpp/src/smg/object_model.cpp
+    cpp/src/smg/path.cpp
     cpp/src/smg/stage_archive.cpp
     cpp/src/util/json.cpp
 )

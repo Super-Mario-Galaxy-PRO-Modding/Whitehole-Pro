@@ -1,5 +1,0 @@
-﻿MSBuild version 18.10.1-1.26427.6+3cd27c13e for .NET Framework
-
-  name_table.cpp
-  binary_file.cpp
-  directory_filesystem.cpp

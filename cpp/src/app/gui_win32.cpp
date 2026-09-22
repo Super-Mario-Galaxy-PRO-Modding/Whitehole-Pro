@@ -61,10 +61,15 @@
 #include <string>
 #include <vector>
 
+// MSVC needs these to pull in the shell/COM imports. Every other toolchain gets
+// the same libraries from the CMake interface target (whitehole_win32), so the
+// block is guarded: GCC otherwise reports the unknown pragma four times.
+#if defined(_MSC_VER)
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "shell32.lib")
+#endif
 
 // ImGui's Win32 backend implements its input handler here.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -83,18 +88,8 @@ std::wstring utf8ToWide(std::string_view text) {
     return result;
 }
 
-std::string wideToUtf8(std::wstring_view text) {
-    if (text.empty()) {
-        return {};
-    }
-    const auto size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string result(static_cast<std::size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), size, nullptr, nullptr);
-    return result;
-}
-
 void showBootError(const wchar_t* what) {
-    MessageBoxW(nullptr, what, L"Whitehole Pro â€” startup failed",
+    MessageBoxW(nullptr, what, L"Whitehole Pro — startup failed",
                 MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
@@ -102,20 +97,6 @@ void showBootHresult(const wchar_t* what, HRESULT hr) {
     wchar_t buffer[512];
     swprintf(buffer, 512, L"%s\n\nHRESULT: 0x%08lX", what, static_cast<unsigned long>(hr));
     showBootError(buffer);
-}
-
-float parseFloatText(std::string_view text, float fallback) {
-    try {
-        return std::stof(std::string(text));
-    } catch (...) {
-        return fallback;
-    }
-}
-
-std::string formatFloat(float value) {
-    std::array<char, 32> buffer{};
-    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
-    return std::string(buffer.data(), converted.ptr);
 }
 
 // First-launch state is kept in a per-user LocalAppData folder so it survives
@@ -131,62 +112,9 @@ std::filesystem::path firstBootConfigDir() {
     return result / "WhiteholePro";
 }
 
-bool hasSeenFirstBoot() {
-    std::error_code ec;
-    return std::filesystem::exists(firstBootConfigDir() / "firstboot_done.marker", ec);
-}
-
-void markFirstBootSeen() {
-    const auto dir = firstBootConfigDir();
-    if (dir.empty()) {
-        return;
-    }
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    std::ofstream(firstBootConfigDir() / "firstboot_done.marker", std::ios::trunc);
-}
-
-// One-time hello on first boot. TaskDialog gives a native, themeable popup;
-// MessageBoxW is the fallback. The marker is always written on dismissal.
-void showFirstBootSplash(HWND owner) {
-    const std::wstring content =
-        L"hello i know you don't know who i am but here's a WIP rewrite of your "
-        L"whole program in another language sponsored by every coding agent ever "
-        L"please accept";
-    const std::wstring footer =
-        L"This message will only be shown one time, on first launch.";
-
-    TASKDIALOGCONFIG config{};
-    config.cbSize = sizeof(config);
-    config.hwndParent = owner;
-    config.dwFlags = TDF_SIZE_TO_CONTENT;
-    config.pszWindowTitle = L"Whitehole Pro";
-    config.pszContent = content.c_str();
-    config.pszFooter = footer.c_str();
-
-    TASKDIALOG_BUTTON acceptButton{100, L"Accept"};
-    config.pButtons = &acceptButton;
-    config.cButtons = 1;
-    config.nDefaultButton = 100;
-
-    if (HMODULE comctl = GetModuleHandleW(L"comctl32.dll")) {
-        using TaskDialogIndirectWFn =
-            HRESULT (WINAPI *)(const TASKDIALOGCONFIG *, int *, int *, BOOL *);
-        const auto taskDialogIndirect = reinterpret_cast<TaskDialogIndirectWFn>(
-            GetProcAddress(comctl, "TaskDialogIndirectW"));
-        if (taskDialogIndirect != nullptr) {
-            taskDialogIndirect(&config, nullptr, nullptr, nullptr);
-            markFirstBootSeen();
-            return;
-        }
-    }
-    MessageBoxW(owner, content.c_str(), L"Whitehole Pro", MB_ICONINFORMATION | MB_OK);
-    markFirstBootSeen();
-}
-
 // ---------------------------------------------------------------------------
 // Editor state: everything the immediate-mode UI reads and writes. Unlike the
-// old control-based GUI there are no HWND widget fields here â€” panels render
+// old control-based GUI there are no HWND widget fields here — panels render
 // every frame straight from this struct.
 // ---------------------------------------------------------------------------
 struct Toast {
@@ -401,7 +329,7 @@ float dpiScaleFactor() {
 
 // Slurps a font file into a process-lifetime buffer. The atlas is handed a
 // pointer into this memory (FontDataOwnedByAtlas stays false), so it has to
-// outlive the atlas â€” a function-local static is freed at process exit.
+// outlive the atlas — a function-local static is freed at process exit.
 bool readFontBytes(const std::filesystem::path& path, std::vector<unsigned char>& out) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(path, ec);
@@ -719,15 +647,6 @@ void syncTransformBuffers(EditorState& state) {
     state.draggingTransform = false;
 }
 
-// True while the widgets hold values that were never written back to the stage.
-bool transformWidgetsDirty(const EditorState& state) {
-    if (!state.draggingTransform || !state.stage || !state.selectedObject ||
-        *state.selectedObject >= state.stage->objects().size()) {
-        return false;
-    }
-    return true;
-}
-
 bool markDirty(EditorState& state);
 
 // Pushes the property widgets into the selected object through the real write
@@ -885,7 +804,7 @@ void syncViewportSelection(EditorState& state, std::optional<std::size_t> select
     if (selected.has_value() && state.stage && *selected < state.stage->objects().size()) {
         const auto& object = state.stage->objects()[*selected];
         const auto& style = render::objectStyle(object.kind, object.name);
-        setStatus(state, std::string(object.name) + " â€” " + style.label +
+        setStatus(state, std::string(object.name) + " — " + style.label +
                              " (" + object.kind + "/" + object.layer + ")");
     }
 }
@@ -1476,7 +1395,7 @@ void drawObjectsPanel(EditorState& state) {
     // Filter box with a clear button; filtering reruns only when the text
     // actually changes so 10k-object stages stay smooth.
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0F);
-    if (ImGui::InputTextWithHint("##search", "Search objectsâ€¦ (Ctrl+F)", state.searchBuf,
+    if (ImGui::InputTextWithHint("##search", "Search objects… (Ctrl+F)", state.searchBuf,
                                  sizeof(state.searchBuf))) {
         state.filter = state.searchBuf;
     }
@@ -1614,10 +1533,13 @@ void drawObjectsPanel(EditorState& state) {
                 if (pathPicked) {
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.36F, 0.66F, 1.0F, 1.0F));
                 } else {
-                    ImGui::PushStyleColor(ImGuiCol_Text,
-                                           ImVec4(((railInk >> 24) & 0xFFu) / 255.0F,
-                                                  ((railInk >> 16) & 0xFFu) / 255.0F,
-                                                  ((railInk >> 8) & 0xFFu) / 255.0F, 1.0F));
+                    // Explicit casts: the shifts yield unsigned int, and the
+                    // implicit unsigned-int -> float step is exactly what
+                    // -Wconversion is there to catch.
+                    const float red = static_cast<float>((railInk >> 24) & 0xFFu) / 255.0F;
+                    const float green = static_cast<float>((railInk >> 16) & 0xFFu) / 255.0F;
+                    const float blue = static_cast<float>((railInk >> 8) & 0xFFu) / 255.0F;
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(red, green, blue, 1.0F));
                 }
                 ImGui::TextUnformatted(path.label().c_str());
                 ImGui::PopStyleColor();
@@ -1937,7 +1859,7 @@ void drawObjectFieldGrid(EditorState& state, std::size_t objectIndex) {
 
     ImGui::SeparatorText("Fields");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0F);
-    ImGui::InputTextWithHint("##fieldfilter", "Filter fieldsâ€¦", state.fieldFilter,
+    ImGui::InputTextWithHint("##fieldfilter", "Filter fields…", state.fieldFilter,
                              sizeof(state.fieldFilter));
     ImGui::SameLine();
     if (ImGui::Button("X##clearfields", ImVec2(24, 0))) {
@@ -2087,7 +2009,7 @@ bool drawFieldEntry(EditorState& state, smg::ObjectModel& model, std::size_t obj
 
 // Honest annotation for the row, plus the database description as a tooltip.
 // `widgetHovered` is the widget's own hover state, captured by the caller
-// right after the field widget renders â€” before EndDisabled() can shift the
+// right after the field widget renders — before EndDisabled() can shift the
 // "current item" to the annotation text below. The description tooltip is
 // therefore tied to hovering the widget, while the "(not in file)"/"(unused)"
 // annotation on its own text is checked inside this function.
@@ -2274,9 +2196,9 @@ void drawPropertiesPanel(EditorState& state) {
     // inline so a user seeing either side of the UI is pointed at the fix.
     if (state.objectDb.names().empty() && state.objectDb.classCount() == 0) {
         ImGui::BulletText("No object database");
-        ImGui::TextWrapped("Set Status > Update Object Database… to fetch it from the "
-                            "community build. Without it you only see the raw object "
-                            "names and none of the per-object parameter fields.");
+        ImGui::TextWrapped("Use Settings > Update Object Database… to fetch it from the "
+                           "community build. Without it you only see the raw object "
+                           "names and none of the per-object parameter fields.");
         if (ImGui::Button("Update Object Database…")) {
             setStatus(state, "Downloading the object database…");
             startObjectDatabaseDownload(state);
@@ -2416,7 +2338,7 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         if (picked.has_value() && state.stage && *picked < state.stage->objects().size()) {
             const auto& object = state.stage->objects()[*picked];
             const auto& style = render::objectStyle(object.kind, object.name);
-            setStatus(state, std::string(object.name) + " â€” " + style.label +
+            setStatus(state, std::string(object.name) + " — " + style.label +
                                  " (" + object.kind + "/" + object.layer + ")");
         }
     });
@@ -2476,7 +2398,7 @@ void placeViewportChild(EditorState& state) {
         refreshViewport(state, false);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Left-drag pan  Â·  Right-drag orbit  Â·  Wheel zoom  Â·  Click select");
+    ImGui::TextDisabled("Left-drag pan  ·  Right-drag orbit  ·  Wheel zoom  ·  Click select");
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::GetContentRegionAvail();
@@ -2867,11 +2789,6 @@ void refreshProblems(EditorState& state) {
     state.findingsCursor = state.undoStack.cursor();
 }
 
-// Number of findings worth flagging in the status bar: warnings and up.
-int problemCount(const EditorState& state) {
-    return static_cast<int>(state.findings.size());
-}
-
 // The validation drawer. Clicking a finding jumps to the object it is about,
 // which is the whole point: a warning you cannot act on is just noise.
 void drawProblemsPanel(EditorState& state) {
@@ -2911,7 +2828,7 @@ void drawProblemsPanel(EditorState& state) {
         ImGui::SameLine();
         std::string label = finding.message;
         if (!finding.hint.empty()) {
-            label += "  â€”  " + finding.hint;
+            label += "  —  " + finding.hint;
         }
         if (ImGui::Selectable(label.c_str(), false,
                               ImGuiSelectableFlags_AllowDoubleClick) &&
@@ -3026,7 +2943,7 @@ void drawToolbar(EditorState& state) {
     if (searchWidth > 120.0F) {
         ImGui::SetNextItemWidth(searchWidth);
     }
-    if (ImGui::InputTextWithHint("##toolbar-search", "Search objectsâ€¦  (Ctrl+F)",
+    if (ImGui::InputTextWithHint("##toolbar-search", "Search objects…  (Ctrl+F)",
                                  state.searchBuf, sizeof(state.searchBuf))) {
         state.filter = state.searchBuf;
     }
@@ -3238,7 +3155,7 @@ const std::vector<TutorialTopic>& tutorialTopics() {
          }},
         {"Find and select objects", "objects list search filter select find ctrl+f",
          {
-             {"Type in the search box (toolbar or Objects panel) â€” the list filters live.",
+             {"Type in the search box (toolbar or Objects panel) — the list filters live.",
               TutorialAction::FocusSearch, "Focus the search"},
              {"Click a row to select it; its transform loads into Properties.", TutorialAction::None},
              {"Double-click a row to fly the 3D camera to that object.", TutorialAction::None},
@@ -3246,9 +3163,9 @@ const std::vector<TutorialTopic>& tutorialTopics() {
          }},
         {"Move, rotate and scale", "transform position rotation scale properties drag",
          {
-             {"Drag the X/Y/Z fields in Properties â€” the 3D model follows live.", TutorialAction::None},
+             {"Drag the X/Y/Z fields in Properties — the 3D model follows live.", TutorialAction::None},
              {"Double-click a field to type an exact value (3-decimal precision).", TutorialAction::None},
-             {"Each drag is one undo step â€” Ctrl+Z walks back gesture by gesture.", TutorialAction::None},
+             {"Each drag is one undo step — Ctrl+Z walks back gesture by gesture.", TutorialAction::None},
              {"Reset restores the file values; Save Zone writes everything to disk.",
               TutorialAction::Save, "Save the zone"},
          }},
@@ -3414,40 +3331,6 @@ void drawShortcutsDialog(EditorState& state) {
     ImGui::EndPopup();
 }
 
-// drawStaleStatusBar: superseded by the context-aware drawStatusBar above.
-// Kept temporarily so the old call sites keep compiling during the shell
-// rework; delete once the dock-host loop is the only caller.
-void drawStaleStatusBar(EditorState& state) {
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float height = ImGui::GetFrameHeight() + 8.0F;
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x,
-                                   viewport->WorkPos.y + viewport->WorkSize.y - height));
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
-                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav;
-    if (ImGui::Begin("##statusbar", nullptr, flags)) {
-        if (state.unsaved) {
-            ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved), "*");
-            ImGui::SameLine();
-        }
-        refreshProblems(state);
-        if (!state.findings.empty()) {
-            ImGui::TextColored(toImVec4(themePalette(state.settings.darkMode).unsaved), "%d",
-                               static_cast<int>(state.findings.size()));
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip(
-                    "%d stage problem(s). Open View > Problems to see them, and "
-                    "click one to jump to the object.",
-                    static_cast<int>(state.findings.size()));
-            }
-            ImGui::SameLine();
-        }
-        ImGui::TextDisabled("%s", state.statusText.c_str());
-    }
-    ImGui::End();
-}
-
 void drawRealLogWindow(EditorState& state) {
     if (!state.showLog) {
         return;
@@ -3497,7 +3380,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
 
     Settings settings;
     settings.load();
-    // NOTE: applyWhiteholeTheme must NOT be called here â€” it needs an ImGui
+    // NOTE: applyWhiteholeTheme must NOT be called here — it needs an ImGui
     // context (created below). Calling ImGui::GetStyle() with no context is a
     // null-pointer crash that silently kills the app on boot (WIN32 subsystem
     // shows no console). Theme and fonts are applied after CreateContext.
@@ -3567,11 +3450,11 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
     // crisp and correctly sized when the window moves between displays.
     io.ConfigDpiScaleFonts = true;
     // NOTE: multi-viewport (tearing windows off into OS windows) is OFF on
-    // purpose â€” it is what made panels float around as separate windows.
+    // purpose — it is what made panels float around as separate windows.
 
     // The dock layout persists across launches so a carefully arranged workspace
     // survives a restart (ImGui keeps this pointer, so it lives in a static).
-    // When no layout exists yet â€” or after View > Reset Layout â€” the default
+    // When no layout exists yet — or after View > Reset Layout — the default
     // DockBuilder arrangement is used instead.
     static std::string layoutIniPath;
     {
@@ -3615,7 +3498,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         // an empty parameter grid and no hint why. Fetch it once, quietly.
         if (state.objectDb.names().empty() &&
             !std::filesystem::exists(state.dataRoot / "objectdb.json")) {
-            setStatus(state, "Downloading the object databaseâ€¦");
+            setStatus(state, "Downloading the object database…");
             startObjectDatabaseDownload(state);
         }
     }

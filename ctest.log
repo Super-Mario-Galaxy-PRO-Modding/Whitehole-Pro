@@ -1,8 +1,0 @@
-﻿Test project /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build
-    Start 1: whitehole_core_tests
-1/1 Test #1: whitehole_core_tests .............   Passed    0.08 sec
-
-100% tests passed, 0 tests failed out of 1
-
-Total Test time (real) =   0.09 sec
-ctest_exit=0

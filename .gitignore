@@ -21,6 +21,25 @@ build_state.txt
 *.bak
 restore_labels.diff
 
+# Root-anchored strays: the same class of one-off diagnostics, matched
+# explicitly because the unanchored patterns above do not cover these names.
+/temp_*.cpp
+/git_*.txt
+/test.txt
+/test_diff.txt
+/test_log.txt
+/tests_out*.txt
+/cmake_log.txt
+/buildlog_utf8.txt
+/ninja_config.log
+/build_new.bat
+/run_build*.bat
+/check_build.ps1
+
+# Stale build trees; ./build is the only canonical one.
+/build_ninja/
+/build-msvc/
+
 # Scratch artifacts that were committed by accident and had to be un-tracked.
 # `_*` covers the bulk of them (diagnostics dumps and one-off PowerShell
 # helpers); the rest are one-off copies of real sources.

@@ -26,7 +26,11 @@
 #include <array>
 #include <cmath>
 
+// MSVC-only; GCC/Clang link OpenGL through the whitehole_win32 CMake target and
+// would otherwise warn about the unknown pragma.
+#if defined(_MSC_VER)
 #pragma comment(lib, "opengl32.lib")
+#endif
 
 namespace whitehole::render {
 namespace {

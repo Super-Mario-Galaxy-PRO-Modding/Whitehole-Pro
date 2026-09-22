@@ -1,2 +1,0 @@
-﻿CLASS=ArrowSwitch PARAM=Obj_arg0
-[{"Value":"-1","Notes":"180Â° to right or left"},{"Value":"0","Notes":"90Â° to left"},{"Value":"1","Notes":"90Â° to right"},{"Value":"2","Notes":"180Â° to left"},{"Value":"3","Notes":"180Â° to right"}]

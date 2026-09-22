@@ -132,7 +132,7 @@ if(WHITEHOLE_HAVE_WIN32_GUI)
         cpp/third_party/imgui/backends/imgui_impl_win32.cpp
         cpp/third_party/imgui/backends/imgui_impl_dx11.cpp
     )
-    target_include_directories(whitehole_imgui PUBLIC cpp/third_party/imgui)
+    target_include_directories(whitehole_imgui SYSTEM PUBLIC cpp/third_party/imgui)
     target_compile_features(whitehole_imgui PUBLIC cxx_std_20)
     set_target_properties(whitehole_imgui PROPERTIES CXX_EXTENSIONS OFF)
     # Keep third-party diagnostics quiet; our own code keeps full warnings.
@@ -169,6 +169,17 @@ endif()
 target_compile_definitions(whitehole_app PRIVATE
     WHITEHOLE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
+# The GUI sources carry UTF-8 text (em dashes, ellipses in panel copy), so MSVC
+# must be told the source charset explicitly -- without it the compiler falls
+# back to the system code page and both narrow and wide literals are mangled.
+if(MSVC)
+    target_compile_options(whitehole_app PRIVATE /utf-8 /permissive-)
+else()
+    # Same warning set whitehole_core uses, so the editor sources are held to
+    # the standard the rest of the tree is. Vendored ImGui arrives through a
+    # SYSTEM include (see whitehole_imgui), so it contributes no diagnostics.
+    target_compile_options(whitehole_app PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+endif()
 whitehole_optimize(whitehole_app)
 
 # Windows resources: icon, version info, Common Controls v6 + DPI manifest.

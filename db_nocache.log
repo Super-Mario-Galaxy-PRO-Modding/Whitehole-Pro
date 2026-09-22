@@ -1,8 +1,0 @@
-﻿Object database: C:\Users\conta\OneDrive\Documents\GitHub\Whitehole-Pro\data\objectdb.json
-  objects:       2446
-  classes:       900
-  categories:    13
-  timestamp:     1787688471
-  loaded from:   objectdb.json
-  load time:     27 ms
-  SMG2 coverage: 2446 objects resolve a class, 2156 expose parameters

@@ -1,7 +1,0 @@
-﻿
-FullName                                                                             LastWriteTime       
---------                                                                             -------------       
-C:\Users\conta\Documents\GitHub\Whitehole-Pro\build\Release\whitehole_core_tests.exe 9/18/2026 3:18:30 PM
-C:\Users\conta\Documents\GitHub\Whitehole-Pro\cpp\src\render\object_visual.cpp       9/18/2026 3:19:36 PM
-
-

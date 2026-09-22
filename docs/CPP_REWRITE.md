@@ -18,6 +18,7 @@ The repository builds `whitehole-pro` (windowed editor) and `whitehole-pro-conso
   compiled cache, plus a non-blocking first-run download when the file is absent;
 - a Windows desktop editor that can open a game folder or a map archive, list objects, edit transforms, and save;
 - object authoring in that editor: a searchable Add Object picker fed by the community database, duplicate, delete, and the transform copy/paste from the Java Edit menu — each one a single undo step, shared with the CLI (`map add` writes the same rows the editor does);
+- path (rail) support: `CommonPathInfo` plus its `CommonPathPointInfo` point tables are loaded, saved and edited — the viewport draws the tessellated bezier with its control handles, path and point selection is shared by the Objects and Properties panels, and every rename or point move is a single undo step;
 - a command-line interface on every platform.
 
 The bundled `.arc` galaxy templates are part of the native test suite.
@@ -90,7 +91,7 @@ The existing `src/` Java tree remains the behavioral reference until its equival
 Still to migrate:
 
 1. KCL collision and animation data (BMD/BTI parsing already feeds the viewport).
-2. Path and path-point editing, and the remaining specialised object models. Undo, selection and object creation/duplication/deletion are done.
+2. The remaining specialised object renderers (gravity/area shapes, PowerStar, world-map links) and the world overlays that are not built yet.
 3. The remaining desktop editors (BCSV spreadsheet, world map, galaxy creation).
 4. Cross-platform GUI packaging, then removal of the Java/Ant build.
 

@@ -1,9 +1,0 @@
-﻿
-Name                      LastWriteTime       
-----                      -------------       
-whitehole-pro-console.exe 9/18/2026 2:02:57 PM
-whitehole-pro.exe         9/18/2026 2:02:57 PM
-whitehole_core_tests.exe  9/18/2026 1:17:19 PM
-whitehole_core.lib        9/18/2026 3:16:52 PM
-
-

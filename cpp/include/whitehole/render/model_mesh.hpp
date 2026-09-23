@@ -43,6 +43,12 @@ struct ModelMesh {
     // Lines, line strips and points are counted but not converted: a solid
     // preview has nothing to draw for them.
     std::size_t skippedPrimitives{0};
+    // Packets the emission loop saw but could not place: a packet whose SHP1
+    // matrix table decoded empty, and one whose draw-matrix id falls outside
+    // the DRW1 table. Both used to be silent `continue`s, which hid the SHP1
+    // field-offset bug behind healthy-looking probe batches.
+    std::size_t droppedEmptyMatrixTable{0};
+    std::size_t droppedBadMatrixIndex{0};
 
     [[nodiscard]] bool empty() const noexcept { return triangles.empty(); }
 };

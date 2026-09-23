@@ -2222,9 +2222,17 @@ std::vector<std::uint8_t> makeShp1Body() {
     putU32(body, 0x28 - 8, kPacketLocations);
     putU16(body, kRemapTable - 8, 0); // remap[0] -> batch record 0
 
-    body[kBatchRecord - 8] = 1;            // matrix type: one matrix per packet
-    putU16(body, kBatchRecord - 8 + 4, 1); // packet count
-    putU16(body, kBatchRecord - 8 + 6, 0); // attribute list offset
+    body[kBatchRecord - 8] = 1;        // matrix type: one matrix per packet
+    // Batch entry: matrix type, a pad byte, then packet count, attribute-list
+    // offset, first-matrix index and first-packet index as four consecutive
+    // u16s (Java readSHP1: readByte, skip(1), then four readShorts). The first
+    // u16 sits directly after the pad byte -- a port that read all four one
+    // slot too far decoded packetCount as 0 on real BDLs and silently dropped
+    // every triangle.
+    putU16(body, kBatchRecord - 8 + 2, 1); // packet count
+    putU16(body, kBatchRecord - 8 + 4, 0); // attribute list offset
+    putU16(body, kBatchRecord - 8 + 6, 0); // first matrix index
+    putU16(body, kBatchRecord - 8 + 8, 0); // first packet index
 
     const std::uint32_t attributeTypes[3] = {9, 10, 13};
     for (std::size_t index = 0; index < 3; ++index) {
@@ -2397,6 +2405,13 @@ void testBmdParsing() {
 
     expect(model.batches.size() == 1 && model.batches[0].packets.size() == 1, "bmd shape/packet count is wrong");
     expect(model.batches[0].packets[0].primitives.size() == 1, "bmd primitive count is wrong");
+    // The fixture's packet matrix table must reach the DRW1 table: an empty
+    // table (or a bad matrix id) is the drop gate that hid the old field-offset
+    // bug behind healthy-looking batches.
+    expect(!model.batches[0].packets[0].matrixTable.empty(), "shp1 packet has no matrix table");
+    expect(model.batches[0].packets[0].matrixTable[0] < model.matrixIndices.size(),
+           "shp1 packet matrix id misses the DRW1 table");
+    expect(model.batches[0].packets[0].primitives.size() == 1, "bmd primitive count is wrong");
     const auto& primitive = model.batches[0].packets[0].primitives.front();
     expect(static_cast<int>(primitive.type) == 0x80, "bmd primitive type is wrong");
     expect(primitive.positionIndices.size() == 4, "bmd position index count is wrong");
@@ -2420,12 +2435,50 @@ void testBmdParsing() {
     const auto mesh = buildModelMesh(model);
     expect(mesh.triangles.size() == 2, "model mesh triangle count is wrong");
     expect(mesh.skippedPrimitives == 0, "model mesh dropped a triangle primitive");
+    expect(mesh.droppedEmptyMatrixTable == 0 && mesh.droppedBadMatrixIndex == 0,
+           "model mesh dropped the packet at the matrix gate");
     expect(std::abs(mesh.boundsMax.x - 1.0F) < 0.001F && mesh.radius > 0.0F, "model mesh bounds are wrong");
     expect(std::abs(mesh.triangles.front().color[0] - 128.0F / 255.0F) < 0.01F,
            "model mesh lost the material colour");
     expect(mesh.triangles.front().materialIndex == 0, "model mesh lost the material index");
     expect(std::abs(mesh.triangles.front().b.normal.z - 1.0F) < 0.01F, "model mesh normals are wrong");
     expect(model.valid(), "bmd model should report itself as valid");
+
+    // Skinning safety: DRW1's matrix list and EVP1's envelope list are sized
+    // independently (EVP1 only lists weighted matrices), so a weighted draw
+    // matrix must be resolved through the DRW1 index into the EVP1 envelope
+    // list -- never by using the matrix index on the envelope list. Doing the
+    // latter read out of bounds and faulted (0xC0000005) on real BDLs, so this
+    // guards the exact shape of that crash: three DRW1 matrices, one envelope.
+    {
+        auto skinning = model;
+        skinning.matrixIndices = {0, 1, 7};
+        skinning.matrixWeighted = {false, true, true};
+        skinning.envelopeJoints = {{0}};
+        skinning.envelopeWeights = {{1.0F}};
+        // Point the fixture's only packet at matrix 1, which is the weighted
+        // entry -- otherwise the packet resolves matrix 0 (identity) and the
+        // skinned code path is never reached.
+        skinning.batches[0].packets[0].matrixTable[0] = 1;
+        const auto skinned = buildModelMesh(skinning);
+        // The weighted entry must resolve (DRW1 index 1 -> EVP1 envelope 0 ->
+        // joint 0) rather than fault, so the fixture's quad still produces its
+        // two triangles.
+        expect(skinned.triangles.size() == 2, "weighted draw matrix was not resolved from the EVP1 envelope");
+    }
+    // A weighted matrix whose EVP1 envelope index is out of range, and a DRW1
+    // index past the matrix table, both have to degrade instead of reading past
+    // the end of the envelope vectors.
+    {
+        auto broken = model;
+        broken.matrixWeighted = {false, true};
+        broken.matrixIndices = {0, 9};
+        broken.envelopeJoints.clear();
+        broken.envelopeWeights.clear();
+        broken.batches[0].packets[0].matrixTable[0] = 1;
+        const auto degraded = buildModelMesh(broken);
+        expect(degraded.triangles.size() == 2, "out-of-range envelope index did not fall back safely");
+    }
 
     // Little-endian files keep the same tag bytes in the other order.
     {

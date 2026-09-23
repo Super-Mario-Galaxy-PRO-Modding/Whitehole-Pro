@@ -264,10 +264,15 @@ ModelProbe ModelLibrary::probe(std::string_view objectName) const {
         report.parsed = true;
         report.sceneNodes = parsed.sceneGraph.size();
         report.batches = parsed.batches.size();
+        for (const auto& batch : parsed.batches) {
+            report.packets += batch.packets.size();
+        }
 
         auto mesh = buildModelMesh(parsed);
         report.triangles = mesh.triangles.size();
         report.skippedPrimitives = mesh.skippedPrimitives;
+        report.droppedEmptyMatrixTable = mesh.droppedEmptyMatrixTable;
+        report.droppedBadMatrixIndex = mesh.droppedBadMatrixIndex;
         if (!report.usable()) {
             report.error = "parsed but produced 0 triangles";
         }

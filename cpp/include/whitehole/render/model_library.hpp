@@ -44,8 +44,12 @@ struct ModelProbe {
     bool parsed{false};        // BMD parse succeeded
     std::size_t sceneNodes{0};
     std::size_t batches{0};
+    std::size_t packets{0};    // across all batches (SHP1 decode check)
     std::size_t triangles{0};
     std::size_t skippedPrimitives{0};
+    // Emission-loop drops (used to be silent continues in buildModelMesh).
+    std::size_t droppedEmptyMatrixTable{0};
+    std::size_t droppedBadMatrixIndex{0};
     std::string error;         // first failing stage; empty when usable
 
     [[nodiscard]] bool usable() const noexcept { return parsed && triangles != 0; }

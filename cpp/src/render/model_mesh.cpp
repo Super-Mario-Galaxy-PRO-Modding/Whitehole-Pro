@@ -34,55 +34,6 @@ math::Vec3f faceNormal(const ModelVertex& a, const ModelVertex& b, const ModelVe
     return normal.length() < 0.000001F ? math::Vec3f{0.0F, 1.0F, 0.0F} : normal.normalized();
 }
 
-void pushTriangle(ModelMesh& mesh, const smg::BmdModel& model, const smg::BmdPrimitive& primitive,
-                  std::size_t first, std::size_t second, std::size_t third, const std::array<float, 4>& color,
-                  std::int32_t materialIndex, bool translucent) {
-    ModelTriangle triangle;
-    if (!fetchVertex(model, primitive, first, triangle.a) || !fetchVertex(model, primitive, second, triangle.b) ||
-        !fetchVertex(model, primitive, third, triangle.c)) { return; }
-    const math::Vec3f normal = faceNormal(triangle.a, triangle.b, triangle.c);
-    ModelVertex* vertices[3] = {&triangle.a, &triangle.b, &triangle.c};
-    for (ModelVertex* vertex : vertices) {
-        if (vertex->normal.length() < 0.000001F) { vertex->normal = normal; }
-    }
-    triangle.color = color;
-    triangle.materialIndex = materialIndex;
-    triangle.translucent = translucent;
-    mesh.triangles.push_back(triangle);
-}
-
-void convertPrimitive(ModelMesh& mesh, const smg::BmdModel& model, const smg::BmdPrimitive& primitive,
-                      const std::array<float, 4>& color, std::int32_t materialIndex, bool translucent) {
-    using smg::BmdPrimitiveType;
-    const std::size_t count = primitive.positionIndices.size();
-    switch (static_cast<BmdPrimitiveType>(primitive.type)) {
-        case BmdPrimitiveType::Triangles:
-            for (std::size_t index = 0; index + 2 < count; index += 3) {
-                pushTriangle(mesh, model, primitive, index, index + 1, index + 2, color, materialIndex, translucent);
-            }
-            break;
-        case BmdPrimitiveType::TriangleStrip:
-            for (std::size_t index = 0; index + 2 < count; ++index) {
-                pushTriangle(mesh, model, primitive, index, index + 1, index + 2, color, materialIndex, translucent);
-            }
-            break;
-        case BmdPrimitiveType::TriangleFan:
-            for (std::size_t index = 1; index + 1 < count; ++index) {
-                pushTriangle(mesh, model, primitive, 0, index, index + 1, color, materialIndex, translucent);
-            }
-            break;
-        case BmdPrimitiveType::Quads:
-            for (std::size_t index = 0; index + 3 < count; index += 4) {
-                pushTriangle(mesh, model, primitive, index, index + 1, index + 2, color, materialIndex, translucent);
-                pushTriangle(mesh, model, primitive, index, index + 2, index + 3, color, materialIndex, translucent);
-            }
-            break;
-        default:
-            mesh.skippedPrimitives++;
-            break;
-    }
-}
-
 std::array<float, 4> materialColor(const smg::BmdModel& model, std::int16_t materialIndex) {
     if (materialIndex < 0 || static_cast<std::size_t>(materialIndex) >= model.materials.size()) {
         return {1.0F, 1.0F, 1.0F, 1.0F};
@@ -116,22 +67,44 @@ std::vector<math::Matrix4> jointWorldMatrices(const smg::BmdModel& model) noexce
 
 math::Matrix4 drawMatrix(const smg::BmdModel& model, std::size_t matrixIndex,
                          const std::vector<math::Matrix4>& jointWorld) noexcept {
-    if (matrixIndex >= model.matrixIndices.size()) { return math::Matrix4{}; }
-    if (!model.matrixWeighted[matrixIndex]) {
-        const auto jointIndex = static_cast<std::size_t>(model.matrixIndices[matrixIndex]);
-        if (jointIndex < jointWorld.size()) { return jointWorld[jointIndex]; }
+    // Three parallel DRW1/EVP1 tables feed a weighted draw matrix, and they are
+    // sized independently: matrixIndices and matrixWeighted come from DRW1 (one
+    // entry per draw matrix), while envelopeJoints / envelopeWeights come from
+    // EVP1 (one entry per *envelope*). J3D semantics for a weighted entry are
+    // that DRW1's stored index selects an EVP1 envelope -- not a matrix -- so
+    // the envelope list is indexed with that value, and both lists are range
+    // checked. Indexing an EVP1 list with a DRW1 matrix index is what used to
+    // read out of bounds and fault (0xC0000005) on real files.
+    if (matrixIndex >= model.matrixIndices.size() || matrixIndex >= model.matrixWeighted.size()) {
         return math::Matrix4{};
     }
-    const auto& envelopeJoints = model.envelopeJoints[matrixIndex];
-    const auto& envelopeWeights = model.envelopeWeights[matrixIndex];
+    // Java: mt[currentMtxID] is already a baked model-space matrix for the
+    // first table entry (m[3] identity row), which the renderer multiplies
+    // every draw matrix by. drawMatrix(0) is therefore guaranteed identity --
+    // enforce that here so a JNT1/DRW1 decode drift can never squash a model
+    // to a point again.
+    if (matrixIndex == 0) { return math::Matrix4{}; }
+    const auto bindIndex = static_cast<std::size_t>(model.matrixIndices[matrixIndex]);
+    if (!model.matrixWeighted[matrixIndex]) {
+        // Single-bind entry: the index is a JNT1 joint index.
+        if (bindIndex < jointWorld.size()) { return jointWorld[bindIndex]; }
+        return math::Matrix4{};
+    }
+    // Weighted entry: the index is an EVP1 envelope index.
+    if (bindIndex >= model.envelopeJoints.size() || bindIndex >= model.envelopeWeights.size()) {
+        return math::Matrix4{};
+    }
+    const auto& envelopeJoints = model.envelopeJoints[bindIndex];
+    const auto& envelopeWeights = model.envelopeWeights[bindIndex];
     if (envelopeJoints.empty()) { return math::Matrix4{}; }
+    const std::size_t blendCount = std::min(envelopeJoints.size(), envelopeWeights.size());
     float weightSum = 0.0F;
-    for (const auto w : envelopeWeights) { weightSum += w; }
+    for (std::size_t i = 0; i < blendCount; ++i) { weightSum += envelopeWeights[i]; }
     if (weightSum < 0.000001F) { weightSum = 1.0F; }
     math::Matrix4 result;
     result.values.fill(0.0F);
     result.values[15] = 1.0F;
-    for (std::size_t i = 0; i < envelopeJoints.size(); ++i) {
+    for (std::size_t i = 0; i < blendCount; ++i) {
         const auto jointIndex = static_cast<std::size_t>(envelopeJoints[i]);
         if (jointIndex >= jointWorld.size()) { continue; }
         const float w = envelopeWeights[i] / weightSum;
@@ -152,16 +125,19 @@ void transformPrimitive(ModelMesh& mesh, const smg::BmdModel& model, const smg::
         primitiveType == BmdPrimitiveType::TriangleStrip ||
         primitiveType == BmdPrimitiveType::TriangleFan ||
         primitiveType == BmdPrimitiveType::Quads) {
-        struct TVertex { math::Vec3f position; math::Vec3f normal; std::array<float, 2> texCoord; };
+        struct TVertex { math::Vec3f position; math::Vec3f normal; std::array<float, 2> texCoord; bool valid{ false }; };
         std::vector<TVertex> tv(count);
         for (std::size_t i = 0; i < count; ++i) {
             const auto posIdx = static_cast<std::size_t>(primitive.positionIndices[i]);
-            if (posIdx >= model.positions.size()) { return; }
-            tv[i].position = drawMatrix.transformPoint(model.positions[posIdx]);
+            if (posIdx < model.positions.size()) {
+                tv[i].position = drawMatrix.transformPoint(model.positions[posIdx]);
+                tv[i].valid = true;
+            }
             tv[i].texCoord = {0.0F, 0.0F};
             if (i < primitive.normalIndices.size()) {
                 const auto nIdx = static_cast<std::size_t>(primitive.normalIndices[i]);
-                if (nIdx < model.normals.size()) {
+                if (nIdx >= model.normals.size()) { tv[i].normal = {0.0F, 1.0F, 0.0F}; }
+                else {
                     const float m00 = drawMatrix.values[0], m01 = drawMatrix.values[1], m02 = drawMatrix.values[2];
                     const float m10 = drawMatrix.values[4], m11 = drawMatrix.values[5], m12 = drawMatrix.values[6];
                     const float m20 = drawMatrix.values[8], m21 = drawMatrix.values[9], m22 = drawMatrix.values[10];
@@ -199,6 +175,7 @@ void transformPrimitive(ModelMesh& mesh, const smg::BmdModel& model, const smg::
         }
         auto pushTv = [&](std::size_t a, std::size_t b, std::size_t c) {
             if (a >= tv.size() || b >= tv.size() || c >= tv.size()) return;
+            if (!tv[a].valid || !tv[b].valid || !tv[c].valid) return;
             ModelTriangle tri;
             tri.a = {tv[a].position, tv[a].normal, tv[a].texCoord};
             tri.b = {tv[b].position, tv[b].normal, tv[b].texCoord};
@@ -256,9 +233,9 @@ ModelMesh buildModelMesh(const smg::BmdModel& model) {
         for (const auto& packet : batch.packets) {
             for (const auto& primitive : packet.primitives) {
                 if (primitive.positionIndices.empty()) { mesh.skippedPrimitives++; continue; }
-                if (packet.matrixTable.empty()) { continue; }
+                if (packet.matrixTable.empty()) { mesh.droppedEmptyMatrixTable++; continue; }
                 const auto matrixIndex = static_cast<std::size_t>(packet.matrixTable[0]);
-                if (matrixIndex >= model.matrixIndices.size()) { continue; }
+                if (matrixIndex >= model.matrixIndices.size()) { mesh.droppedBadMatrixIndex++; continue; }
                 const auto draw = drawMatrix(model, matrixIndex, jointWorld);
                 transformPrimitive(mesh, model, primitive, draw, color, node.materialIndex, translucent);
             }

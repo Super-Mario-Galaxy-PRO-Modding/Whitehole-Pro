@@ -30,6 +30,36 @@ constexpr std::uint32_t kSectionMAT3 = 0x4D415433U;
 constexpr std::uint32_t kSectionMDL3 = 0x4D444C33U;
 constexpr std::uint32_t kSectionTEX1 = 0x54455831U;
 
+// Uppercase hex without locale/format-flag noise, for error messages.
+std::string hexOffset(std::size_t value) {
+    static constexpr char kDigits[] = "0123456789ABCDEF";
+    if (value == 0) {
+        return "0";
+    }
+    char buffer[20];
+    std::size_t length = 0;
+    while (value != 0 && length < sizeof(buffer)) {
+        buffer[length++] = kDigits[value & 0xFU];
+        value >>= 4;
+    }
+    std::string out;
+    out.reserve(length);
+    while (length > 0) {
+        out.push_back(buffer[--length]);
+    }
+    return out;
+}
+
+// Four printable characters of a section tag, for error messages.
+std::string sectionTagName(std::uint32_t tag) {
+    std::string out;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        const auto byte = static_cast<char>((tag >> shift) & 0xFFU);
+        out.push_back(byte >= 0x20 && byte < 0x7F ? byte : '?');
+    }
+    return out;
+}
+
 // Bounds-checked random-access reader. Every offset in a J3D file is relative
 // to the start of its section, so callers pass absolute positions and the
 // reader rejects anything outside the file.
@@ -93,11 +123,10 @@ struct Reader {
     }
 };
 
-// Bytes per element for VTX1 arrays, following the GX CompType list
-// (0 = u8, 1 = s8, 2 = u16, 3 = s16, 4 = f32). The Java reader only handled
-// s16/f32 and quietly produced zeros for anything else, so the smaller formats
-// are decoded here instead of dropped.
-int arrayElementBytes(int dataType) {
+// Width of one SHP1 index element. GX index streams really do come in
+// u8/u16/s8/s16 flavours (the 0x0300 high byte selects u16, everything else
+// reads as a byte), which is what readPrimitiveIndices below switches on.
+[[maybe_unused]] int arrayElementBytes(int dataType) {
     switch (dataType) {
         case 0:
         case 1:
@@ -113,21 +142,17 @@ int arrayElementBytes(int dataType) {
 }
 
 float arrayValue(const Reader& reader, std::size_t position, int dataType, int fractionBits) {
-    const auto divisor = static_cast<float>(1 << std::max(fractionBits, 0));
-    switch (dataType) {
-        case 0:
-            return static_cast<float>(reader.u8(position)) / divisor;
-        case 1:
-            return static_cast<float>(static_cast<std::int8_t>(reader.u8(position))) / divisor;
-        case 2:
-            return static_cast<float>(reader.u16(position)) / divisor;
-        case 3:
-            return static_cast<float>(reader.s16(position)) / divisor;
-        case 4:
-            return reader.f32(position);
-        default:
-            return 0.0F;
+    // VTX1 carries only s16 (GX CompType 3) and f32 (4) element data -- Java's
+    // readArrayValue returns 0 for every other code, so anything else here is
+    // malformed data and fails loudly instead of baking zeros into the mesh.
+    if (dataType != 3 && dataType != 4) {
+        throw std::runtime_error("BMD: unsupported VTX1 data type " + std::to_string(dataType));
     }
+    const auto divisor = static_cast<float>(1 << std::max(fractionBits, 0));
+    if (dataType == 4) {
+        return reader.f32(position);
+    }
+    return static_cast<float>(reader.s16(position)) / divisor;
 }
 
 std::uint8_t expand4(std::uint8_t value) { return static_cast<std::uint8_t>((value << 4) | value); }
@@ -287,31 +312,34 @@ void readVTX1(const Reader& reader, std::size_t sectionStart, std::size_t sectio
             continue;
         }
 
-        const auto elementBytes = static_cast<std::size_t>(arrayElementBytes(dataType));
-        const std::size_t elements = byteCount / elementBytes;
+        // VTX1 data-type codes are GX component types, so only the width-bearing
+        // codes 3 (s16) and 4 (f32) carry elements; Java divides the byte span
+        // by that width and rejects everything else.
+        const auto elementBytes = static_cast<std::size_t>(dataType == 3 ? 2 : 4);
+        const std::size_t elements = dataType == 3 || dataType == 4
+                                         ? byteCount / elementBytes
+                                         : throw std::runtime_error("BMD: unsupported VTX1 data type " +
+                                                                   std::to_string(dataType));
 
-        if (arrayType == 9) { // positions; the count is a format code: 0 = XY, 1 = XYZ
+        if (arrayType == 9) { // positions
             model.positions.clear();
-            if (componentCount == 0) {
-                const std::size_t count = elements / 2;
-                model.positions.reserve(count);
-                for (std::size_t element = 0; element < count; ++element) {
-                    const std::size_t at = base + element * 2 * elementBytes;
+            // Java: compsize==0 → arraysize/2 vertices, 2 components each (XY);
+            // compsize==1 → arraysize/3 vertices, 3 components each (XYZ).
+            // componentsPerVert selects the number of position components per vertex.
+            const std::size_t componentsPerVert = (componentCount == 0) ? 2U : 3U;
+            const std::size_t count = elements / componentsPerVert;
+            model.positions.reserve(count);
+            for (std::size_t element = 0; element < count; ++element) {
+                const std::size_t stride = componentsPerVert * elementBytes;
+                const std::size_t at = base + element * stride;
+                if (componentsPerVert == 2) {
                     model.positions.push_back({arrayValue(reader, at, dataType, fractionBits),
                                                arrayValue(reader, at + elementBytes, dataType, fractionBits), 0.0F});
-                }
-            } else if (componentCount == 1) {
-                const std::size_t count = elements / 3;
-                model.positions.reserve(count);
-                for (std::size_t element = 0; element < count; ++element) {
-                    const std::size_t at = base + element * 3 * elementBytes;
+                } else {
                     model.positions.push_back({arrayValue(reader, at, dataType, fractionBits),
                                                arrayValue(reader, at + elementBytes, dataType, fractionBits),
                                                arrayValue(reader, at + 2 * elementBytes, dataType, fractionBits)});
                 }
-            } else {
-                throw std::runtime_error("BMD: unsupported position component count " +
-                                         std::to_string(componentCount));
             }
             continue;
         }
@@ -528,15 +556,27 @@ void readSHP1(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         const auto remap = static_cast<std::size_t>(reader.u16(sectionStart + remapOffset + index * 2));
         const std::size_t record = sectionStart + batchOffset + remap * 0x28;
         BmdBatch& batch = model.batches[index];
+        // Batch entry (0x28 bytes): matrix type, a pad byte, then the packet
+        // count, attribute-list offset, first-matrix index and first-packet
+        // index as four consecutive u16s (Java: readByte, skip(1), then four
+        // readShorts). A previous port read all four one slot too far, which
+        // zeroed the packet count on real BDLs and silently dropped every
+        // triangle while the probe still showed healthy batches.
         batch.matrixType = reader.u8(record);
-        const auto packetCount = static_cast<std::size_t>(reader.u16(record + 4));
-        const auto attributesOffset = static_cast<std::size_t>(reader.u16(record + 6));
-        const auto firstMatrixIndex = static_cast<std::size_t>(reader.u16(record + 8));
-        const auto firstPacketIndex = static_cast<std::size_t>(reader.u16(record + 10));
+        const auto packetCount = static_cast<std::size_t>(reader.u16(record + 2));
+        const auto attributesOffset = static_cast<std::size_t>(reader.u16(record + 4));
+        const auto firstMatrixIndex = static_cast<std::size_t>(reader.u16(record + 6));
+        const auto firstPacketIndex = static_cast<std::size_t>(reader.u16(record + 8));
 
         // Attribute list: (array type, data type) pairs terminated by 0xFF.
+        // Java aborts after 0x20 pairs on a malformed table instead of
+        // scanning to EOF, so this port caps the walk the same way.
         std::size_t attributeCursor = sectionStart + attributeOffset + attributesOffset;
+        int attributePairs = 0;
         while (true) {
+            if (++attributePairs > 0x20) {
+                throw std::runtime_error("BMD: SHP1 attribute list is unterminated");
+            }
             const auto arrayType = reader.u32(attributeCursor);
             const auto dataType = reader.u32(attributeCursor + 4);
             attributeCursor += 8;
@@ -637,7 +677,9 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         cursor += 1;
         return reader.u8(table + static_cast<std::size_t>(index));
     };
-    const auto shortTable = [&reader](std::size_t table, std::size_t& cursor) {
+    // Kept for the day a short-indexed table is needed again; the colour and
+    // ambient lookups use color8Table and the texture list is positional.
+    [[maybe_unused]] const auto shortTable = [&reader](std::size_t table, std::size_t& cursor) {
         const auto index = reader.u16(cursor);
         cursor += 2;
         return reader.u16(table + static_cast<std::size_t>(index) * 2);
@@ -773,39 +815,46 @@ BmdModel parseBmd(std::span<const std::uint8_t> data) {
             throw std::runtime_error("BMD: section size is out of range");
         }
         const std::size_t sectionStart = position;
-        switch (tag) {
-            case kSectionINF1:
-                readINF1(reader, sectionStart, size, model);
-                break;
-            case kSectionVTX1:
-                readVTX1(reader, sectionStart, size, model);
-                break;
-            case kSectionEVP1:
-                readEVP1(reader, sectionStart, size, model);
-                break;
-            case kSectionDRW1:
-                readDRW1(reader, sectionStart, size, model);
-                break;
-            case kSectionJNT1:
-                readJNT1(reader, sectionStart, size, model);
-                break;
-            case kSectionSHP1:
-                readSHP1(reader, sectionStart, size, model);
-                break;
-            case kSectionMAT3:
-                readMAT3(reader, sectionStart, size, model);
-                break;
-            case kSectionMDL3: // BDL pre-header; nothing to read, like Java
-                break;
-            case kSectionTEX1:
-                readTEX1(reader, sectionStart, size, model);
-                break;
-            default:
-                // Real BMD/BDL files carry sections this reader does not need
-                // yet (EVW1, PTH1, SRT1, IOR1, BOM1, SMP1, CLR1, PAT1, ANK1,
-                // etc.). Skip them silently — the geometry sections above are
-                // all that the viewport needs to draw the bind-pose mesh.
-                break;
+        // Attribute any read failure inside a section to that section, so a
+        // probe message alone identifies the failing stage and offset.
+        try {
+            switch (tag) {
+                case kSectionINF1:
+                    readINF1(reader, sectionStart, size, model);
+                    break;
+                case kSectionVTX1:
+                    readVTX1(reader, sectionStart, size, model);
+                    break;
+                case kSectionEVP1:
+                    readEVP1(reader, sectionStart, size, model);
+                    break;
+                case kSectionDRW1:
+                    readDRW1(reader, sectionStart, size, model);
+                    break;
+                case kSectionJNT1:
+                    readJNT1(reader, sectionStart, size, model);
+                    break;
+                case kSectionSHP1:
+                    readSHP1(reader, sectionStart, size, model);
+                    break;
+                case kSectionMAT3:
+                    readMAT3(reader, sectionStart, size, model);
+                    break;
+                case kSectionMDL3: // BDL pre-header; nothing to read, like Java
+                    break;
+                case kSectionTEX1:
+                    readTEX1(reader, sectionStart, size, model);
+                    break;
+                default:
+                    // Real BMD/BDL files carry sections this reader does not need
+                    // yet (EVW1, PTH1, SRT1, IOR1, BOM1, SMP1, CLR1, PAT1, ANK1,
+                    // etc.). Skip them silently — the geometry sections above are
+                    // all that the viewport needs to draw the bind-pose mesh.
+                    break;
+            }
+        } catch (const std::runtime_error& error) {
+            throw std::runtime_error(std::string(error.what()) + " (section " + sectionTagName(tag) +
+                                     " at 0x" + hexOffset(sectionStart) + ")");
         }
         position = sectionStart + size;
     }

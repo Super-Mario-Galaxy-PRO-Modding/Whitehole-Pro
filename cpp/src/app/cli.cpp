@@ -306,6 +306,20 @@ int modelsCommand(int argc, char** argv) {
     }
 
     render::ModelLibrary library;
+    // `models check` must exercise the exact same resolution pipeline as the
+    // editor, so the substitution table (data/modelsubstitutions.json) is
+    // applied here too. Without it the report claimed "no ObjectData archive
+    // matches" for names the GUI resolves fine (LuigiIntrusively -> LuigiNPC,
+    // TimerCoinBlock -> CoinBlock, ...), which made the diagnostic contradict
+    // the thing it was diagnosing.
+    db::ModelSubstitutions substitutions;
+    // DataHolderBase resolves "<root>/data/modelsubstitutions.json", so the
+    // root is the directory that *contains* data/, not data/ itself.
+    substitutions.setBaseGameRoot(dataDirectory(argv[0]).parent_path());
+    substitutions.initBaseGame();
+    substitutions.initProject(game.filesystem());
+    substitutions.load();
+    library.setSubstitutions(&substitutions);
     library.bind(&game.filesystem());
 
     struct CheckResult {
@@ -341,9 +355,14 @@ int modelsCommand(int argc, char** argv) {
             item["parsed"] = util::JsonValue(result.probe.parsed);
             item["sceneNodes"] = util::JsonValue(static_cast<std::int64_t>(result.probe.sceneNodes));
             item["batches"] = util::JsonValue(static_cast<std::int64_t>(result.probe.batches));
+            item["packets"] = util::JsonValue(static_cast<std::int64_t>(result.probe.packets));
             item["triangles"] = util::JsonValue(static_cast<std::int64_t>(result.probe.triangles));
             item["skippedPrimitives"] =
                 util::JsonValue(static_cast<std::int64_t>(result.probe.skippedPrimitives));
+            item["droppedEmptyMatrixTable"] =
+                util::JsonValue(static_cast<std::int64_t>(result.probe.droppedEmptyMatrixTable));
+            item["droppedBadMatrixIndex"] =
+                util::JsonValue(static_cast<std::int64_t>(result.probe.droppedBadMatrixIndex));
             item["error"] = util::JsonValue(result.probe.error);
             items.emplace_back(util::JsonValue(std::move(item)));
         }
@@ -369,10 +388,13 @@ int modelsCommand(int argc, char** argv) {
                 std::cout << ", " << probe.skippedPrimitives << " primitives skipped";
             }
             std::cout << ")";
-        } else if (probe.error.empty()) {
-            std::cout << "parsed but produced no geometry";
         } else {
-            std::cout << probe.error;
+            std::cout << (probe.error.empty() ? "parsed but produced no geometry" : probe.error);
+            if (probe.archiveFound && probe.parsed) {
+                std::cout << " (packets=" << probe.packets
+                          << ", emptyMatrixTable=" << probe.droppedEmptyMatrixTable
+                          << ", badMatrixIndex=" << probe.droppedBadMatrixIndex << ")";
+            }
         }
         std::cout << "\n";
     }

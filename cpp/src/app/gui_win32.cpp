@@ -1250,6 +1250,11 @@ void openGameImpl(EditorState& state, const std::filesystem::path& path, bool qu
     }
     // ObjectData model archives live in the game workspace; bind them so the
     // viewport can show the real BMD models.
+    // Java also merges a project-level /modelsubstitutions.json on top of the
+    // base table whenever a game workspace is opened (GameArchive.java), so a
+    // mod can remap model names without touching the shipped data file.
+    state.modelSubstitutions.initProject(state.game->filesystem());
+    state.modelSubstitutions.load();
     state.modelLibrary.setSubstitutions(&state.modelSubstitutions);
     state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
     state.modelLibrary.bind(&state.game->filesystem());
@@ -3548,6 +3553,17 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
     if (!state.dataRoot.empty()) {
         state.galaxyNames.loadJson(state.dataRoot / "galaxies.json");
         state.zoneNames.loadJson(state.dataRoot / "zones.json");
+        // Model substitutions (data/modelsubstitutions.json) map an object name
+        // onto the archive that actually holds its model -- LuigiIntrusively to
+        // LuigiNPC, TimerCoinBlock to CoinBlock, Creeper to CreeperFlower and
+        // ~180 more. The library was handed this table on every bind but the
+        // table itself was never initialised, so isLoaded() stayed false and
+        // every substituted name silently fell back to "no archive matches".
+        // DataHolderBase resolves "<root>/data/...", so the root is the
+        // directory above data/.
+        state.modelSubstitutions.setBaseGameRoot(state.dataRoot.parent_path());
+        state.modelSubstitutions.initBaseGame();
+        state.modelSubstitutions.load();
         const auto cachePath =
             Settings::defaultConfigPath().parent_path() / "objectdb.cache";
         state.objectDb.load(state.dataRoot / "objectdb.json", cachePath);

@@ -2201,7 +2201,7 @@ std::vector<std::uint8_t> makeShp1Body() {
 // MAT3: one material named "mat" with a brown diffuse colour. Every index in
 // the material's 0x14C record points at entry 0 of its field table.
 std::vector<std::uint8_t> makeMat3Body() {
-    constexpr std::size_t kRecord = 0x88;
+    constexpr std::size_t kSectionStart = 0x88;  // start of the init-data records
     constexpr std::size_t kRecordSize = 0x14C;
     constexpr std::size_t kRemapTable = 0x1D8;
     constexpr std::size_t kNameTable = 0x1DC;
@@ -2214,33 +2214,37 @@ std::vector<std::uint8_t> makeMat3Body() {
     constexpr std::size_t kZCompLocTable = 0x1FF;
     constexpr std::size_t kDitherTable = 0x200;
     constexpr std::size_t kZModeTable = 0x204;
-    constexpr std::size_t kColorChannelTable = 0x208;
-    constexpr std::size_t kTextureIndexTable = 0x210;
-    constexpr std::size_t kSectionSize = 0x220;
+    constexpr std::size_t kAlphaCompareTable = 0x208;
+    constexpr std::size_t kBlendInfoTable = 0x210;
+    constexpr std::size_t kColorChannelTable = 0x218;
+    constexpr std::size_t kTextureIndexTable = 0x220;
+    constexpr std::size_t kSectionSize = 0x230;
 
     std::vector<std::uint8_t> body(kSectionSize - 8, 0);
     putU16(body, 0, 1); // material count
-    putU32(body, 0x0C - 8, kRecord);
-    putU32(body, 0x10 - 8, kRemapTable);
-    putU32(body, 0x14 - 8, kNameTable);
-    putU32(body, 0x1C - 8, kCullTable);
-    putU32(body, 0x20 - 8, kMaterialColorTable);
-    putU32(body, 0x24 - 8, kColorChannelCountTable);
-    putU32(body, 0x28 - 8, kColorChannelTable);
-    putU32(body, 0x2C - 8, kAmbientColorTable);
-    putU32(body, 0x34 - 8, kTexGenCountTable);
-    putU32(body, 0x48 - 8, kTextureIndexTable);
-    putU32(body, 0x58 - 8, kTevStageCountTable);
-    putU32(body, 0x74 - 8, kZModeTable);
-    putU32(body, 0x78 - 8, kZCompLocTable);
-    putU32(body, 0x7C - 8, kDitherTable);
+    putU32(body, 0x0C - 8, kSectionStart);        // InitDataTableOffset
+    putU32(body, 0x10 - 8, kRemapTable);          // RemapTableOffset
+    putU32(body, 0x14 - 8, kNameTable);           // NameTableOffset
+    putU32(body, 0x1C - 8, kCullTable);           // CullModeInfoOffset
+    putU32(body, 0x20 - 8, kMaterialColorTable);  // MaterialColorTableOffset
+    putU32(body, 0x24 - 8, kColorChannelCountTable); // ColorChannelCountTableOffset
+    putU32(body, 0x28 - 8, kColorChannelTable);   // ColorChannelTableOffset
+    putU32(body, 0x2C - 8, kAmbientColorTable);   // AmbientColorTableOffset
+    putU32(body, 0x34 - 8, kTexGenCountTable);    // TexGenCountTableOffset
+    putU32(body, 0x48 - 8, kTextureIndexTable);   // TextureIndexTableOffset
+    putU32(body, 0x58 - 8, kTevStageCountTable);  // TevStageCountTableOffset
+    putU32(body, 0x6C - 8, kAlphaCompareTable);   // AlphaCompareTableOffset
+    putU32(body, 0x70 - 8, kBlendInfoTable);      // BlendInfoTableOffset
+    putU32(body, 0x74 - 8, kZModeTable);          // ZModeTableOffset
+    putU32(body, 0x78 - 8, kZCompLocTable);       // ZCompLocTableOffset
+    putU32(body, 0x7C - 8, kDitherTable);         // DitherTableOffset
 
-    body[kRecord - 8] = 1;                       // pixel engine mode
-    putU16(body, kRemapTable - 8, 0);            // remap[0] -> material record 0
-    putU16(body, kNameTable - 8 + 4 + 2, 8);     // name string offset within the table
+    body[kSectionStart - 8] = 1;                    // pixel engine mode
+    putU16(body, kRemapTable - 8, 0);               // remap[0] -> material record 0
+    putU16(body, kNameTable - 8 + 4 + 2, 8);        // name string offset within the table
     putText(body, kNameTable - 8 + 8, "mat");
 
-    body[kMaterialColorTable - 8 + 0] = 128; // diffuse RGBA8
+    body[kMaterialColorTable - 8 + 0] = 128;        // diffuse RGBA8
     body[kMaterialColorTable - 8 + 1] = 64;
     body[kMaterialColorTable - 8 + 2] = 32;
     body[kMaterialColorTable - 8 + 3] = 255;
@@ -2251,8 +2255,8 @@ std::vector<std::uint8_t> makeMat3Body() {
         putU16(body, kTextureIndexTable - 8 + entry * 2, entry == 0 ? 0 : 0xFFFF);
     }
     // The record's texture-index block sits at record + 0x84 and holds one
-    // short per slot; grow the section so the block fits before the table.
-    constexpr std::size_t kRecordTexBlock = kRecord + 0x84;
+    // short per slot; the section grows to fit it before the tables.
+    constexpr std::size_t kRecordTexBlock = kSectionStart + 0x84;
     constexpr std::size_t kNewSectionSize = kRecordTexBlock + 16;
     static_assert(kNewSectionSize <= kTextureIndexTable, "record block would overlap the texture index table");
     (void)kNewSectionSize;
@@ -2262,8 +2266,6 @@ std::vector<std::uint8_t> makeMat3Body() {
     (void)kRecordSize;
     return body;
 }
-
-// TEX1: one embedded BTI (I8, 2x2) whose image data follows its entry.
 std::vector<std::uint8_t> makeTex1Body() {
     constexpr std::size_t kEntries = 0x14;
     constexpr std::size_t kImage = kEntries + 32;

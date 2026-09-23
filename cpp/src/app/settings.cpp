@@ -10,8 +10,12 @@ namespace whitehole::app {
 namespace {
 std::string getS(const util::JsonValue& o, const char* k) { return o.at(k).asString(); }
 bool getB(const util::JsonValue& o, const char* k, bool fb) { return o.at(k).asBool(fb); }
+int getI(const util::JsonValue& o, const char* k, int fb) {
+    return static_cast<int>(o.at(k).asNumber(static_cast<double>(fb)));
+}
 void putS(util::JsonObject& o, const char* k, const std::string& v) { o[k] = util::JsonValue(v); }
 void putB(util::JsonObject& o, const char* k, bool v) { o[k] = util::JsonValue(v); }
+void putI(util::JsonObject& o, const char* k, int v) { o[k] = util::JsonValue(static_cast<double>(v)); }
 } // namespace
 Settings& Settings::instance() {
     static Settings s;
@@ -68,6 +72,13 @@ void Settings::load() {
     betterQuality = getB(root, "betterQuality", true);
     lowPolyModels = getB(root, "lowPolyModels", false);
     collisionModels = getB(root, "collisionModels", false);
+    texturedModels = getB(root, "texturedModels", true);
+    translucentModels = getB(root, "translucentModels", true);
+    textureFilter = getS(root, "textureFilter");
+    if (textureFilter != "nearest" && textureFilter != "linear") textureFilter = "linear";
+    modelCacheSize = getI(root, "modelCacheSize", 256);
+    if (modelCacheSize < 16) modelCacheSize = 16;
+    if (modelCacheSize > 4096) modelCacheSize = 4096;
     reverseRotation = getB(root, "reverseRotation", false);
     wasdMovement = getB(root, "wasdMovement", false);
     allowFloatingPanels = getB(root, "allowFloatingPanels", false);
@@ -93,6 +104,10 @@ void Settings::save() const {
     putB(o, "betterQuality", betterQuality);
     putB(o, "lowPolyModels", lowPolyModels);
     putB(o, "collisionModels", collisionModels);
+    putB(o, "texturedModels", texturedModels);
+    putB(o, "translucentModels", translucentModels);
+    putS(o, "textureFilter", textureFilter);
+    putI(o, "modelCacheSize", modelCacheSize);
     putB(o, "reverseRotation", reverseRotation);
     putB(o, "wasdMovement", wasdMovement);
     putB(o, "allowFloatingPanels", allowFloatingPanels);
@@ -111,6 +126,9 @@ void Settings::reset() {
     showAxis = showAreas = showCameras = showGravity = showPaths = true;
     betterQuality = true;
     lowPolyModels = collisionModels = false;
+    texturedModels = translucentModels = true;
+    textureFilter = "linear";
+    modelCacheSize = 256;
     reverseRotation = wasdMovement = false;
     allowFloatingPanels = false;
     loaded_ = true;

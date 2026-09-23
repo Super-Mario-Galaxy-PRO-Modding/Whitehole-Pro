@@ -622,8 +622,8 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
     // Colour-channel and texture-index tables are skipped positionally below
     // (light channels and texture indices are walked as raw record bytes), so
     // their offsets are only read to keep the field walk explicit.
-    (void)reader.u32(sectionStart + 0x28);
-    (void)reader.u32(sectionStart + 0x48);
+    (void)reader.u32(sectionStart + 0x28); // ColorChannelTableOffset
+    (void)reader.u32(sectionStart + 0x48); // TextureIndexTableOffset — read positionally later
     const auto ambientColorOffset = reader.u32(sectionStart + 0x2C);
     const auto texGenCountOffset = reader.u32(sectionStart + 0x34);
     const auto tevStageCountOffset = reader.u32(sectionStart + 0x58);
@@ -669,13 +669,19 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         // zcomp loc is stored as a byte index; the value decides whether depth
         // testing happens before texturing, which the preview does not need.
         (void)byteTable(sectionStart + zCompLocOffset, cursor);
-        { // ZMode: one byte index into a four-byte-per-entry table.
+        { // ZMode: one byte index into a four-byte-per-entry table. Java names
+            // these BlendEnableDepthTest / BlendDepthFunction /
+            // BlendWriteToZBuffer; the entry doubles as the blend switch the
+            // game itself consults, so both land on the material together.
             const auto zModeIndex = static_cast<std::size_t>(reader.u8(cursor));
             cursor += 1;
-            (void)reader.u8(sectionStart + zModeOffset + zModeIndex * 4); // blend enable
-            (void)reader.u8(sectionStart + zModeOffset + zModeIndex * 4 + 1); // depth function
-            (void)reader.u8(sectionStart + zModeOffset + zModeIndex * 4 + 2); // write to Z
+            const std::size_t zBase = sectionStart + zModeOffset + zModeIndex * 4;
+            const bool zTest = reader.u8(zBase) != 0;
+            material.depthFunction = reader.u8(zBase + 1);
+            material.depthWrite = zTest && reader.u8(zBase + 2) != 0;
+            material.blendMode = reader.u8(zBase + 3) != 0 ? 1 : 0;
         } // ZMode
+        // Dither enable flag (byte table lookup).
         (void)byteTable(sectionStart + ditherOffset, cursor);
 
         material.diffuseColor = color8Table(sectionStart + materialColorOffset, cursor);

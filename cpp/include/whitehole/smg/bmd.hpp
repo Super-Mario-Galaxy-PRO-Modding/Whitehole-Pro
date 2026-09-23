@@ -100,7 +100,11 @@ struct BmdBatch {
     std::vector<BmdPacket> packets;
 };
 
-// MAT3 material, reduced to what a static preview needs.
+// MAT3 material, reduced to what a static preview needs. Blend, cull, depth
+// and alpha-compare fields drive the per-material GL state in the viewport
+// (opaque/translucent split, alpha testing, face culling). They default to
+// the "draw everything, depth on" behaviour the old preview assumed, so any
+// model that never sets them renders exactly as before.
 struct BmdMaterial {
     std::string name;
     std::uint8_t pixelEngineMode{0};
@@ -109,6 +113,36 @@ struct BmdMaterial {
     std::array<float, 4> ambientColor{1.0F, 1.0F, 1.0F, 1.0F};
     // TEV texture map -> TEX1 index; -1 means the map is unused.
     std::array<std::int32_t, 8> textureIndices{-1, -1, -1, -1, -1, -1, -1, -1};
+    // GX blend mode (0 = none/logic, 1 = blend, 3 = subtract) plus its source
+    // and destination factors, as stored in the MAT3 blend-info table.
+    std::uint8_t blendMode{0};
+    std::uint8_t blendSrcFactor{0};
+    std::uint8_t blendDstFactor{0};
+    std::uint8_t blendOp{0};
+    // GX depth compare function and the depth-write flag from ZMode.
+    std::uint8_t depthFunction{1};
+    bool depthWrite{true};
+    // Alpha-compare pair: func 0..7 (never/less/equal/lequal/greater/notequal/
+    // gequal/always), reference 0..255, and the AND(0)/OR(1) merge operation.
+    std::uint8_t alphaFunc0{7};
+    std::uint8_t alphaRef0{0};
+    std::uint8_t alphaFunc1{7};
+    std::uint8_t alphaRef1{0};
+    std::uint8_t alphaOp{1};
+
+    // True when the material draws through the blended pass: Takochu's
+    // DrawFlag == 4 test, re-derived here as pixelEngineMode == 4 (the value
+    // the Java reader documents as "translucent"). Blend-type materials count
+    // too, since the game blends them regardless of the draw flag.
+    [[nodiscard]] bool translucent() const noexcept {
+        return pixelEngineMode == 4 || blendMode == 1 || blendMode == 3;
+    }
+    // Alpha testing only matters when at least one comparison can fail.
+    [[nodiscard]] bool alphaTestEnabled() const noexcept {
+        return (alphaOp == 1 && (alphaFunc0 == 7 || alphaFunc1 == 7))
+                   ? false
+                   : !(alphaOp == 0 && (alphaFunc0 == 0 || alphaFunc1 == 0));
+    }
 };
 
 struct BmdModel {

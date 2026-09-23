@@ -45,6 +45,16 @@ public:
     bool betterQuality{true};
     bool lowPolyModels{false};
     bool collisionModels{false};
+    // Textured models need the TEX1 upload lane; translucency needs the
+    // sorted blended pass. Both default on; turning them off falls back to
+    // flat material colours and the single opaque pass respectively.
+    bool texturedModels{true};
+    bool translucentModels{true};
+    // GL texture filtering for model textures: "nearest" or "linear".
+    std::string textureFilter{"linear"};
+    // Maximum cached model meshes before the library evicts the
+    // least-recently-used entries (with their GL resources).
+    int modelCacheSize{256};
 
     // Editor controls
     bool reverseRotation{false};

@@ -46,5 +46,9 @@ restore_labels.diff
 _*
 *.tmp
 
+# Reference-only sibling tools (Supernova, Takochu, bmd-bdl-export, ...):
+# studied for ideas, never compiled or shipped — especially Takochu (GPL-3.0).
+GalaxyTools/
+
 # Visual Studio / IDE local state
 .vs/

@@ -29,6 +29,10 @@ struct ModelTriangle {
     ModelVertex c{};
     std::array<float, 4> color{1.0F, 1.0F, 1.0F, 1.0F};
     std::int32_t materialIndex{-1};
+    // True when the owning material is translucent (GX blend mode or
+    // pixelEngineMode==4 / DrawFlag==4): these triangles draw in the
+    // back-to-front translucent pass instead of the opaque depth-write pass.
+    bool translucent{false};
 };
 
 struct ModelMesh {

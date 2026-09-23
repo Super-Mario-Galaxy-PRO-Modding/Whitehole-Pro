@@ -73,29 +73,6 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 
 ---
 
-## 🎛️ The 3D viewport — what's under the hood
-
-The renderer was overhauled against the best ideas from the GalaxyTools ecosystem
-(Supernova, Takochu, and the BMD/BDL export tools), re-implemented cleanly from
-scratch in C++20 — **no code was copied**, and each technique is taken further:
-
-| Technique | Where the idea came from | How Whitehole Pro does it better |
-|---|---|---|
-| **Joint-space skinning** — vertices posed by the model's skeleton | Supernova | Baked once at load (Supernova rebakes every frame) — zero per-frame cost, same quality |
-| **Opaque / translucent two-pass draw** — glass & water sort correctly | Supernova | Plus per-material depth-write and blend state read straight from the MAT3 chunk |
-| **Per-material GL state** — cull mode, alpha test, blend factors | Takochu | Read from the exact bytes the Java reader reads, covered by unit tests |
-| **Translucent classification** — `pixelEngineMode == 4` ("xLU") | Takochu / J3D spec | Clean-room reimplementation verified by round-trip tests |
-| **TEX1 textures** with wrap/filter settings | BMD/BDL export tooling | Decoded by the native BTI decoder, cached with eviction — models *and* textures stay in budget |
-
-**What renders today:**
-- ✅ Real **BMD/BDL models** with correctly posed joints (wheels, floats, switches no longer sit in bind pose)
-- ✅ **Two-pass rendering** — opaque with depth write first, then translucent back-to-front (`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, depth test on, depth write off)
-- ✅ **Textures** from each model's TEX1 chunk, with a flat-color fallback if a texture is corrupt
-- ✅ **Per-material state** — cull mode, alpha test, blend factors, depth function/write from MAT3
-- ✅ **Category-colored placeholders** when a model isn't available
-- ✅ **Overlays** — grid, world axis, bezier rails with clickable control handles, camera cones, area/gravity wireboxes (toggles in *View → Overlays*)
-- ✅ **Selection** — ray/OBB picking, multi-select, move/rotate/scale gizmo with axis snapping, hover highlight, floating labels
-
 **View menu settings** (all persisted across sessions):
 
 | Setting | What it does | Default |
@@ -282,15 +259,8 @@ GalaxyTools/             <- reference-only sibling tools (see Credits — not bu
 
 ## 📜 Credits & licenses
 
-Whitehole Pro stands on the shoulders of a community that has kept Super Mario
-Galaxy modding alive for years. This project would not exist without them.
-
-### Lineage — where this project comes from
-
-| Project | License | Credit |
-|---|---|---|
-| **[Whitehole / Whitehole-Neo](https://github.com/SMGCommunity/Whitehole-Neo)** — the original Java SMG1/SMG2 editor; the frozen `src/` tree in this repo is ported from it | **No license file ships upstream** (all rights reserved by its authors) — used here as the behavioral reference for this rewrite, with gratitude | The **SMGCommunity** and every Whitehole-Neo contributor. If you're an upstream author and want different attribution or terms, open an issue and we'll fix it immediately. |
-| **Original Whitehole** (the decade-old editor Neo descends from) | Published without an explicit license | The original Whitehole authors — thank you for giving the scene its editor. |
+Whitehole Pro stands on the shoulders of Ruan de Jager that has kept Super Mario
+Galaxy modding alive for years. This project would not exist without him.
 
 ### This repository's license
 
@@ -344,29 +314,8 @@ them is copied into this repository.
 
 ### Colophon
 
-Built with C++20, CMake, Win32, OpenGL, Dear ImGui, and a stubborn love for
-Super Mario Galaxy. The meme energy in this README is load-bearing.
-
----
-
-## 🤝 Contributing
-
-1. **Open an issue first** for anything beyond typo fixes — bugs, feature ideas
-   and big refactors go smoother when we agree on direction.
-2. **Keep PRs focused** — one bug or one feature per PR.
-3. **New code goes in `cpp/` (C++20).** The Java `src/` tree is frozen: port
-   its *behavior*, don't add to it — and cite the Java file/line you mirrored.
-4. **Keep the tests green** — `whitehole_core_tests.exe` must exit 0, and every
-   behavior change needs a test in `cpp/tests/core_tests.cpp`.
-5. Match the house style: 4-space indent, `kName` constants, comments explain
-   *why*, `-Wall -Wextra -Wpedantic` clean.
-6. Update docs when behavior changes.
-7. By contributing you agree your work is distributed under this repository's
-   license (GPL-3.0) at merge time.
-
-See [`docs/AI_POLICY.md`](docs/AI_POLICY.md) for how AI assistance is used in
-development. Bug reports should include: Windows version, `cmake --version`,
-your compiler, and the last ~30 lines of build output.
+Built with C++20, CMake, Win32, OpenGL, Dear ImGui, and a only the best love for
+Super Mario Galaxy.
 
 ---
 

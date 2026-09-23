@@ -80,7 +80,6 @@ void Settings::load() {
     if (modelCacheSize < 16) modelCacheSize = 16;
     if (modelCacheSize > 4096) modelCacheSize = 4096;
     reverseRotation = getB(root, "reverseRotation", false);
-    wasdMovement = getB(root, "wasdMovement", false);
     allowFloatingPanels = getB(root, "allowFloatingPanels", false);
     recentMaps.clear();
     for (const auto& item : root.at("recentMaps").asArray()) {
@@ -109,7 +108,6 @@ void Settings::save() const {
     putS(o, "textureFilter", textureFilter);
     putI(o, "modelCacheSize", modelCacheSize);
     putB(o, "reverseRotation", reverseRotation);
-    putB(o, "wasdMovement", wasdMovement);
     putB(o, "allowFloatingPanels", allowFloatingPanels);
     util::JsonArray recent;
     for (const auto& m : recentMaps) recent.emplace_back(m);
@@ -129,7 +127,7 @@ void Settings::reset() {
     texturedModels = translucentModels = true;
     textureFilter = "linear";
     modelCacheSize = 256;
-    reverseRotation = wasdMovement = false;
+    reverseRotation = false;
     allowFloatingPanels = false;
     loaded_ = true;
 }

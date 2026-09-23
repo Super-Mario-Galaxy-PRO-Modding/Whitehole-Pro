@@ -26,11 +26,24 @@ public:
     float distance{800.0F};
 
     static constexpr float kFieldOfView = 1.2217305F; // 70 deg in radians
-    // Raw-unit equivalents of the Java frustum (0.01 / 1000 in SCALE_DOWN
-    // space). 1.0 near keeps close objects clickable, 60000 far covers the
-    // largest galaxies plus their frame distances with 24-bit depth.
+    // Floor of the dynamic near plane (see nearPlane()). The old fixed
+    // 1..60000 frustum quantised depth to ~20 world units at galaxy range,
+    // which z-fought rails and overlays while zoomed out; the clip planes now
+    // track the camera distance (see nearPlane()/farPlane()).
     static constexpr float kNearPlane = 1.0F;
-    static constexpr float kFarPlane = 60000.0F;
+    static constexpr float kFarPlane = 60000.0F; // legacy fallback, rarely reached
+
+    // Zoom/framing bounds. 150000 (was 20000) spans the largest SMG galaxies
+    // plus their frame distances, so Frame All can never be cut off mid-map.
+    static constexpr float kMinDistance = 5.0F;
+    static constexpr float kMaxDistance = 150000.0F;
+    // Dynamic near-plane band: proportional to orbit distance (1%) so the
+    // near/far ratio stays in the low thousands at every zoom level.
+    static constexpr float kMaxDynamicNear = 100.0F;
+    static constexpr float kMaxDynamicFar = 500000.0F;
+
+    // Grid lines per side; the grid spec and the renderer share this number.
+    static constexpr int kGridHalfLines = 20;
 
     // Pitch is clamped just short of straight up/down so up()/right() stay
     // well conditioned (matches the Java editor, which never rolls).
@@ -59,9 +72,29 @@ public:
     void dolly(float wheelDelta) noexcept;
     void frameTarget(const math::Vec3f& point, float framedDistance = 300.0F) noexcept;
 
+    // Fly movement (WASD/arrows): slides the orbit target along the camera
+    // basis, so the eye follows rigidly. Amounts are world units per step.
+    void fly(float rightAmount, float upAmount, float forwardAmount) noexcept;
+
+    // Clip planes. Near tracks 1% of the orbit distance (clamped), far tracks
+    // distance + scene radius, so 24-bit depth stays precise from a 5-unit
+    // close-up to a 150000-unit galaxy overview with no z-fighting.
+    [[nodiscard]] float nearPlane() const noexcept;
+    [[nodiscard]] float farPlane(float sceneRadius) const noexcept;
+
     // World -> screen pixel (for labels/overlays). Returns false when behind camera.
     [[nodiscard]] bool worldToScreen(const math::Vec3f& point, float width, float height, float& outX,
                                      float& outY) const noexcept;
 };
+
+// Viewport grid sizing for one camera distance: the patch must cover the
+// whole visible ground (2x orbit distance spans any aspect ratio), snapped to
+// a 1/2/5x10^n step so divisions read cleanly. Shared by the renderer and
+// the tests, so the grid can never silently regress to ending mid-screen.
+struct GridSpec {
+    float step{100.0F};
+    float extent{2000.0F}; // lines run +/-extent in X and Z
+};
+[[nodiscard]] GridSpec gridSpec(float distance) noexcept;
 
 } // namespace whitehole::render

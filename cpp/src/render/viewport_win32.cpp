@@ -25,6 +25,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <string_view>
+#include <vector>
 
 // MSVC-only; GCC/Clang link OpenGL through the whitehole_win32 CMake target and
 // would otherwise warn about the unknown pragma.
@@ -79,6 +82,269 @@ void drawTriangles(const std::vector<math::Vec3f>& triangles) {
 // even a fully modelled zone well inside this budget; the oldest entries are
 // evicted FIFO, and expired entries are pruned whenever new ones arrive.
 constexpr std::size_t kMaxModelListEntries = 128;
+
+// ---- Label font atlas --------------------------------------------------------
+// Glyphs 32..126 rasterized ONCE by GDI into an off-screen bitmap (GDI only
+// touches that bitmap, so it cannot flicker) and uploaded as one alpha
+// texture. Labels are then textured quads drawn INSIDE the frame before
+// SwapBuffers, so every presented frame is one atomic image. The old scheme
+// used TextOutW on the front buffer *after* the swap, which races the desktop
+// compositor against the shell's Present -- worst with labels enabled. The
+// app hosts one viewport child, so the atlas lives at file scope and is
+// rebuilt whenever the GL context is (re)created.
+class LabelFont {
+public:
+    bool build(); // GL context must be current
+    void destroy() noexcept;
+    [[nodiscard]] bool ready() const noexcept { return texture_ != 0; }
+    void bind() const; // enable GL_TEXTURE_2D + bind the atlas
+    [[nodiscard]] float lineHeight() const noexcept { return cellHeight_; }
+    [[nodiscard]] float measure(std::string_view utf8) const;
+    // One textured quad per glyph, current GL color; y is the top edge (the
+    // ortho pass is y-down like screen space).
+    void draw(float x, float y, std::string_view utf8) const;
+
+private:
+    struct Glyph {
+        float u0{0.0F};
+        float v0{0.0F};
+        float u1{0.0F};
+        float v1{0.0F};
+        float advance{0.0F};
+    };
+    [[nodiscard]] const Glyph& glyphFor(std::uint32_t codepoint) const noexcept;
+    static std::uint32_t nextCodepoint(std::string_view text, std::size_t& index) noexcept;
+
+    unsigned int texture_{0};
+    float cellHeight_{16.0F};
+    std::array<Glyph, 95> glyphs_{}; // ASCII 32..126
+};
+
+bool LabelFont::build() {
+    if (texture_ != 0) {
+        return true;
+    }
+    constexpr int kFirst = 32;
+    constexpr int kLast = 126;
+    constexpr int kCount = kLast - kFirst + 1; // 95
+    constexpr int kCols = 16;
+    constexpr int kRows = (kCount + kCols - 1) / kCols; // 6
+    constexpr int kAtlasW = 512; // power of two: plain GL 1.1 texture
+    constexpr int kAtlasH = 256;
+
+    HDC screen = GetDC(nullptr);
+    const int dpi = screen != nullptr ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
+    if (screen != nullptr) {
+        ReleaseDC(nullptr, screen);
+    }
+
+    HDC mem = CreateCompatibleDC(nullptr);
+    if (mem == nullptr) {
+        return false;
+    }
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = kAtlasW;
+    bitmapInfo.bmiHeader.biHeight = -kAtlasH; // top-down: row 0 is the top
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(mem, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib == nullptr || bits == nullptr) {
+        DeleteDC(mem);
+        return false;
+    }
+    HGDIOBJ oldBitmap = SelectObject(mem, dib);
+    PatBlt(mem, 0, 0, kAtlasW, kAtlasH, BLACKNESS);
+
+    // Shrink the point size until the grid provably fits the atlas.
+    int pointSize = 9;
+    int cellWidth = 0;
+    int cellHeightPx = 0;
+    HFONT font = nullptr;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (font != nullptr) {
+            DeleteObject(font);
+        }
+        font = CreateFontW(-MulDiv(pointSize, dpi > 0 ? dpi : 96, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           // Grayscale AA: ClearType fringes would corrupt the alpha channel.
+                           ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        if (font == nullptr) {
+            SelectObject(mem, oldBitmap);
+            DeleteObject(dib);
+            DeleteDC(mem);
+            return false;
+        }
+        SelectObject(mem, font);
+        TEXTMETRICW metrics{};
+        GetTextMetricsW(mem, &metrics);
+        int maxWidth = 0;
+        for (int code = kFirst; code <= kLast; ++code) {
+            int width = 0;
+            if (GetCharWidth32W(mem, code, code, &width) && width > maxWidth) {
+                maxWidth = width;
+            }
+        }
+        cellWidth = maxWidth + 2;
+        cellHeightPx = metrics.tmHeight + 2;
+        if (cellWidth * kCols <= kAtlasW && cellHeightPx * kRows <= kAtlasH) {
+            break;
+        }
+        --pointSize;
+        if (pointSize < 6) {
+            break; // absurd DPI: accept slight clipping rather than fail
+        }
+    }
+    cellHeight_ = static_cast<float>(cellHeightPx);
+
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(255, 255, 255));
+    SetTextAlign(mem, TA_LEFT | TA_TOP | TA_NOUPDATECP);
+    for (int index = 0; index < kCount; ++index) {
+        const int column = index % kCols;
+        const int row = index / kCols;
+        const wchar_t character = static_cast<wchar_t>(kFirst + index);
+        TextOutW(mem, column * cellWidth, row * cellHeightPx, &character, 1);
+        int advance = cellWidth;
+        if (!GetCharWidth32W(mem, kFirst + index, kFirst + index, &advance) || advance < 1) {
+            advance = cellWidth;
+        }
+        Glyph glyph;
+        glyph.u0 = static_cast<float>(column * cellWidth) / static_cast<float>(kAtlasW);
+        glyph.u1 = static_cast<float>(column * cellWidth + advance) / static_cast<float>(kAtlasW);
+        glyph.v0 = static_cast<float>(row * cellHeightPx) / static_cast<float>(kAtlasH);
+        glyph.v1 = static_cast<float>(row * cellHeightPx + cellHeightPx) / static_cast<float>(kAtlasH);
+        glyph.advance = static_cast<float>(advance);
+        glyphs_[static_cast<std::size_t>(index)] = glyph;
+    }
+
+    // White-on-black ink -> 1 byte per pixel of alpha (red channel).
+    std::vector<unsigned char> alpha(static_cast<std::size_t>(kAtlasW) * kAtlasH);
+    const auto* base = static_cast<const unsigned char*>(bits);
+    for (int y = 0; y < kAtlasH; ++y) {
+        const auto* line = base + static_cast<std::size_t>(y) * kAtlasW * 4;
+        for (int x = 0; x < kAtlasW; ++x) {
+            alpha[static_cast<std::size_t>(y) * kAtlasW + x] = line[x * 4 + 2]; // BGRA -> R
+        }
+    }
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    GLint previousAlignment = 4;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousAlignment);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); // crisp at 1:1
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, kAtlasW, kAtlasH, 0, GL_ALPHA, GL_UNSIGNED_BYTE, alpha.data());
+    glPixelStorei(GL_UNPACK_ALIGNMENT, previousAlignment);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    SelectObject(mem, oldBitmap);
+    DeleteObject(font);
+    DeleteObject(dib);
+    DeleteDC(mem);
+
+    texture_ = texture;
+    return texture_ != 0;
+}
+
+void LabelFont::destroy() noexcept {
+    if (texture_ != 0) {
+        glDeleteTextures(1, &texture_);
+        texture_ = 0;
+    }
+}
+
+void LabelFont::bind() const {
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, texture_);
+}
+
+std::uint32_t LabelFont::nextCodepoint(std::string_view text, std::size_t& index) noexcept {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    std::size_t length = 1;
+    if (lead >= 0xF0U) {
+        length = 4;
+    } else if (lead >= 0xE0U) {
+        length = 3;
+    } else if (lead >= 0xC0U) {
+        length = 2;
+    }
+    if (length == 1) {
+        ++index;
+        return lead;
+    }
+    if (index + length > text.size()) {
+        index = text.size();
+        return '?';
+    }
+    std::uint32_t codepoint = length == 2 ? (lead & 0x1FU) : (length == 3 ? (lead & 0x0FU) : (lead & 0x07U));
+    for (std::size_t offset = 1; offset < length; ++offset) {
+        const auto continuation = static_cast<unsigned char>(text[index + offset]);
+        if ((continuation & 0xC0U) != 0x80U) {
+            // Malformed: consume what we read (>= 1 byte, so callers always
+            // make progress) and substitute '?'.
+            index += offset;
+            return '?';
+        }
+        codepoint = (codepoint << 6) | (continuation & 0x3FU);
+    }
+    index += length;
+    return codepoint;
+}
+
+const LabelFont::Glyph& LabelFont::glyphFor(std::uint32_t codepoint) const noexcept {
+    if (codepoint < 32U || codepoint > 126U) {
+        codepoint = '?';
+    }
+    return glyphs_[codepoint - 32U];
+}
+
+float LabelFont::measure(std::string_view utf8) const {
+    float width = 0.0F;
+    std::size_t index = 0;
+    while (index < utf8.size()) {
+        const std::uint32_t codepoint = nextCodepoint(utf8, index);
+        if (codepoint < 32U) {
+            continue;
+        }
+        width += glyphFor(codepoint).advance;
+    }
+    return width;
+}
+
+void LabelFont::draw(float x, float y, std::string_view utf8) const {
+    if (texture_ == 0) {
+        return;
+    }
+    const float height = cellHeight_;
+    glBegin(GL_QUADS);
+    std::size_t index = 0;
+    while (index < utf8.size()) {
+        const std::uint32_t codepoint = nextCodepoint(utf8, index);
+        if (codepoint < 32U) {
+            continue;
+        }
+        const Glyph& glyph = glyphFor(codepoint);
+        glTexCoord2f(glyph.u0, glyph.v0);
+        glVertex2f(x, y);
+        glTexCoord2f(glyph.u1, glyph.v0);
+        glVertex2f(x + glyph.advance, y);
+        glTexCoord2f(glyph.u1, glyph.v1);
+        glVertex2f(x + glyph.advance, y + height);
+        glTexCoord2f(glyph.u0, glyph.v1);
+        glVertex2f(x, y + height);
+        x += glyph.advance;
+    }
+    glEnd();
+}
+
+LabelFont labelFont; // one viewport child per app; rebuilt with the GL context
 
 } // namespace
 
@@ -406,7 +672,7 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 const float height = static_cast<float>(rect.bottom - rect.top);
                 const auto railHit = scene_.pickRailPoint(
                     camera_, static_cast<float>(GET_X_LPARAM(lParam)),
-                    static_cast<float>(GET_Y_LPARAM(lParam)), width, height);
+                    static_cast<float>(GET_Y_LPARAM(lParam)), width, height, pickDistance());
                 if (railHit.has_value()) {
                     if (onSelectRail_) {
                         onSelectRail_(*railHit);
@@ -422,6 +688,19 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                     onSelect_(picked);
                 }
             }
+        }
+        return 0;
+    case WM_MBUTTONDOWN:
+        SetFocus(window_);
+        SetCapture(window_);
+        draggingMiddle_ = true;
+        lastX_ = GET_X_LPARAM(lParam);
+        lastY_ = GET_Y_LPARAM(lParam);
+        return 0;
+    case WM_MBUTTONUP:
+        if (draggingMiddle_) {
+            ReleaseCapture();
+            draggingMiddle_ = false;
         }
         return 0;
     case WM_RBUTTONDOWN:
@@ -480,9 +759,14 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
             camera_.pan(static_cast<float>(dx), static_cast<float>(dy));
             invalidate();
         } else if (draggingRight_ && (wParam & MK_RBUTTON) != 0) {
-            camera_.orbit(static_cast<float>(dx) * 0.008F, static_cast<float>(dy) * 0.008F);
+            const float invert = orbitInverted_ ? -1.0F : 1.0F;
+            camera_.orbit(static_cast<float>(dx) * 0.008F * invert,
+                          static_cast<float>(dy) * 0.008F * invert);
             invalidate();
-        } else if (!draggingLeft_ && !draggingRight_) {
+        } else if (draggingMiddle_ && (wParam & MK_MBUTTON) != 0) {
+            camera_.pan(static_cast<float>(dx), static_cast<float>(dy));
+            invalidate();
+        } else if (!draggingLeft_ && !draggingRight_ && !draggingMiddle_) {
             const auto hovered = pickAt(x, y);
             if (hovered != hover_) {
                 hover_ = hovered;
@@ -512,7 +796,9 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
             wheelAccumulator_ += WHEEL_DELTA;
         }
         if (notches != 0) {
-            camera_.dolly(static_cast<float>(notches));
+            // Shift = fast zoom, Java's fast-scroll modifier (x3).
+            const int scaled = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ? notches * 3 : notches;
+            camera_.dolly(static_cast<float>(scaled));
             invalidate();
         }
         return 0;
@@ -520,6 +806,10 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
     case WM_KEYDOWN:
         if (wParam == VK_SPACE) {
             frameSelection();
+            return 0;
+        }
+        if (wParam == VK_HOME) {
+            frameAll();
             return 0;
         }
         break;
@@ -578,6 +868,7 @@ void ViewportWindow::shutdownGL() noexcept {
             }
         }
         modelLists_.clear();
+        labelFont.destroy(); // atlas texture belongs to this context too
         wglMakeCurrent(nullptr, nullptr);
         wglDeleteContext(glContext_);
         glContext_ = nullptr;
@@ -594,6 +885,7 @@ void ViewportWindow::shutdownGL() noexcept {
 void ViewportWindow::drawFrame() {
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
+        pollFlyMovement(); // WASD/arrows while this child has keyboard focus
         ensureMeshes(meshesFilled_, meshes_);
         applyCameraToGL(width_, height_);
         drawGrid();
@@ -635,9 +927,10 @@ void ViewportWindow::drawFrame() {
             drawGizmo();
             glEnable(GL_DEPTH_TEST);
         }
+        // Legend + name labels INSIDE the frame: one swap = one atomic image.
+        drawLabels();
         SwapBuffers(device_);
         wglMakeCurrent(nullptr, nullptr);
-        drawOverlay(device_);
     }
     // A finished frame -- whichever path drew it -- leaves nothing outstanding.
     dirty_ = false;
@@ -646,7 +939,14 @@ void ViewportWindow::drawFrame() {
 void ViewportWindow::paint() {
     PAINTSTRUCT paintInfo{};
     BeginPaint(window_, &paintInfo);
-    drawFrame();
+    // invalidate() always sets dirty_ before queueing this paint, so a clean
+    // surface (a stray expose) validates WITHOUT a second swap. The editor's
+    // loop already repaints the visible child after the shell's Present; the
+    // old always-draw here produced two swaps per frame with GDI labels
+    // between them -- half of the flicker.
+    if (dirty_) {
+        drawFrame();
+    }
     EndPaint(window_, &paintInfo);
 }
 
@@ -695,8 +995,11 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     glLoadIdentity();
     const float half = ViewportCamera::kFieldOfView * 0.5F;
     const float tanHalf = static_cast<float>(std::tan(static_cast<double>(half)));
-    const float nearPlane = ViewportCamera::kNearPlane;
-    const float farPlane = ViewportCamera::kFarPlane;
+    // Dynamic clip planes: near tracks the orbit distance, far tracks distance
+    // + scene radius, so 24-bit depth stays precise at every zoom instead of
+    // z-fighting rails/overlays from a fixed 1..60000 frustum at galaxy range.
+    const float nearPlane = camera_.nearPlane();
+    const float farPlane = camera_.farPlane(scene_.frameDistance());
     const float top = tanHalf * nearPlane;
     glFrustum(-top * aspect, top * aspect, -top, top, nearPlane, farPlane);
     glMatrixMode(GL_MODELVIEW);
@@ -786,16 +1089,6 @@ void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hover
     glPopMatrix();
 }
 
-std::wstring toWide(std::string_view text) {
-    if (text.empty()) {
-        return {};
-    }
-    const auto size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-    std::wstring result(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), size);
-    return result;
-}
-
 void ViewportWindow::setRailHighlight(std::optional<RailPointRef> highlight) noexcept {
     railHighlight_ = highlight;
     invalidate();
@@ -877,60 +1170,81 @@ void ViewportWindow::drawOverlays() {
     glLineWidth(1.0F);
 }
 
-void ViewportWindow::drawOverlay(HDC device) {
-    // Legend + labels are GDI drawn on the visible (front) buffer after the
-    // swap, so they never flicker with the GL scene. Colours come from the
-    // palette so the overlay matches the theme the rest of the workspace uses.
+void ViewportWindow::drawLabels() {
+    // Legend + labels drawn INSIDE the frame as GL quads from the baked font
+    // atlas (see LabelFont): one swap = one atomic image, so nothing here can
+    // race the desktop compositor the way front-buffer TextOutW did. Colours
+    // come from the palette so the overlay matches the workspace theme.
+    if (!labelFont.build()) {
+        return;
+    }
     const app::Palette& palette = app::themePalette(overlayDark_);
-    const auto toColorref = [](const app::Rgba& color) {
-        return RGB(static_cast<int>(color.r * 255.0F + 0.5F),
-                   static_cast<int>(color.g * 255.0F + 0.5F),
-                   static_cast<int>(color.b * 255.0F + 0.5F));
+    const auto translucent = [](const app::Rgba& color, float alpha) {
+        return app::Rgba{color.r, color.g, color.b, alpha};
     };
-    const COLORREF panelColor = toColorref(palette.panelBg);
-    const COLORREF textColor = toColorref(palette.text);
-    const COLORREF accentColor = toColorref(palette.unsaved);
 
-    const HFONT oldFont = static_cast<HFONT>(SelectObject(device, GetStockObject(DEFAULT_GUI_FONT)));
-    SetBkMode(device, TRANSPARENT);
+    // Ortho pass in screen space (y down), over the frame we are about to swap.
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, static_cast<double>(width_), static_cast<double>(height_), 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // Per-category counts: the map key for the color system.
     constexpr std::size_t kCategoryTotal = 10;
     std::array<int, kCategoryTotal> counts{};
+    std::array<std::string, kCategoryTotal> lines{};
+    float textWidth = 0.0F;
+    int legendLines = 0;
     for (const auto& box : scene_.boxes()) {
         const auto index = static_cast<std::size_t>(box.category);
         if (index < counts.size()) {
             counts[index]++;
         }
     }
-
-    int textWidth = 0;
-    int legendLines = 0;
     for (std::size_t index = 0; index < counts.size(); ++index) {
         if (counts[index] == 0) {
             continue;
         }
         legendLines++;
-        wchar_t line[128];
         const auto& style = categoryStyle(static_cast<ObjectCategory>(index));
-        _snwprintf_s(line, _TRUNCATE, L"%hs \u00D7 %d", style.label, counts[index]);
-        SIZE extent{};
-        GetTextExtentPoint32W(device, line, static_cast<int>(wcsnlen_s(line, 128)), &extent);
-        textWidth = std::max(textWidth, static_cast<int>(extent.cx));
+        char line[96];
+        std::snprintf(line, sizeof(line), "%s × %d", style.label, counts[index]);
+        lines[index] = line;
+        textWidth = std::max(textWidth, labelFont.measure(lines[index]));
     }
 
-    constexpr int chipSize = 10;
-    constexpr int lineStep = 18;
-    constexpr int padding = 8;
-    constexpr int legendX = 10;
-    int legendY = 10;
+    // Rect + text helpers: solid panels/chips, textured glyph runs.
+    const auto rect = [](float x, float y, float w, float h, const app::Rgba& color) {
+        glDisable(GL_TEXTURE_2D);
+        glColor4f(color.r, color.g, color.b, color.a);
+        glBegin(GL_QUADS);
+        glVertex2f(x, y);
+        glVertex2f(x + w, y);
+        glVertex2f(x + w, y + h);
+        glVertex2f(x, y + h);
+        glEnd();
+    };
+    const auto text = [](float x, float y, std::string_view content, const app::Rgba& color) {
+        labelFont.bind();
+        glColor4f(color.r, color.g, color.b, color.a);
+        labelFont.draw(x, y, content);
+        glDisable(GL_TEXTURE_2D);
+    };
+
+    constexpr float chipSize = 10.0F;
+    constexpr float lineStep = 18.0F;
+    constexpr float padding = 8.0F;
+    constexpr float legendX = 10.0F;
+    float legendY = 10.0F;
     if (legendLines > 0) {
-        const int legendWidth = textWidth + chipSize + 6 + padding * 2;
-        const int legendHeight = legendLines * lineStep + padding * 2;
-        RECT background{legendX, legendY, legendX + legendWidth, legendY + legendHeight};
-        HBRUSH backBrush = CreateSolidBrush(panelColor);
-        FillRect(device, &background, backBrush);
-        DeleteObject(backBrush);
+        const float legendWidth = textWidth + chipSize + 6.0F + padding * 2.0F;
+        const float legendHeight = static_cast<float>(legendLines) * lineStep + padding * 2.0F;
+        rect(legendX, legendY, legendWidth, legendHeight, translucent(palette.panelBg, 0.92F));
 
         int line = 0;
         for (std::size_t index = 0; index < counts.size(); ++index) {
@@ -938,46 +1252,36 @@ void ViewportWindow::drawOverlay(HDC device) {
                 continue;
             }
             const auto& style = categoryStyle(static_cast<ObjectCategory>(index));
-            const int y = legendY + padding + line * lineStep;
-            RECT chip{legendX + padding, y + 3, legendX + padding + chipSize, y + 3 + chipSize};
-            HBRUSH chipBrush = CreateSolidBrush(
-                RGB(static_cast<int>(style.color[0] * 255.0F), static_cast<int>(style.color[1] * 255.0F),
-                    static_cast<int>(style.color[2] * 255.0F)));
-            FillRect(device, &chip, chipBrush);
-            DeleteObject(chipBrush);
-            wchar_t text[128];
-            _snwprintf_s(text, _TRUNCATE, L"%hs \u00D7 %d", style.label, counts[index]);
-            SetTextColor(device, textColor);
-            TextOutW(device, legendX + padding + chipSize + 6, y, text, static_cast<int>(wcsnlen_s(text, 128)));
+            const float y = legendY + padding + static_cast<float>(line) * lineStep;
+            rect(legendX + padding, y + 3.0F, chipSize, chipSize,
+                 app::Rgba{style.color[0], style.color[1], style.color[2], 1.0F});
+            text(legendX + padding + chipSize + 6.0F, y, lines[index], palette.text);
             line++;
         }
-        legendY += legendHeight + 6;
+        legendY += legendHeight + 6.0F;
     }
 
     // Selected object line directly under the legend.
     if (selected_.has_value() && *selected_ < scene_.boxes().size()) {
         const auto& box = scene_.boxes()[*selected_];
         const auto& style = categoryStyle(box.category);
-        const std::wstring text = toWide(box.name + " \u2014 " + style.label + " (" + box.kind + ")");
-        if (!text.empty()) {
-            SIZE extent{};
-            GetTextExtentPoint32W(device, text.c_str(), static_cast<int>(text.size()), &extent);
-            RECT background{legendX, legendY, legendX + extent.cx + padding * 2, legendY + 22};
-            HBRUSH backBrush = CreateSolidBrush(panelColor);
-            FillRect(device, &background, backBrush);
-            DeleteObject(backBrush);
-            SetTextColor(device, accentColor);
-            TextOutW(device, legendX + padding, legendY + 2, text.c_str(), static_cast<int>(text.size()));
-        }
+        const std::string line = box.name + " — " + style.label + " (" + box.kind + ")";
+        const float lineWidth = labelFont.measure(line);
+        rect(legendX, legendY, lineWidth + padding * 2.0F, 22.0F, translucent(palette.panelBg, 0.92F));
+        text(legendX + padding, legendY + 2.0F, line, palette.unsaved);
     }
 
     // Object name labels. Hovered/selected are always labeled; the View menu
     // toggle labels every object for surveying the scene.
     if (showLabels_ || selected_.has_value() || hover_.has_value()) {
+        const app::Rgba shadow{0.03F, 0.04F, 0.055F, 0.85F};
         for (const auto& box : scene_.boxes()) {
             const bool isSelected = selected_.has_value() && *selected_ == box.objectIndex;
             const bool isHovered = hover_.has_value() && *hover_ == box.objectIndex;
             if (!showLabels_ && !isSelected && !isHovered) {
+                continue;
+            }
+            if (box.name.empty()) {
                 continue;
             }
             const math::Vec3f labelPoint{box.center.x, box.center.y + box.halfExtents.y + 6.0F, box.center.z};
@@ -986,54 +1290,114 @@ void ViewportWindow::drawOverlay(HDC device) {
             if (!camera_.worldToScreen(labelPoint, static_cast<float>(width_), static_cast<float>(height_), x, y)) {
                 continue;
             }
-            const std::wstring text = toWide(box.name);
-            if (text.empty()) {
-                continue;
-            }
-            SIZE extent{};
-            GetTextExtentPoint32W(device, text.c_str(), static_cast<int>(text.size()), &extent);
-            const int left = static_cast<int>(x) - extent.cx / 2;
+            const float left = x - labelFont.measure(box.name) * 0.5F;
             // Drop shadow keeps labels readable over bright geometry.
-            SetTextColor(device, overlayDark_ ? RGB(8, 10, 14) : RGB(255, 255, 255));
-            TextOutW(device, left + 1, static_cast<int>(y) + 1, text.c_str(), static_cast<int>(text.size()));
-            SetTextColor(device, isSelected ? accentColor : textColor);
-            TextOutW(device, left, static_cast<int>(y), text.c_str(), static_cast<int>(text.size()));
+            text(left + 1.0F, y + 1.0F, box.name, shadow);
+            const app::Rgba ink = isSelected    ? palette.unsaved
+                                  : isHovered   ? app::Rgba{0.55F, 0.80F, 1.00F, 1.0F}
+                                                : palette.text;
+            text(left, y, box.name, ink);
         }
     }
-    SelectObject(device, oldFont);
+
+    // One atomic frame: undo what the pass touched, then hand over to the swap.
+    glDisable(GL_BLEND);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void ViewportWindow::pollFlyMovement() {
+    const auto now = std::chrono::steady_clock::now();
+    // Focus gate: only the viewport's own keyboard focus flies the camera, so
+    // typing in a panel can never move it. GetAsyncKeyState reads held state
+    // directly, so auto-repeat and focus handoff both behave. The tick resets
+    // while unfocused/idle, so the first key after a pause never jumps.
+    if (window_ == nullptr || GetFocus() != window_) {
+        lastFlyTick_ = now;
+        return;
+    }
+    const auto held = [](int virtualKey) { return (GetAsyncKeyState(virtualKey) & 0x8000) != 0; };
+    const bool forwardKey = held('W') || held(VK_UP);
+    const bool backKey = held('S') || held(VK_DOWN);
+    const bool leftKey = held('A') || held(VK_LEFT);
+    const bool rightKey = held('D') || held(VK_RIGHT);
+    const bool upKey = held('E') || held(VK_PRIOR);    // PgUp, Java keyMask parity
+    const bool downKey = held('Q') || held(VK_NEXT);   // PgDn, Java keyMask parity
+    if (!forwardKey && !backKey && !leftKey && !rightKey && !upKey && !downKey) {
+        lastFlyTick_ = now;
+        return;
+    }
+    float dt = std::chrono::duration<float>(now - lastFlyTick_).count();
+    lastFlyTick_ = now;
+    dt = std::clamp(dt, 0.0F, 0.1F); // a stall must not teleport the camera
+    // Speed scales with orbit distance (like pan) so the same keys feel right
+    // in a 50-unit room and a 50000-unit galaxy; Shift x3 / Ctrl x0.25 are
+    // Java's fast/slow modifiers.
+    float speed = camera_.distance * 1.5F * dt;
+    if (held(VK_SHIFT)) {
+        speed *= 3.0F;
+    }
+    if (held(VK_CONTROL)) {
+        speed *= 0.25F;
+    }
+    const float rightAmount = (rightKey ? speed : 0.0F) - (leftKey ? speed : 0.0F);
+    const float upAmount = (upKey ? speed : 0.0F) - (downKey ? speed : 0.0F);
+    const float forwardAmount = (forwardKey ? speed : 0.0F) - (backKey ? speed : 0.0F);
+    camera_.fly(rightAmount, upAmount, forwardAmount);
+    invalidate();
 }
 
 void ViewportWindow::drawGrid() {
-    // The grid follows the camera: the step scales with the orbit distance and
-    // the patch stays centred (and snapped) on the orbit target, so panning
-    // across a galaxy never scrolls the grid out of view.
-    const float step = std::clamp(camera_.distance / 20.0F, 25.0F, 2000.0F);
-    constexpr int halfLines = 20;
-    const float extent = step * static_cast<float>(halfLines);
+    // The patch covers the whole visible ground (see gridSpec: extent >= 2x
+    // the orbit distance, step snapped to 1/2/5x10^n) and the outer rings fade
+    // to nothing, so the grid dissolves instead of ending in the hard cut
+    // ("the grid clips") the old fixed patch drew mid-screen.
+    const GridSpec spec = gridSpec(camera_.distance);
+    constexpr int halfLines = ViewportCamera::kGridHalfLines;
+    const float step = spec.step;
+    const float extent = spec.extent;
     const float centerX = std::floor(camera_.target.x / step + 0.5F) * step;
     const float centerZ = std::floor(camera_.target.z / step + 0.5F) * step;
+    const float fadeStart = static_cast<float>(halfLines) * 0.55F;
+    const float fadeSpan = static_cast<float>(halfLines) - fadeStart;
+    const auto ringAlpha = [fadeStart, fadeSpan](int index) {
+        const float magnitude = static_cast<float>(index < 0 ? -index : index);
+        if (magnitude <= fadeStart) {
+            return 1.0F;
+        }
+        return std::max(0.0F, 1.0F - (magnitude - fadeStart) / fadeSpan);
+    };
 
     glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBegin(GL_LINES);
-    glColor3f(0.22F, 0.26F, 0.33F);
     for (int i = -halfLines; i <= halfLines; ++i) {
+        const float alpha = ringAlpha(i);
+        if (alpha <= 0.02F) {
+            continue;
+        }
         const float offset = static_cast<float>(i) * step;
+        glColor4f(0.22F, 0.26F, 0.33F, alpha);
         glVertex3f(centerX + offset, 0.0F, centerZ - extent);
         glVertex3f(centerX + offset, 0.0F, centerZ + extent);
         glVertex3f(centerX - extent, 0.0F, centerZ + offset);
         glVertex3f(centerX + extent, 0.0F, centerZ + offset);
     }
-    // World axes, drawn across the visible patch so they stay readable.
-    glColor3f(0.9F, 0.25F, 0.25F);
+    // World axes across the patch. The red/green/blue rays run through the
+    // world origin; they stay fully opaque (their finite end is a normal axis
+    // end, not an artifact).
+    glColor4f(0.9F, 0.25F, 0.25F, 1.0F);
     glVertex3f(centerX - extent, 0.0F, 0.0F);
     glVertex3f(centerX + extent, 0.0F, 0.0F);
-    glColor3f(0.3F, 0.9F, 0.3F);
+    glColor4f(0.3F, 0.9F, 0.3F, 1.0F);
     glVertex3f(0.0F, -extent, 0.0F);
     glVertex3f(0.0F, extent, 0.0F);
-    glColor3f(0.3F, 0.5F, 1.0F);
+    glColor4f(0.3F, 0.5F, 1.0F, 1.0F);
     glVertex3f(0.0F, 0.0F, centerZ - extent);
     glVertex3f(0.0F, 0.0F, centerZ + extent);
     glEnd();
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -1042,7 +1406,14 @@ std::optional<std::size_t> ViewportWindow::pickAt(int x, int y) {
     GetClientRect(window_, &rect);
     const float width = static_cast<float>(rect.right - rect.left);
     const float height = static_cast<float>(rect.bottom - rect.top);
-    return scene_.pick(camera_, static_cast<float>(x), static_cast<float>(y), width, height);
+    return scene_.pick(camera_, static_cast<float>(x), static_cast<float>(y), width, height, pickDistance());
+}
+
+float ViewportWindow::pickDistance() const noexcept {
+    // Reach scales with the scene, so a galaxy framed past the old hard 20000
+    // unit limit stays clickable; the floor keeps open-space misclicks from
+    // selecting across an empty map.
+    return std::max(scene_.frameDistance() * 2.0F, 20000.0F);
 }
 
 // The gizmo sits on the centroid of the selection, so a multi-selection pivots

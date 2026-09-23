@@ -67,8 +67,10 @@ math::Matrix4 ViewportCamera::projectionMatrix(float aspect) const noexcept {
     const float safeAspect = aspect > 0.000001F ? aspect : 1.0F;
     const float half = kFieldOfView * 0.5F;
     const float f = 1.0F / std::tan(half);
-    const float nearPlane = kNearPlane;
-    const float farPlane = kFarPlane;
+    // Track the same dynamic planes the GL renderer uses, so anything that
+    // projects through this matrix agrees with what is on screen.
+    const float nearPlane = this->nearPlane();
+    const float farPlane = this->farPlane(10000.0F);
     math::Matrix4 projection;
     projection.values.fill(0.0F);
     projection.values[0] = f / safeAspect;
@@ -121,12 +123,40 @@ void ViewportCamera::dolly(float wheelDelta) noexcept {
     // wheelDelta is measured in wheel notches (1.0 per notch, negative when
     // scrolling back), so a fast flick zooms proportionally instead of one step.
     const float notches = std::clamp(wheelDelta, -4.0F, 4.0F);
-    distance = std::clamp(distance * std::pow(0.9F, notches), 5.0F, 20000.0F);
+    distance = std::clamp(distance * std::pow(0.9F, notches), kMinDistance, kMaxDistance);
 }
 
 void ViewportCamera::frameTarget(const math::Vec3f& point, float framedDistance) noexcept {
     target = point;
-    distance = std::clamp(framedDistance, 5.0F, 20000.0F);
+    distance = std::clamp(framedDistance, kMinDistance, kMaxDistance);
+}
+
+void ViewportCamera::fly(float rightAmount, float upAmount, float forwardAmount) noexcept {
+    // Slide the orbit target along the camera basis; the eye follows rigidly
+    // because it is derived from target + orbit offset. This keeps orbiting
+    // and flying consistent -- no mode switch, no gimbal surprises.
+    const math::Vec3f sideways = right();
+    const math::Vec3f upwards = up();
+    const math::Vec3f forwards = forward();
+    target.x += sideways.x * rightAmount + upwards.x * upAmount + forwards.x * forwardAmount;
+    target.y += sideways.y * rightAmount + upwards.y * upAmount + forwards.y * forwardAmount;
+    target.z += sideways.z * rightAmount + upwards.z * upAmount + forwards.z * forwardAmount;
+}
+
+float ViewportCamera::nearPlane() const noexcept {
+    // 1% of the orbit distance, clamped into a sane band: close zooms keep a
+    // 1-unit near so nothing clips through the camera, far zooms lift it so the
+    // near/far ratio (and therefore depth precision) stays bounded.
+    return std::clamp(distance * 0.01F, kNearPlane, kMaxDynamicNear);
+}
+
+float ViewportCamera::farPlane(float sceneRadius) const noexcept {
+    // Cover the orbit radius plus the scene radius several times over, then
+    // clamp: far/near stays bounded at every zoom, so 24-bit depth never
+    // z-fights at editor-relevant distances.
+    float far = distance * 4.0F + std::max(sceneRadius, 0.0F) * 4.0F + 10000.0F;
+    far = std::min(far, kMaxDynamicFar);
+    return std::max(far, nearPlane() * 4.0F);
 }
 
 bool ViewportCamera::worldToScreen(const math::Vec3f& point, float width, float height, float& outX,
@@ -136,7 +166,9 @@ bool ViewportCamera::worldToScreen(const math::Vec3f& point, float width, float 
     }
     const math::Matrix4 view = viewMatrix();
     const math::Vec3f viewPoint = view.transformPoint(point);
-    if (viewPoint.z >= -kNearPlane) {
+    // Cull against the *dynamic* near plane the renderer actually clips at,
+    // so a label can never float over an object that was near-clipped away.
+    if (viewPoint.z >= -nearPlane()) {
         return false;
     }
     const float aspect = width / height;
@@ -145,6 +177,22 @@ bool ViewportCamera::worldToScreen(const math::Vec3f& point, float width, float 
     outX = width * 0.5F * (1.0F + (viewPoint.x * f / aspect) / -viewPoint.z);
     outY = height * 0.5F * (1.0F - (viewPoint.y * f) / -viewPoint.z);
     return true;
+}
+
+GridSpec gridSpec(float distance) noexcept {
+    // The visible ground spans ~1.4x the orbit distance (frustum half-angle
+    // 35deg); 2x keeps wide aspects covered with margin. Split into
+    // kGridHalfLines*2 intervals, rounding the step UP to a 1/2/5x10^n value
+    // so the patch is never smaller than the view (the old fixed patch always
+    // ended in a hard cut mid-screen). The renderer fades the outer rings, so
+    // "covering" only has to reach -- no visible edge.
+    const float visible = std::max(distance, 0.0F) * 2.0F;
+    const float rawStep = std::max(visible, 1.0F) /
+                          static_cast<float>(ViewportCamera::kGridHalfLines * 2);
+    const float pow10 = std::pow(10.0F, std::floor(std::log10(rawStep)));
+    const float norm = rawStep / pow10;
+    const float step = (norm <= 1.0F ? 1.0F : norm <= 2.0F ? 2.0F : norm <= 5.0F ? 5.0F : 10.0F) * pow10;
+    return GridSpec{step, step * static_cast<float>(ViewportCamera::kGridHalfLines)};
 }
 
 } // namespace whitehole::render

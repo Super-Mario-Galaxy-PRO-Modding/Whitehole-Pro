@@ -48,7 +48,7 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - **Real game models** — BMD/BDL files render with their true shape, per-material diffuse colors, and category-colored placeholders when models aren't available.
 - **Two-pass rendering** — opaque geometry first (depth on), then translucent materials back-to-front (glass, water, effects).
 - **3D gizmo** — move / rotate / scale with axis-snapping; double-click fields for exact values.
-- **Camera controls** — left-drag pan, right-drag orbit, scroll dolly, `F` frame, `Space` jump-to-object.
+- **Camera controls** — left-drag pan, right-drag orbit, middle-drag pan, scroll dolly (Shift = fast), **WASD fly** (Shift fast / Ctrl slow, E/Q vertical), `F` frame, `Space` jump-to, `Home` frame-all.
 - **Object labels** — names float above geometry when toggled.
 
 ### 🛤 Rails, drawn properly
@@ -175,8 +175,9 @@ ctest --test-dir build --output-on-failure
 | **Left-click** | Select object / rail point |
 | **Left-drag** | Pan the camera |
 | **Right-drag** | Orbit the camera |
+| **Middle-drag** | Pan the camera (alternate) |
 | **Scroll wheel** | Zoom in / out |
-| **Middle-drag** (if bound) | Extra camera movement |
+| **Shift + wheel** | Zoom faster (×3) |
 | Drag the X/Y/Z fields in *Properties* (or double-click to type) | Move / rotate / scale the selection |
 | Double-click an object in the list | Fly the 3D camera to it |
 
@@ -194,6 +195,10 @@ ctest --test-dir build --output-on-failure
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd> | Copy / paste the selected transform (*Edit* menu also offers position-only, rotation-only, scale-only) |
 | <kbd>F</kbd> | Frame the selected object |
 | <kbd>Space</kbd> | Jump the camera to the selected object |
+| <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows | Fly the camera (click the viewport first; <kbd>Shift</kbd> fast, <kbd>Ctrl</kbd> slow) |
+| <kbd>E</kbd> / <kbd>Q</kbd> (or <kbd>PgUp</kbd>/<kbd>PgDn</kbd>) | Fly up / down |
+| <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Gizmo mode: move / rotate / scale |
+| <kbd>Home</kbd> | Frame the whole zone |
 
 > All shortcuts are rebindable in **Settings → Keyboard Shortcuts…**
 

@@ -58,7 +58,6 @@ public:
 
     // Editor controls
     bool reverseRotation{false};
-    bool wasdMovement{false};
 
     // Layout: when false (default) docked panels can be rearranged inside the
     // workspace but never torn off into floating OS windows, which is what made

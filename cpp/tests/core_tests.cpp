@@ -287,6 +287,56 @@ void testViewportCamera() {
     camera.frameTarget({1.0F, 2.0F, 3.0F}, 250.0F);
     expect(std::abs(camera.target.x - 1.0F) < 0.001F && std::abs(camera.distance - 250.0F) < 0.001F,
            "viewport camera framing failed");
+
+    // Zoom and framing reach galaxy-spanning distances: the old hard 20000
+    // clamp cut big maps off mid-view and made Frame All impossible. dolly()
+    // clamps one gesture to +/-4 notches, so a full zoom-out is several flicks.
+    camera.distance = 1000.0F;
+    for (int flick = 0; flick < 12; ++flick) {
+        camera.dolly(-4.0F);
+    }
+    expect(camera.distance > 20000.0F, "dolly-out is stuck below the old clamp");
+    expect(camera.distance <= 150001.0F, "dolly-out exceeded the new ceiling");
+    camera.frameTarget({}, 250000.0F);
+    expect(camera.distance > 20000.0F, "frameTarget clamps below galaxy size");
+    expect(camera.distance <= 150001.0F, "frameTarget exceeded the new ceiling");
+
+    // Dynamic clip planes stay inside their band and ordered at every zoom --
+    // this is what killed the far-range z-fighting on rails and overlays.
+    for (const float zoom : {5.0F, 800.0F, 40000.0F, 150000.0F}) {
+        camera.distance = zoom;
+        const float near = camera.nearPlane();
+        const float far = camera.farPlane(50000.0F);
+        expect(near >= 1.0F && near <= 100.0F, "near plane left its band");
+        expect(far > near, "far plane must sit beyond near");
+        expect(far <= 500001.0F, "far plane exceeded its cap");
+    }
+
+    // Fly slides the orbit target along the camera basis. With yaw/pitch at 0,
+    // target (100,0,0) and distance 500 the eye sits at +X, so forward is -X
+    // and right is -Z.
+    camera.target = {100.0F, 0.0F, 0.0F};
+    camera.yawRadians = 0.0F;
+    camera.pitchRadians = 0.0F;
+    camera.distance = 500.0F;
+    camera.fly(0.0F, 0.0F, 100.0F);
+    expect(std::abs(camera.target.x - 0.0F) < 0.01F, "fly forward moved the wrong way");
+    camera.fly(100.0F, 0.0F, 0.0F);
+    expect(std::abs(camera.target.z - (-100.0F)) < 0.01F, "fly right moved the wrong way");
+    camera.fly(0.0F, 50.0F, 0.0F);
+    expect(std::abs(camera.target.y - 50.0F) < 0.01F, "fly up moved the wrong way");
+
+    // The grid covers the visible ground (half-extent >= orbit distance, so
+    // the full patch spans >= 2x) and snaps to clean 1/2/5 decade steps.
+    for (const float zoom : {5.0F, 40.0F, 800.0F, 30000.0F}) {
+        const auto grid = whitehole::render::gridSpec(zoom);
+        expect(grid.extent >= zoom * 0.999F, "grid does not cover the visible ground");
+        const float decade = std::pow(10.0F, std::floor(std::log10(grid.step)));
+        const float mantissa = grid.step / decade;
+        expect(std::abs(mantissa - 1.0F) < 0.001F || std::abs(mantissa - 2.0F) < 0.001F ||
+                   std::abs(mantissa - 5.0F) < 0.001F,
+               "grid step is not a 1/2/5 decade value");
+    }
 }
 
 void testGizmoMath() {

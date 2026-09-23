@@ -159,6 +159,10 @@ struct EditorState {
     bool viewportCreateFailed{false};
     bool syncingSelection{false};
     bool showLabels{false};
+    // One-shot so a fully-failing workspace logs its first probe reason once
+    // per bind instead of once per scene rebuild (rebuilds happen on every
+    // edit and undo step).
+    bool modelFailureLogged{false};
 
     // Layout + visibility for the hosted WGL child window. The child is a real
     // HWND, so it always paints above the ImGui framebuffer: `placeViewportChild`
@@ -596,6 +600,18 @@ void refreshViewport(EditorState& state, bool frame) {
             state.modelLibrary.resetCounters();
             state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary, &state.stagePaths,
                                         overlays);
+            // Diagnose a workspace where NOTHING loaded -- once per bind. The
+            // probe names the exact failing stage; the status hint above points
+            // at the full `models check` CLI.
+            if (!state.stage->objects().empty() && state.modelLibrary.loadedCount() == 0 &&
+                state.modelLibrary.missingCount() > 0 && !state.modelFailureLogged) {
+                state.modelFailureLogged = true;
+                const auto probe = state.modelLibrary.probe(state.stage->objects().front().name);
+                pushLog(state, "No models loaded: " +
+                                   (probe.error.empty() ? std::string("unknown failure") : probe.error) +
+                                   " (object \"" + probe.objectName + "\"). Run: " +
+                                   "whitehole-pro-console models check <game directory>");
+            }
         } else {
             state.viewportScene.rebuild(state.stage->objects(), nullptr, &state.stagePaths, overlays);
         }
@@ -1225,7 +1241,7 @@ void openMapImpl(EditorState& state, const std::filesystem::path& path) {
                          std::to_string(state.stage->objects().size()) + " objects.");
 }
 
-void openGameImpl(EditorState& state, const std::filesystem::path& path) {
+void openGameImpl(EditorState& state, const std::filesystem::path& path, bool quiet = false) {
     state.game.emplace(path);
     if (state.game->gameType() == 0) {
         state.game.reset();
@@ -1245,12 +1261,18 @@ void openGameImpl(EditorState& state, const std::filesystem::path& path) {
     state.selectedObject.reset();
     state.undoStack.clear(); // a new workspace means a new history
     state.savedUndoCursor = 0;
-    state.settings.lastGameDir = path.string();
-    state.settings.save();
+    state.modelFailureLogged = false; // re-log model failures for this workspace
+    if (!quiet) {
+        state.settings.lastGameDir = path.string();
+        state.settings.save();
+    }
     refreshViewport(state, false);
-    pushToast(state, "Opened SMG" + std::to_string(state.game->gameType()) +
-                         " workspace with " + std::to_string(state.galaxies.size()) +
-                         " galaxies.");
+    // quiet = the silent boot re-open: no toast, no settings rewrite.
+    if (!quiet) {
+        pushToast(state, "Opened SMG" + std::to_string(state.game->gameType()) +
+                             " workspace with " + std::to_string(state.galaxies.size()) +
+                             " galaxies.");
+    }
 }
 
 void selectGalaxy(EditorState& state, int index) {
@@ -2350,6 +2372,7 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
     });
     state.viewport.setShowLabels(state.showLabels);
     state.viewport.setOverlayTheme(state.settings.darkMode);
+    state.viewport.setOrbitInverted(state.settings.reverseRotation);
     refreshViewport(state, true); // paint real content on the very first frame
     return true;
 }
@@ -2398,7 +2421,34 @@ void placeViewportChild(EditorState& state) {
         refreshViewport(state, false);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Left-drag pan  ·  Right-drag orbit  ·  Wheel zoom  ·  Click select");
+    ImGui::TextDisabled("Left-drag pan  ·  Right-drag orbit  ·  Wheel zoom  ·  WASD fly  ·  Click select");
+    // Self-diagnosing model state: placeholders are BY DESIGN without a game
+    // workspace, but the old editor never said so -- authors just saw boxes and
+    // assumed the renderer was broken. Same when a workspace loads zero models.
+    if (!state.modelLibrary.bound()) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.72F, 0.30F, 1.0F));
+        ImGui::TextUnformatted("[placeholders]");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "No game workspace is open, so objects show placeholder shapes.\n"
+                "Open a game directory (File > Open Game Directory...) to render "
+                "real BMD models.\nYour last workspace reopens automatically on "
+                "the next launch.");
+        }
+    } else if (state.modelLibrary.loadedCount() == 0 && state.modelLibrary.missingCount() > 0) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.45F, 0.40F, 1.0F));
+        ImGui::TextUnformatted("[0 models loaded]");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "The workspace is open but every model failed to load.\n"
+                "The first reason is in the Log panel. To diagnose every object:\n"
+                "  whitehole-pro-console models check <game directory>");
+        }
+    }
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::GetContentRegionAvail();
@@ -3053,7 +3103,6 @@ void drawPreferencesDialog(EditorState& state) {
     changed |= ImGui::Checkbox("Paths", &state.settings.showPaths);
     ImGui::SeparatorText("Editor controls");
     changed |= ImGui::Checkbox("Invert camera motion", &state.settings.reverseRotation);
-    changed |= ImGui::Checkbox("WASD movement", &state.settings.wasdMovement);
     ImGui::SeparatorText("Layout");
     if (ImGui::Checkbox("Allow floating panels", &state.settings.allowFloatingPanels)) {
         changed = true;
@@ -3083,6 +3132,9 @@ void drawPreferencesDialog(EditorState& state) {
     ImGui::EndPopup();
     if (changed) {
         state.settings.save();
+        // The orbit direction is read live by the viewport, so push the new
+        // value over instead of waiting for a scene rebuild.
+        state.viewport.setOrbitInverted(state.settings.reverseRotation);
         // Overlay/label/quality toggles change what the viewport draws, so the
         // scene has to be rebuilt for them to show up without another edit.
         refreshViewport(state, false);
@@ -3178,7 +3230,7 @@ const std::vector<TutorialTopic>& tutorialTopics() {
          }},
         {"Use the 3D viewport", "viewport 3d camera orbit pan zoom frame select opengl",
          {
-             {"Left-drag pans, right-drag orbits, wheel zooms; click selects.", TutorialAction::None},
+             {"Left-drag pans, right-drag orbits, wheel zooms; click selects. WASD (or arrows) flies once the viewport has focus; Shift speeds up, Ctrl slows down.", TutorialAction::None},
              {"Frame All fits the zone; F (or double-click the list) frames the selection.",
               TutorialAction::FrameAll, "Frame the whole zone"},
              {"Labels toggles the floating object names in the 3D view.", TutorialAction::None},
@@ -3312,6 +3364,12 @@ void drawShortcutsDialog(EditorState& state) {
         {"Ctrl+C / Ctrl+V", "Copy / paste the selected object's transform"},
         {"F", "Frame the selected object"},
         {"Double-click", "Frame object in the 3D viewport"},
+        {"WASD / Arrows", "Fly the camera (Shift fast, Ctrl slow)"},
+        {"E / Q (PgUp / PgDn)", "Fly up / down"},
+        {"Mouse", "Left-drag pan, right-drag orbit, middle-drag pan"},
+        {"Wheel (Shift)", "Zoom (faster with Shift held)"},
+        {"1 / 2 / 3", "Gizmo mode: move / rotate / scale"},
+        {"Space / Home", "Frame selection / frame the whole zone"},
     };
     if (ImGui::BeginTable("##shortcuts", 2, ImGuiTableFlags_SizingFixedFit)) {
         for (const auto& row : rows) {
@@ -3505,6 +3563,21 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
 
     // --- Hosted 3D viewport (creates the OpenGL child window) ---
     initViewport(state, instance);
+
+    // Re-open the last game workspace quietly, so a restarted editor still
+    // renders real BMD models for ANY map you open (the bundled template
+    // included) instead of silently falling back to placeholder shapes. An
+    // unavailable or moved folder just leaves placeholders plus the viewport's
+    // "[placeholders]" hint, which tells the author exactly what to open.
+    if (!state.settings.lastGameDir.empty()) {
+        try {
+            openGameImpl(state, std::filesystem::path(state.settings.lastGameDir), /*quiet=*/true);
+        } catch (const std::exception& error) {
+            pushLog(state, std::string("Saved game directory unavailable: ") + error.what());
+            state.game.reset();
+            state.modelLibrary.bind(nullptr);
+        }
+    }
 
     // First launch: open the Tutorials beside the log so new users learn the
     // editor instead of staring at an empty workspace. A marker file remembers
@@ -3708,6 +3781,20 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) {
             state.showAddObject = true;
             state.addMatchesStale = true;
+        }
+        // Gizmo mode on the number row (1/2/3): the old W/E/R scheme in the
+        // header docs collided with the WASD fly keys, and neither existed as
+        // actual code until now.
+        if (!typing && !ctrlDown && state.viewportReady) {
+            if ((GetAsyncKeyState('1') & 1) != 0) {
+                state.viewport.setGizmoMode(render::GizmoMode::Translate);
+            }
+            if ((GetAsyncKeyState('2') & 1) != 0) {
+                state.viewport.setGizmoMode(render::GizmoMode::Rotate);
+            }
+            if ((GetAsyncKeyState('3') & 1) != 0) {
+                state.viewport.setGizmoMode(render::GizmoMode::Scale);
+            }
         }
 
         // --- Rendering ---

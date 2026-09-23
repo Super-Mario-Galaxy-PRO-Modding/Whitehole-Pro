@@ -5,8 +5,9 @@
 //
 // Lifetime: create() makes a child window of the editor, destroy() tears the
 // GL context down. setScene() copies oriented boxes in (cheap pointer-free
-// structs). Input mirrors Java GalaxyRenderer: left-drag pan, right-drag
-// orbit, wheel dolly, click select, Space frame selection.
+// structs). Input: left-drag pan, right-drag orbit, middle-drag pan, wheel
+// dolly (Shift = fast), click select, WASD/arrows fly (Shift fast, Ctrl slow,
+// E/Q or PgUp/PgDn vertical), 1/2/3 gizmo mode, Space/Home frame.
 //
 // Objects with a real game model (ViewportBox::model) are drawn from GL
 // display lists compiled once per mesh, so a whole zone of BMD models still
@@ -19,6 +20,7 @@
 #include "whitehole/render/model_mesh.hpp"
 #include "whitehole/render/viewport_scene.hpp"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -57,7 +59,9 @@ public:
     void setSelection(std::vector<std::size_t> selected);
     void setHover(std::optional<std::size_t> hover);
     void setShowLabels(bool showLabels) noexcept;
-    // Which transform handles the gizmo shows: move, rotate or scale (W/E/R).
+    // Which transform handles the gizmo shows: move, rotate or scale (1/2/3).
+    // The old W/E/R scheme collided with the WASD fly keys, so the mode keys
+    // moved to the number row.
     void setGizmoMode(GizmoMode mode) noexcept;
     // Hides the gizmo when no handle should be offered (no selection, or a
     // text field has focus).
@@ -65,6 +69,8 @@ public:
     // Legend/label ink follows the theme instead of the hard-coded dark box the
     // overlay used to paint, which looked wrong inside a light-mode workspace.
     void setOverlayTheme(bool dark) noexcept;
+    // Settings > "Invert camera motion": flips both orbit deltas.
+    void setOrbitInverted(bool inverted) noexcept { orbitInverted_ = inverted; }
     void frameAll();
     void frameSelection();
     // Marks the surface as needing a redraw. Everything that can change what the
@@ -123,7 +129,18 @@ private:
     unsigned int modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain);
     void pruneModelLists() noexcept;
     void drawGrid();
-    void drawOverlay(HDC device);
+    // Legend + name labels, drawn INSIDE the frame (before SwapBuffers) as
+    // textured quads from a baked font atlas. The old path drew them with GDI
+    // onto the front buffer after the swap, which raced the desktop compositor
+    // and flickered -- worst with labels on.
+    void drawLabels();
+    // WASD/arrow fly movement, polled once per frame while this child holds
+    // keyboard focus. Java's keyMask parity: E/Q (and PgUp/PgDn) vertical,
+    // Shift x3 / Ctrl x0.25 speed modifiers.
+    void pollFlyMovement();
+    // Scene-aware pick reach: a galaxy framed past 20000 units used to become
+    // unclickable beyond that distance.
+    [[nodiscard]] float pickDistance() const noexcept;
     std::optional<std::size_t> pickAt(int x, int y);
 
     HWND window_{nullptr};
@@ -149,6 +166,7 @@ private:
     bool overlayDark_{true};
     GizmoMode gizmoMode_{GizmoMode::Translate};
     bool gizmoEnabled_{true};
+    bool orbitInverted_{false}; // Settings > "Invert camera motion"
     // A gizmo drag in flight. While it runs, left-drag moves the selection
     // instead of panning the camera, exactly like every 3D editor.
     bool draggingGizmo_{false};
@@ -163,6 +181,7 @@ private:
     [[nodiscard]] math::Vec3f gizmoAnchor() const noexcept;
     bool draggingLeft_{false};
     bool draggingRight_{false};
+    bool draggingMiddle_{false}; // MMB drag pans, like every 3D editor
     int lastX_{0};
     int lastY_{0};
     bool leftMoved_{false};
@@ -171,6 +190,10 @@ private:
     bool meshesFilled_{false};  // lazily built once per GL context
     std::vector<math::Vec3f> meshes_[5]; // unit triangles, one entry per CategoryStyle::Shape
     std::vector<ModelListEntry> modelLists_; // display lists, validated via weak_ptr
+
+    // Fly-movement clock: reset whenever focus is lost or no key is held, so
+    // pressing W after a pause never applies the paused time as one jump.
+    std::chrono::steady_clock::time_point lastFlyTick_{};
 };
 
 } // namespace whitehole::render

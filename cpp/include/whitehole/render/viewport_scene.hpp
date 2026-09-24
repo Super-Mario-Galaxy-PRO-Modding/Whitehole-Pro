@@ -101,7 +101,10 @@ public:
     [[nodiscard]] const std::vector<OverlayBatch>& overlays() const noexcept { return overlayBatches_; }
     [[nodiscard]] const std::vector<smg::RailPath>& railPaths() const noexcept { return paths_; }
 
-    // Closest box hit by a camera ray. Returns the object index, if any.
+    // Closest box hit by a camera ray. Two-phase: the oriented proxy box
+    // (broad) then the object's actual drawn triangles (narrow), so a click
+    // selects exactly the geometry you see -- empty space inside a bounding
+    // volume, or geometry hidden behind a nearer object, cannot be picked.
     // `maxDistance` keeps far-away misclicks from selecting across the map.
     [[nodiscard]] std::optional<std::size_t> pick(const ViewportCamera& camera, float screenX, float screenY,
                                                  float width, float height,
@@ -158,5 +161,17 @@ private:
 // Ray vs oriented box (pickWorld matrix maps unit box [-1,1]^3 * halfExtents).
 // Returns distance along the ray, or nullopt on miss.
 [[nodiscard]] std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) noexcept;
+
+// Ray vs the triangles an object actually draws, placed by `world` (the same
+// matrix the renderer multiplies with). Flat positions take placeholder shape
+// soup (3 vertices per triangle); ModelTriangle takes real model meshes.
+// Returns the world-space distance along the ray or nullopt on miss. Two-sided: any
+// drawn triangle is pickable regardless of winding, matching what the eye sees.
+[[nodiscard]] std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4& world,
+                                                           const std::vector<math::Vec3f>& triangles,
+                                                           float maxDistance) noexcept;
+[[nodiscard]] std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4& world,
+                                                           const std::vector<ModelTriangle>& triangles,
+                                                           float maxDistance) noexcept;
 
 } // namespace whitehole::render

@@ -1186,10 +1186,16 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 }
                 const auto picked = pickAt(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                 const bool additive = (wParam & (MK_SHIFT | MK_CONTROL)) != 0;
-                if (onSelectMany_) {
-                    onSelectMany_(picked, additive);
-                } else if (onSelect_ && !additive) {
+                if (additive) {
+                    if (onSelectMany_) {
+                        onSelectMany_(picked, true);
+                    }
+                } else if (onSelect_) {
                     onSelect_(picked);
+                } else if (onSelectMany_) {
+                    // Compatibility fallback for hosts that only registered the
+                    // multi-select callback.
+                    onSelectMany_(picked, false);
                 }
             }
         }
@@ -1451,10 +1457,12 @@ void ViewportWindow::shutdownGL() noexcept {
 // the present erases anything drawn before it. The window class is CS_OWNDC,
 // so device_ is the window's own persistent DC and this runs straight from
 // the render loop with no DC juggling.
-void ViewportWindow::drawFrame() {
+void ViewportWindow::drawFrame(bool pollInputFrame) {
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
-        pollInput(); // one input frame: flycam, orbit/pan, dolly, nudge, focus
+        if (pollInputFrame) {
+            pollInput();
+        }
         ensureMeshes(meshesFilled_, meshes_);
         applyCameraToGL(width_, height_);
         drawGrid();
@@ -1543,12 +1551,24 @@ bool ViewportWindow::renderIfVisible() {
     }
     // A hidden surface must not be drawn into: the contents of a hidden
     // double-buffered GL window are undefined the moment it comes back, and the
-    // caller re-invalidates when it is revealed. Everything else repaints.
+    // caller re-invalidates when it is revealed.
     if (!IsWindowVisible(window_)) {
         dirty_ = true;
         return false;
     }
-    drawFrame();
+
+    // Input is sampled every host frame so held movement keys, wheel input and
+    // camera tweens remain responsive even when the scene itself is static.
+    // Those operations call invalidate() when they change the image. Avoid an
+    // unconditional clear/swap on every host Present: for a large galaxy that
+    // needless swap can outrun DWM's child composition and creates the visible
+    // blink we are trying to eliminate.
+    pollInput();
+    if (!dirty_) {
+        ValidateRect(window_, nullptr);
+        return false;
+    }
+    drawFrame(false);
     // Cancel the WM_PAINT invalidate() queued, so this redraw is not repeated
     // the next time the message queue drains.
     ValidateRect(window_, nullptr);

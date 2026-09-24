@@ -366,10 +366,52 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.s"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera.cpp -o CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.s
 
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_controller.cpp
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_22) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_controller.cpp
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.i"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_controller.cpp > CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.i
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.s"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_controller.cpp -o CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.s
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_tween.cpp
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_23) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_tween.cpp
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.i"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_tween.cpp > CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.i
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.s"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/camera_tween.cpp -o CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.s
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
+CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/collision_kcl.cpp
+CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_24) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/collision_kcl.cpp
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.i"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/collision_kcl.cpp > CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.i
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.s"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/collision_kcl.cpp -o CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.s
+
 CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/gizmo.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_22) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_25) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/gizmo.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.i: cmake_force
@@ -383,7 +425,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/object_visual.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_23) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_26) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/object_visual.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.i: cmake_force
@@ -397,7 +439,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/model_mesh.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_24) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_27) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/model_mesh.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.i: cmake_force
@@ -411,7 +453,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/model_library.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_25) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_28) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/model_library.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.i: cmake_force
@@ -422,10 +464,24 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.s"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/model_library.cpp -o CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.s
 
+CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
+CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/surface_snap.cpp
+CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_29) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/surface_snap.cpp
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.i"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/surface_snap.cpp > CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.i
+
+CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.s"
+	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/surface_snap.cpp -o CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.s
+
 CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/viewport_scene.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_26) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_30) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/render/viewport_scene.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.i: cmake_force
@@ -439,7 +495,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/bcsv.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_27) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_31) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/bcsv.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.i: cmake_force
@@ -453,7 +509,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/field_hashes.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_28) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_32) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/field_hashes.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.i: cmake_force
@@ -467,7 +523,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/galaxy_archive.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_29) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_33) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/galaxy_archive.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.i: cmake_force
@@ -481,7 +537,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/galaxy_archive.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/game_archive.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_30) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_34) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/game_archive.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.i: cmake_force
@@ -495,7 +551,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/game_archive.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/hash.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_31) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_35) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/hash.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.i: cmake_force
@@ -509,7 +565,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/hash.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/bti.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_32) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_36) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/bti.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.i: cmake_force
@@ -523,7 +579,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/bti.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/bmd.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_33) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_37) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/bmd.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.i: cmake_force
@@ -537,7 +593,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/bmd.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/object_model.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_34) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_38) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/object_model.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.i: cmake_force
@@ -551,7 +607,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/object_model.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/path.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_35) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_39) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/path.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.i: cmake_force
@@ -565,7 +621,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/path.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/stage_archive.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_36) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_40) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/smg/stage_archive.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.i: cmake_force
@@ -579,7 +635,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp.s: cmake_force
 CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o: CMakeFiles/whitehole_core.dir/flags.make
 CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o: /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/util/json.cpp
 CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o: CMakeFiles/whitehole_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_37) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_41) "Building CXX object CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o"
 	/c/msys64/ucrt64/bin/c++.exe $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o -MF CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o.d -o CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o -c /home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/src/util/json.cpp
 
 CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.i: cmake_force
@@ -613,10 +669,14 @@ whitehole_core_OBJECTS = \
 "CMakeFiles/whitehole_core.dir/cpp/src/io/rarc.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/io/yaz0.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.o" \
+"CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o" \
+"CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o" \
+"CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o" \
+"CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o" \
 "CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o" \
@@ -654,10 +714,14 @@ libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/io/directory_filesyst
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/io/rarc.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/io/yaz0.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.o
+libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o
+libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o
+libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/model_mesh.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/model_library.cpp.o
+libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/smg/bcsv.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/smg/field_hashes.cpp.o
@@ -672,7 +736,7 @@ libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/smg/stage_archive.cpp
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/cpp/src/util/json.cpp.o
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/build.make
 libwhitehole_core.a: CMakeFiles/whitehole_core.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_38) "Linking CXX static library libwhitehole_core.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles --progress-num=$(CMAKE_PROGRESS_42) "Linking CXX static library libwhitehole_core.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/whitehole_core.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/whitehole_core.dir/link.txt --verbose=$(VERBOSE)
 

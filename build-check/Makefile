@@ -873,6 +873,78 @@ cpp/src/render/camera.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.s
 .PHONY : cpp/src/render/camera.cpp.s
 
+cpp/src/render/camera_controller.o: cpp/src/render/camera_controller.cpp.o
+.PHONY : cpp/src/render/camera_controller.o
+
+# target to build an object file
+cpp/src/render/camera_controller.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.o
+.PHONY : cpp/src/render/camera_controller.cpp.o
+
+cpp/src/render/camera_controller.i: cpp/src/render/camera_controller.cpp.i
+.PHONY : cpp/src/render/camera_controller.i
+
+# target to preprocess a source file
+cpp/src/render/camera_controller.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.i
+.PHONY : cpp/src/render/camera_controller.cpp.i
+
+cpp/src/render/camera_controller.s: cpp/src/render/camera_controller.cpp.s
+.PHONY : cpp/src/render/camera_controller.s
+
+# target to generate assembly for a file
+cpp/src/render/camera_controller.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera_controller.cpp.s
+.PHONY : cpp/src/render/camera_controller.cpp.s
+
+cpp/src/render/camera_tween.o: cpp/src/render/camera_tween.cpp.o
+.PHONY : cpp/src/render/camera_tween.o
+
+# target to build an object file
+cpp/src/render/camera_tween.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.o
+.PHONY : cpp/src/render/camera_tween.cpp.o
+
+cpp/src/render/camera_tween.i: cpp/src/render/camera_tween.cpp.i
+.PHONY : cpp/src/render/camera_tween.i
+
+# target to preprocess a source file
+cpp/src/render/camera_tween.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.i
+.PHONY : cpp/src/render/camera_tween.cpp.i
+
+cpp/src/render/camera_tween.s: cpp/src/render/camera_tween.cpp.s
+.PHONY : cpp/src/render/camera_tween.s
+
+# target to generate assembly for a file
+cpp/src/render/camera_tween.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/camera_tween.cpp.s
+.PHONY : cpp/src/render/camera_tween.cpp.s
+
+cpp/src/render/collision_kcl.o: cpp/src/render/collision_kcl.cpp.o
+.PHONY : cpp/src/render/collision_kcl.o
+
+# target to build an object file
+cpp/src/render/collision_kcl.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.o
+.PHONY : cpp/src/render/collision_kcl.cpp.o
+
+cpp/src/render/collision_kcl.i: cpp/src/render/collision_kcl.cpp.i
+.PHONY : cpp/src/render/collision_kcl.i
+
+# target to preprocess a source file
+cpp/src/render/collision_kcl.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.i
+.PHONY : cpp/src/render/collision_kcl.cpp.i
+
+cpp/src/render/collision_kcl.s: cpp/src/render/collision_kcl.cpp.s
+.PHONY : cpp/src/render/collision_kcl.s
+
+# target to generate assembly for a file
+cpp/src/render/collision_kcl.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/collision_kcl.cpp.s
+.PHONY : cpp/src/render/collision_kcl.cpp.s
+
 cpp/src/render/gizmo.o: cpp/src/render/gizmo.cpp.o
 .PHONY : cpp/src/render/gizmo.o
 
@@ -968,6 +1040,30 @@ cpp/src/render/object_visual.s: cpp/src/render/object_visual.cpp.s
 cpp/src/render/object_visual.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/object_visual.cpp.s
 .PHONY : cpp/src/render/object_visual.cpp.s
+
+cpp/src/render/surface_snap.o: cpp/src/render/surface_snap.cpp.o
+.PHONY : cpp/src/render/surface_snap.o
+
+# target to build an object file
+cpp/src/render/surface_snap.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.o
+.PHONY : cpp/src/render/surface_snap.cpp.o
+
+cpp/src/render/surface_snap.i: cpp/src/render/surface_snap.cpp.i
+.PHONY : cpp/src/render/surface_snap.i
+
+# target to preprocess a source file
+cpp/src/render/surface_snap.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.i
+.PHONY : cpp/src/render/surface_snap.cpp.i
+
+cpp/src/render/surface_snap.s: cpp/src/render/surface_snap.cpp.s
+.PHONY : cpp/src/render/surface_snap.s
+
+# target to generate assembly for a file
+cpp/src/render/surface_snap.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/whitehole_core.dir/build.make CMakeFiles/whitehole_core.dir/cpp/src/render/surface_snap.cpp.s
+.PHONY : cpp/src/render/surface_snap.cpp.s
 
 cpp/src/render/viewport_scene.o: cpp/src/render/viewport_scene.cpp.o
 .PHONY : cpp/src/render/viewport_scene.o
@@ -1554,6 +1650,15 @@ help:
 	@echo "... cpp/src/render/camera.o"
 	@echo "... cpp/src/render/camera.i"
 	@echo "... cpp/src/render/camera.s"
+	@echo "... cpp/src/render/camera_controller.o"
+	@echo "... cpp/src/render/camera_controller.i"
+	@echo "... cpp/src/render/camera_controller.s"
+	@echo "... cpp/src/render/camera_tween.o"
+	@echo "... cpp/src/render/camera_tween.i"
+	@echo "... cpp/src/render/camera_tween.s"
+	@echo "... cpp/src/render/collision_kcl.o"
+	@echo "... cpp/src/render/collision_kcl.i"
+	@echo "... cpp/src/render/collision_kcl.s"
 	@echo "... cpp/src/render/gizmo.o"
 	@echo "... cpp/src/render/gizmo.i"
 	@echo "... cpp/src/render/gizmo.s"
@@ -1566,6 +1671,9 @@ help:
 	@echo "... cpp/src/render/object_visual.o"
 	@echo "... cpp/src/render/object_visual.i"
 	@echo "... cpp/src/render/object_visual.s"
+	@echo "... cpp/src/render/surface_snap.o"
+	@echo "... cpp/src/render/surface_snap.i"
+	@echo "... cpp/src/render/surface_snap.s"
 	@echo "... cpp/src/render/viewport_scene.o"
 	@echo "... cpp/src/render/viewport_scene.i"
 	@echo "... cpp/src/render/viewport_scene.s"

@@ -105,6 +105,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/viewport_scene.cpp.o: \
  C:/msys64/ucrt64/include/c++/15.2.0/tuple \
  C:/msys64/ucrt64/include/c++/15.2.0/bits/ranges_util.h \
  C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/camera.hpp \
+ C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/camera_tween.hpp \
  C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/model_library.hpp \
  C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/model_mesh.hpp \
  C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/smg/bmd.hpp \

@@ -105,6 +105,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/gizmo.cpp.o: \
  C:/msys64/ucrt64/include/c++/15.2.0/tuple \
  C:/msys64/ucrt64/include/c++/15.2.0/bits/ranges_util.h \
  C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/camera.hpp \
+ C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/camera_tween.hpp \
  C:/msys64/ucrt64/include/c++/15.2.0/cstdint \
  C:/msys64/ucrt64/lib/gcc/x86_64-w64-mingw32/15.2.0/include/stdint.h \
  C:/msys64/ucrt64/include/stdint.h \

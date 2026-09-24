@@ -527,6 +527,65 @@ void testViewportScene() {
            "forgiving pick must not invent hits far from the object");
     expect(scene.pickForgiving(camera, centreX + 5.0F, centreY, 800.0F, 600.0F).has_value(),
            "forgiving pick missed a near click");
+
+    // Picking uses the placeholder's visible surface, not its proxy cube. A point
+    // on the cylinder's top cap is off-centre but must still select it.
+    float topX = 0.0F;
+    float topY = 0.0F;
+    expect(camera.worldToScreen(box.world.transformPoint({0.0F, 1.0F, 0.0F}), 800.0F, 600.0F, topX, topY),
+           "the top-cap pick point must project");
+    const auto surfaceHit = scene.pick(camera, topX, topY, 800.0F, 600.0F);
+    expect(surfaceHit.has_value() && *surfaceHit == 0,
+           "an off-centre click on visible geometry must select its object");
+
+    // This point is inside the square proxy but outside the cylinder silhouette.
+    // Even with centre slop disabled, neither exact nor forgiving picking may
+    // select empty proxy space.
+    float emptyX = 0.0F;
+    float emptyY = 0.0F;
+    expect(camera.worldToScreen(box.world.transformPoint({0.99F, 0.99F, 0.0F}), 800.0F, 600.0F,
+                                emptyX, emptyY),
+           "the empty-proxy pick point must project");
+    expect(!scene.pick(camera, emptyX, emptyY, 800.0F, 600.0F).has_value(),
+           "picking empty space inside the proxy must miss");
+    expect(!scene.pickForgiving(camera, emptyX, emptyY, 800.0F, 600.0F, 20000.0F, 0.0F).has_value(),
+           "forgiving picking must not turn empty proxy space into a hit");
+
+    // Direct triangle tests cover two-sided picking, world transforms, misses,
+    // and the closest-hit bound independently of category proxy shapes.
+    const whitehole::render::Ray triangleRay{{10.0F, 0.0F, 5.0F}, {0.0F, 0.0F, -1.0F}};
+    const std::vector<whitehole::math::Vec3f> triangles{
+        {-1.0F, -1.0F, 0.0F}, {1.0F, -1.0F, 0.0F}, {0.0F, 1.0F, 0.0F}};
+    const auto triangleHit = whitehole::render::rayIntersectsTriangles(
+        triangleRay, whitehole::math::Matrix4::translation({10.0F, 0.0F, 0.0F}), triangles, 100.0F);
+    expect(triangleHit.has_value() && std::abs(*triangleHit - 5.0F) < 0.001F,
+           "transformed triangle picking returned the wrong distance");
+    const whitehole::render::Ray originTriangleRay{{0.0F, 0.0F, 5.0F}, {0.0F, 0.0F, -1.0F}};
+    std::vector<whitehole::math::Vec3f> reversedTriangles{
+        triangles[2], triangles[1], triangles[0]};
+    expect(whitehole::render::rayIntersectsTriangles(
+               originTriangleRay, whitehole::math::Matrix4::identity(), reversedTriangles, 100.0F).has_value(),
+           "triangle picking must be two-sided");
+    expect(!whitehole::render::rayIntersectsTriangles(
+               {{2.0F, 0.0F, 5.0F}, {0.0F, 0.0F, -1.0F}}, whitehole::math::Matrix4::identity(),
+               triangles, 100.0F)
+                .has_value(),
+           "a ray beside a triangle must miss");
+    expect(!whitehole::render::rayIntersectsTriangles(
+               originTriangleRay, whitehole::math::Matrix4::identity(), triangles, 4.0F)
+                .has_value(),
+           "a triangle beyond the distance bound must be ignored");
+
+    whitehole::render::ModelTriangle modelTriangle;
+    modelTriangle.a.position = triangles[0];
+    modelTriangle.b.position = triangles[1];
+    modelTriangle.c.position = triangles[2];
+    expect(whitehole::render::rayIntersectsTriangles(
+               originTriangleRay, whitehole::math::Matrix4::identity(), std::vector<whitehole::render::ModelTriangle>{modelTriangle},
+               100.0F)
+                .has_value(),
+           "model triangle picking missed visible geometry");
+
     // Marquee: a box around the centre grabs it, an empty corner grabs nothing.
     expect(scene.pickRect(camera, centreX - 20.0F, centreY - 20.0F, centreX + 20.0F, centreY + 20.0F,
                           800.0F, 600.0F)

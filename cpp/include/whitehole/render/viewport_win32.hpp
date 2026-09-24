@@ -10,7 +10,8 @@
 // Navigation is the hybrid dual-control paradigm (see camera_controller.hpp):
 //  * RMB hold = FPS flycam: WASD + Q/E, mouselook, wheel = fly speed.
 //  * Alt+LMB / MMB = orbit the selection pivot, Shift+MMB = view-plane pan,
-//    wheel = dolly toward the cursor.
+//    wheel = dolly toward the cursor. A plain click selects the geometry under
+//    it; clicking the sole selected object again deselects it.
 //  * WASD still flies without RMB; arrow keys nudge the selection, and 'F'
 //    eases the camera onto it, 'End' drops it onto the surface below.
 //
@@ -223,7 +224,7 @@ private:
     // renderIfVisible/renderIfDirty, after the shell's Present) -- WM_PAINT
     // never draws, because anything composited before the present is erased
     // by it.
-    void drawFrame();
+    void drawFrame(bool pollInputFrame = true);
     void paint();
     void updateSize(int width, int height);
     void applyCameraToGL(int width, int height);

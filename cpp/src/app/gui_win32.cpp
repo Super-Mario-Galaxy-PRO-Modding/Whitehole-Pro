@@ -2903,6 +2903,35 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         return false;
     }
     state.viewportReady = true;
+    // Plain pick: select the object under the cursor, collapse a multi-selection
+    // to it, or clear the selection when that sole object is clicked again.
+    auto applyPlainPick = [&state](std::optional<std::size_t> picked) {
+        if (picked.has_value() && state.selection.size() == 1 && state.selection.front() == *picked) {
+            picked.reset();
+        }
+        state.selectedObject = picked;
+        state.viewportSelected = picked;
+        if (picked.has_value()) {
+            state.selection = {*picked};
+        } else {
+            state.selection.clear();
+        }
+        state.viewport.setSelected(picked);
+        state.viewport.setSelection(state.selection);
+        // Rail picks arrive through their own callback, so an object pick (or
+        // empty-space click) must also leave the viewport in object-selection mode.
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
+        syncTransformBuffers(state);
+        if (picked.has_value() && state.stage && *picked < state.stage->objects().size()) {
+            const auto& object = state.stage->objects()[*picked];
+            const auto& style = render::objectStyle(object.kind, object.name);
+            setStatus(state, std::string(object.name) + " — " + style.label +
+                                 " (" + object.kind + "/" + object.layer + ")");
+        } else {
+            setStatus(state, "Selection cleared");
+        }
+    };
     // Additive pick: Ctrl/Shift-click toggles one object into the set.
     auto applyAdditivePick = [&state](std::optional<std::size_t> picked) {
         if (!picked.has_value()) {
@@ -2930,16 +2959,17 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         syncTransformBuffers(state);
         setStatus(state, std::to_string(state.selection.size()) + " objects selected");
     };
-    state.viewport.setOnSelectMany([&state, applyAdditivePick](std::optional<std::size_t> picked, bool additive) {
+    state.viewport.setOnSelectMany([&state, applyAdditivePick, applyPlainPick](std::optional<std::size_t> picked, bool additive) {
         if (state.syncingSelection) {
             return;
         }
+        state.syncingSelection = true;
         if (additive) {
-            state.syncingSelection = true;
             applyAdditivePick(picked);
-            state.syncingSelection = false;
-            return;
+        } else {
+            applyPlainPick(picked);
         }
+        state.syncingSelection = false;
     });
     state.viewport.setOnSelectRect([&state](std::vector<std::size_t> hits, bool additive) {
         if (state.syncingSelection) {
@@ -2982,32 +3012,13 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
     });
     // Picking happens inside the viewport's own message handling, so it must not
     // re-enter the selection helpers in the middle of their own work.
-    state.viewport.setOnSelect([&state](std::optional<std::size_t> picked) {
+    state.viewport.setOnSelect([&state, applyPlainPick](std::optional<std::size_t> picked) {
         if (state.syncingSelection) {
             return;
         }
         state.syncingSelection = true;
-        state.selectedObject = picked;
-        state.viewportSelected = picked;
-        if (picked.has_value()) {
-            state.selection = {*picked};
-        } else {
-            state.selection.clear();
-        }
-        state.viewport.setSelected(picked);
-        state.viewport.setSelection(state.selection);
-        // Rail picks arrive through their own callback, so anything reaching
-        // here is object-world (or empty space): drop any rail selection too.
-        state.selectedRail.reset();
-        state.viewport.setRailHighlight(std::nullopt);
-        syncTransformBuffers(state);
+        applyPlainPick(picked);
         state.syncingSelection = false;
-        if (picked.has_value() && state.stage && *picked < state.stage->objects().size()) {
-            const auto& object = state.stage->objects()[*picked];
-            const auto& style = render::objectStyle(object.kind, object.name);
-            setStatus(state, std::string(object.name) + " — " + style.label +
-                                 " (" + object.kind + "/" + object.layer + ")");
-        }
     });
     state.viewport.setOnSelectRail([&state](const render::RailPointRef& hit) {
         if (state.syncingSelection) {
@@ -3193,13 +3204,10 @@ void syncViewportChild(EditorState& state) {
         moved = moved || wantVisible;
     }
     if (moved && wantVisible) {
-        // Showing or resizing a GL surface orphans whatever it held: a hidden
-        // window comes back with undefined contents, and a resized one keeps
-        // the old size until something repaints. Windows only delivers WM_PAINT
-        // when a window is uncovered, so without this the panel can sit blank
-        // until the user happens to click inside it.
-        RedrawWindow(state.viewport.handle(), nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        // Showing or resizing a GL surface orphans whatever it held. Let the
+        // editor loop perform the one authoritative draw after the host frame;
+        // RDW_UPDATENOW would synchronously start a second native paint cycle
+        // and can race the compositor while docking a large viewport.
         state.viewport.invalidate();
     }
 }

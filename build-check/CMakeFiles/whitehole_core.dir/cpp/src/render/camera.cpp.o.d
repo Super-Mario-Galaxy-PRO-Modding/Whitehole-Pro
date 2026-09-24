@@ -104,6 +104,7 @@ CMakeFiles/whitehole_core.dir/cpp/src/render/camera.cpp.o: \
  C:/msys64/ucrt64/include/c++/15.2.0/bits/uses_allocator_args.h \
  C:/msys64/ucrt64/include/c++/15.2.0/tuple \
  C:/msys64/ucrt64/include/c++/15.2.0/bits/ranges_util.h \
+ C:/Users/conta/OneDrive/Documents/GitHub/Whitehole-Pro/cpp/include/whitehole/render/camera_tween.hpp \
  C:/msys64/ucrt64/include/c++/15.2.0/algorithm \
  C:/msys64/ucrt64/include/c++/15.2.0/bits/stl_algo.h \
  C:/msys64/ucrt64/include/c++/15.2.0/bits/algorithmfwd.h \

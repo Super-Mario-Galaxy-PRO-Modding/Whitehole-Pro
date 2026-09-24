@@ -299,30 +299,98 @@ float modelPickRadius(const ModelMesh& mesh) noexcept {
     return std::max(radius, 1.0F);
 }
 
-std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) noexcept {
-    // The linear part of the picking matrix is S * R, so its row i is exactly
-    // scale[i] * (row i of the rotation). Row lengths therefore recover the
-    // per-axis world scale (including the placeholder half extent or a model's
-    // pick radius) with no approximation, which is what placementWorldInverse()
-    // expects.
-    const math::Matrix4& world = box.pickWorld;
+namespace {
+
+// The matrices are S * R * T, so the storage triples of the linear part are
+// scale[i] * (axis i of the rotation); their lengths recover the per-axis world
+// scale exactly (placeholder half extent, visual scale or a model's pick radius),
+// which is what placementWorldInverse() expects.
+struct LocalRay {
+    math::Vec3f origin{};
+    math::Vec3f direction{};
+    // Affine scaling changes the local direction's length. Multiplying the local
+    // hit parameter by this converts it back to a distance along the world ray.
+    float worldPerLocalT{1.0F};
+};
+
+LocalRay toLocalRay(const Ray& ray, const math::Matrix4& world) noexcept {
     const math::Vec3f scale{math::Vec3f{world.values[0], world.values[1], world.values[2]}.length(),
                             math::Vec3f{world.values[4], world.values[5], world.values[6]}.length(),
                             math::Vec3f{world.values[8], world.values[9], world.values[10]}.length()};
     const math::Matrix4 inverse = placementWorldInverse(world, scale);
-    const math::Vec3f localOrigin = inverse.transformPoint(ray.origin);
-    const math::Vec3f localDirection{ray.direction.x * inverse.values[0] + ray.direction.y * inverse.values[4] +
-                                         ray.direction.z * inverse.values[8],
-                                     ray.direction.x * inverse.values[1] + ray.direction.y * inverse.values[5] +
-                                         ray.direction.z * inverse.values[9],
-                                     ray.direction.x * inverse.values[2] + ray.direction.y * inverse.values[6] +
-                                         ray.direction.z * inverse.values[10]};
+    LocalRay local;
+    local.origin = inverse.transformPoint(ray.origin);
+    local.direction = {ray.direction.x * inverse.values[0] + ray.direction.y * inverse.values[4] +
+                           ray.direction.z * inverse.values[8],
+                       ray.direction.x * inverse.values[1] + ray.direction.y * inverse.values[5] +
+                           ray.direction.z * inverse.values[9],
+                       ray.direction.x * inverse.values[2] + ray.direction.y * inverse.values[6] +
+                           ray.direction.z * inverse.values[10]};
+    local.worldPerLocalT = local.direction.length();
+    return local;
+}
+
+// Moller-Trumbore against one triangle, two-sided (abs determinant): any
+// drawn triangle is pickable from either face, exactly like the renderer draws
+// it. The returned t is in local-ray units; callers convert it to world distance
+// with LocalRay::worldPerLocalT.
+std::optional<float> intersectTriangle(const LocalRay& ray, const math::Vec3f& v0, const math::Vec3f& v1,
+                                        const math::Vec3f& v2, float maxDistance) noexcept {
+    const math::Vec3f edge1 = v1 - v0;
+    const math::Vec3f edge2 = v2 - v0;
+    const math::Vec3f pvec = math::Vec3f::cross(ray.direction, edge2);
+    const float determinant = math::Vec3f::dot(edge1, pvec);
+    if (std::abs(determinant) < 1e-9F) {
+        return std::nullopt; // parallel to, or degenerate as, the triangle
+    }
+    const float inverseDeterminant = 1.0F / determinant;
+    const math::Vec3f tvec = ray.origin - v0;
+    const float u = math::Vec3f::dot(tvec, pvec) * inverseDeterminant;
+    if (u < 0.0F || u > 1.0F) {
+        return std::nullopt;
+    }
+    const math::Vec3f qvec = math::Vec3f::cross(tvec, edge1);
+    const float v = math::Vec3f::dot(ray.direction, qvec) * inverseDeterminant;
+    if (v < 0.0F || u + v > 1.0F) {
+        return std::nullopt;
+    }
+    const float t = math::Vec3f::dot(edge2, qvec) * inverseDeterminant;
+    if (t < 0.0F || t > maxDistance) {
+        return std::nullopt;
+    }
+    return t;
+}
+
+// Unit placeholder triangles per CategoryStyle::Shape, generated once. The
+// draw pass feeds the same shapeTriangles() soup through box.world, so picks
+// test against exactly the geometry on screen -- without regenerating the
+// meshes on every pick (hover picking runs on each mouse move).
+const std::vector<math::Vec3f>& pickShapeTriangles(CategoryStyle::Shape shape) {
+    constexpr int kShapeCount = 5;
+    static const std::vector<math::Vec3f> kShapes[kShapeCount] = {
+        shapeTriangles(CategoryStyle::Shape::Cube),
+        shapeTriangles(CategoryStyle::Shape::Sphere),
+        shapeTriangles(CategoryStyle::Shape::Pyramid),
+        shapeTriangles(CategoryStyle::Shape::Octahedron),
+        shapeTriangles(CategoryStyle::Shape::Cylinder),
+    };
+    auto index = static_cast<int>(shape);
+    if (index < 0 || index >= kShapeCount) {
+        index = 0;
+    }
+    return kShapes[index];
+}
+
+} // namespace
+
+std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) noexcept {
+    const LocalRay local = toLocalRay(ray, box.pickWorld);
 
     // Slab test against unit box [-1,1]^3 (extents baked into world matrix).
     float tMin = 0.0F;
     float tMax = std::numeric_limits<float>::infinity();
-    const float origins[3] = {localOrigin.x, localOrigin.y, localOrigin.z};
-    const float directions[3] = {localDirection.x, localDirection.y, localDirection.z};
+    const float origins[3] = {local.origin.x, local.origin.y, local.origin.z};
+    const float directions[3] = {local.direction.x, local.direction.y, local.direction.z};
     for (int axis = 0; axis < 3; ++axis) {
         const float origin = origins[axis];
         const float direction = directions[axis];
@@ -343,7 +411,47 @@ std::optional<float> rayIntersectsBox(const Ray& ray, const ViewportBox& box) no
             return std::nullopt;
         }
     }
-    return tMin;
+    return std::max(0.0F, tMin) * local.worldPerLocalT;
+}
+
+std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4& world,
+                                             const std::vector<math::Vec3f>& triangles,
+                                             float maxDistance) noexcept {
+    if (triangles.size() < 3 || !(maxDistance > 0.0F)) {
+        return std::nullopt;
+    }
+    const LocalRay local = toLocalRay(ray, world);
+    const float localBound = maxDistance / local.worldPerLocalT;
+    std::optional<float> best;
+    float bound = localBound;
+    for (std::size_t index = 0; index + 2 < triangles.size(); index += 3) {
+        const auto t = intersectTriangle(local, triangles[index], triangles[index + 1], triangles[index + 2], bound);
+        if (t.has_value()) {
+            bound = *t; // every later triangle only has to beat the best so far
+            best = t * local.worldPerLocalT;
+        }
+    }
+    return best;
+}
+
+std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4& world,
+                                             const std::vector<ModelTriangle>& triangles,
+                                             float maxDistance) noexcept {
+    if (triangles.empty() || !(maxDistance > 0.0F)) {
+        return std::nullopt;
+    }
+    const LocalRay local = toLocalRay(ray, world);
+    const float localBound = maxDistance / local.worldPerLocalT;
+    std::optional<float> best;
+    float bound = localBound;
+    for (const auto& triangle : triangles) {
+        const auto t = intersectTriangle(local, triangle.a.position, triangle.b.position, triangle.c.position, bound);
+        if (t.has_value()) {
+            bound = *t;
+            best = t * local.worldPerLocalT;
+        }
+    }
+    return best;
 }
 
 void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models,
@@ -479,9 +587,28 @@ std::optional<std::size_t> ViewportScene::pick(const ViewportCamera& camera, flo
     std::optional<std::size_t> best;
     float bestDistance = maxDistance;
     for (const auto& box : boxes_) {
-        const auto distance = rayIntersectsBox(ray, box);
-        if (distance.has_value() && *distance < bestDistance) {
-            bestDistance = *distance;
+        // Broad phase: the oriented proxy (placeholder cube, or the cube around
+        // a model's bounding sphere) contains everything drawn for the object,
+        // so a proxy miss can never hide visible geometry -- and a proxy entry
+        // at or past the best hit so far proves the whole box is too far to
+        // matter for the closest-hit contest.
+        const auto proxy = rayIntersectsBox(ray, box);
+        if (!proxy.has_value() || *proxy >= bestDistance) {
+            continue;
+        }
+        // Narrow phase: the triangles the renderer actually draws for this box,
+        // through the same world matrix, so a click agrees pixel-for-pixel with
+        // what is on screen: empty space inside a bounding volume selects
+        // nothing, and visible geometry beats whatever hides behind it.
+        std::optional<float> exact;
+        if (box.model != nullptr && !box.model->empty()) {
+            exact = rayIntersectsTriangles(ray, box.world, box.model->triangles, bestDistance);
+        } else {
+            exact = rayIntersectsTriangles(ray, box.world,
+                                           pickShapeTriangles(categoryStyle(box.category).shape), bestDistance);
+        }
+        if (exact.has_value() && *exact < bestDistance) {
+            bestDistance = *exact;
             best = box.objectIndex;
         }
     }

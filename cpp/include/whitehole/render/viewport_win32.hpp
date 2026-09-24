@@ -174,8 +174,10 @@ private:
     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     bool initGL();
     void shutdownGL() noexcept;
-    // The GL body of one frame, split out of paint() so it can also run from the
-    // editor's own loop rather than only inside a WM_PAINT.
+    // The GL body of one frame, drawn ONLY from the editor's own loop (via
+    // renderIfVisible/renderIfDirty, after the shell's Present) -- WM_PAINT
+    // never draws, because anything composited before the present is erased
+    // by it.
     void drawFrame();
     void paint();
     void updateSize(int width, int height);

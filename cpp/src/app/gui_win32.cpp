@@ -3885,11 +3885,17 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
 
         g_swapChain->Present(1, 0); // VSync
 
-        // Draw the 3D child last. The parent's present rewrites the whole
-        // window surface after the shell, so a viewport drawn before it is
-        // composited stale or not at all -- the "blank until I click or move
-        // inside it" bug. Drawing after the present leaves the GL surface as
-        // the newest thing in the frame.
+        // Draw the 3D child last, exactly once per loop. The parent's present
+        // rewrites the whole window surface after the shell, so a viewport
+        // drawn before it is composited stale or not at all -- the "blank
+        // until I click or move inside it" bug. Drawing after the present
+        // leaves the GL surface as the newest thing in the frame; with the
+        // child's swap interval at 0 (initGL) the patch lands immediately,
+        // within the same compositor sample as this present, so shell and
+        // viewport always appear together -- no alternating blank frames,
+        // even when a large galaxy makes the scene draw slow. WM_PAINT never
+        // draws (paint() only validates), so this is the single scene draw
+        // and the single GL swap of the frame.
         state.viewport.renderIfVisible();
     }
 

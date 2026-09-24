@@ -1236,6 +1236,26 @@ bool ViewportWindow::initGL() {
         device_ = nullptr;
         return false;
     }
+    // Swap interval 0 (WGL_EXT_swap_control): the shell's D3D Present(1, 0)
+    // already paces the app at the monitor refresh, and it rewrites the whole
+    // window surface -- including this child's region -- every frame, so the
+    // child MUST re-patch its pixels immediately afterwards to make it into
+    // the same compositor sample. The driver default (interval 1) made
+    // SwapBuffers wait for the NEXT vblank, leaving the present's blank state
+    // on screen for a whole refresh and drawing the scene again for the next:
+    // the alternating blink, worst with slow (large-galaxy) frames. With the
+    // interval at 0 the swap returns as soon as the patch is queued, so the
+    // compositor always samples shell + viewport as one complete image. An
+    // extension-less driver just keeps the old blocking behaviour.
+    if (wglMakeCurrent(device_, glContext_) == TRUE) {
+        using SwapIntervalFn = BOOL(WINAPI*)(int);
+        const auto swapInterval =
+            reinterpret_cast<SwapIntervalFn>(wglGetProcAddress("wglSwapIntervalEXT"));
+        if (swapInterval != nullptr) {
+            swapInterval(0);
+        }
+        wglMakeCurrent(nullptr, nullptr);
+    }
     RECT rect{};
     GetClientRect(window_, &rect);
     width_ = rect.right - rect.left > 0 ? rect.right - rect.left : 1;
@@ -1272,9 +1292,12 @@ void ViewportWindow::shutdownGL() noexcept {
     }
 }
 
-// The GL body of one frame. Kept separate from paint() because the window class
-// is CS_OWNDC, so device_ is the window's own persistent DC and this can run
-// either inside a WM_PAINT or from the editor's render loop with no DC juggling.
+// The GL body of one frame. Independent of paint() (which only validates the
+// WM_PAINT update region): the editor's loop calls this via renderIfVisible()
+// AFTER the shell's Present -- the only moment a child draw survives, since
+// the present erases anything drawn before it. The window class is CS_OWNDC,
+// so device_ is the window's own persistent DC and this runs straight from
+// the render loop with no DC juggling.
 void ViewportWindow::drawFrame() {
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
@@ -1347,14 +1370,14 @@ void ViewportWindow::drawFrame() {
 void ViewportWindow::paint() {
     PAINTSTRUCT paintInfo{};
     BeginPaint(window_, &paintInfo);
-    // invalidate() always sets dirty_ before queueing this paint, so a clean
-    // surface (a stray expose) validates WITHOUT a second swap. The editor's
-    // loop already repaints the visible child after the shell's Present; the
-    // old always-draw here produced two swaps per frame with GDI labels
-    // between them -- half of the flicker.
-    if (dirty_) {
-        drawFrame();
-    }
+    // WM_PAINT validates the update region and NOTHING else. Every frame is
+    // drawn by the editor loop's renderIfVisible() AFTER the shell's D3D
+    // Present, because the present rewrites the whole window surface
+    // (including this child's region) and would erase anything drawn before
+    // it -- so a paint-time draw was pure waste: a second full scene draw and
+    // swap per invalidated frame, racing the compositor on top of the real
+    // one. dirty_ deliberately stays set until the loop draws, and EndPaint
+    // validates so no WM_PAINT storm follows.
     EndPaint(window_, &paintInfo);
 }
 

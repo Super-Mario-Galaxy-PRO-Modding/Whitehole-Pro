@@ -1,5 +1,7 @@
 #include "whitehole/edit/validation.hpp"
 
+#include "whitehole/db/custom_obj_db.hpp"
+
 #include <unordered_set>
 #include <utility>
 
@@ -60,7 +62,7 @@ bool ValidationReport::clean() const noexcept {
 }
 
 ValidationReport validateStage(const smg::StageArchive& stage, const db::ObjectDatabase& database,
-                               int gameType) {
+                               int gameType, const db::CustomObjDatabase* customObjects) {
     ValidationReport report;
     if (database.empty()) {
         return report; // Nothing to validate against; stay quiet rather than guess.
@@ -74,9 +76,14 @@ ValidationReport validateStage(const smg::StageArchive& stage, const db::ObjectD
         const auto& object = stage.objects()[index];
         const auto* info = database.find(object.name);
         if (info == nullptr) {
-            add(report, Severity::Warning, "unknown-object",
-                "Object \"" + object.name + "\" is not in the object database.",
-                "Replace it with a known object, or update data/objectdb.json.", index, {});
+            // A name the modder registered in the CustomObjDatabase is their own
+            // object, not a typo -- the BCSV editor put it there on purpose.
+            const bool isCustom = customObjects != nullptr && customObjects->contains(object.name);
+            if (!isCustom) {
+                add(report, Severity::Warning, "unknown-object",
+                    "Object \"" + object.name + "\" is not in the object database.",
+                    "Replace it with a known object, or update data/objectdb.json.", index, {});
+            }
         } else if (!database.objectAvailable(object.name, gameType)) {
             add(report, Severity::Warning, "game-mismatch",
                 "Object \"" + object.name + "\" does not exist in this game.",

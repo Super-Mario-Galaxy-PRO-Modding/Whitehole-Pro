@@ -64,4 +64,33 @@ namespace whitehole::smg {
     return hash;
 }
 
+std::uint32_t fieldHash(std::string_view name) noexcept {
+    if (name.size() >= 3 && name.front() == '[' && name.back() == ']') {
+        const std::string_view digits = name.substr(1, name.size() - 2);
+        if (digits.size() <= 8 && !digits.empty()) {
+            std::uint32_t value = 0;
+            bool valid = true;
+            for (const char ch : digits) {
+                const unsigned char lower = static_cast<unsigned char>(
+                    (ch >= 'A' && ch <= 'F') ? ch + ('a' - 'A') : ch);
+                std::uint32_t digit = 0;
+                if (lower >= '0' && lower <= '9') {
+                    digit = static_cast<std::uint32_t>(lower - '0');
+                } else if (lower >= 'a' && lower <= 'f') {
+                    digit = static_cast<std::uint32_t>(lower - 'a') + 10U;
+                } else {
+                    valid = false;
+                    break;
+                }
+                value = (value << 4U) | digit;
+            }
+            if (valid) {
+                return value;
+            }
+        }
+    }
+    return jmapHash(name);
+}
+
 } // namespace whitehole::smg
+

@@ -26,6 +26,7 @@ struct RarcEntry;
 } // namespace whitehole::io
 namespace whitehole::db {
 class ModelSubstitutions;
+class CustomObjDatabase;
 }
 
 namespace whitehole::render {
@@ -36,6 +37,9 @@ namespace whitehole::render {
 // real game model.
 struct ModelProbe {
     std::string objectName;
+    // True when the mesh came from a custom object's own model file rather
+    // than an ObjectData archive.
+    bool custom = false;
     std::string archiveName;   // on-disk ObjectData archive used, empty when none
     std::string modelPath;     // BMD/BDL path inside the archive
     std::size_t modelBytes{0};
@@ -69,6 +73,12 @@ public:
 
     // Optional name substitution table (data/modelsubstitutions.json).
     void setSubstitutions(const db::ModelSubstitutions* substitutions) noexcept { substitutions_ = substitutions; }
+    // Optional CustomObjDatabase: modder-made objects the community database
+    // does not know. Entries with a model path are loaded from that file
+    // (loose .bmd/.bdl, or an .arc) and win over the ObjectData lookup --
+    // assigning a model is an explicit choice the viewport must honour.
+    // Every call drops the cache: entries may have gained or lost model paths.
+    void setCustomObjects(const db::CustomObjDatabase* customObjects) noexcept;
     // Java's "use low-poly models" setting; toggling rebuilds the caches.
     void setLowPoly(bool lowPoly);
     void clear() noexcept;
@@ -113,9 +123,13 @@ private:
     [[nodiscard]] std::vector<std::string> variantArchivesFor(std::string_view objectName) const;
     void refreshListing() const;
     void evictIfNeeded();
+    // Model for a custom object with an assigned model path, or nullptr when
+    // there is no such entry / the file cannot be parsed. Never throws.
+    [[nodiscard]] std::shared_ptr<const ModelMesh> loadCustomModel(std::string_view objectName) const;
 
     const io::DirectoryFilesystem* filesystem_{nullptr};
     const db::ModelSubstitutions* substitutions_{nullptr};
+    const db::CustomObjDatabase* customObjects_{nullptr};
     bool lowPoly_{false};
     // Case-insensitive ObjectData listing cache: lowercase name -> on-disk name.
     mutable std::unordered_map<std::string, std::string> archiveNames_;

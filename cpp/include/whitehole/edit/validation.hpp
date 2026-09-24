@@ -16,6 +16,10 @@
 #include <string_view>
 #include <vector>
 
+namespace whitehole::db {
+class CustomObjDatabase;
+}
+
 namespace whitehole::edit {
 
 enum class Severity { Info, Warning, Error };
@@ -46,7 +50,12 @@ struct ValidationReport {
 //   unset-required    (Info)    a "Needed" parameter is still zero/empty
 //   dangling-switch   (Warning) a switch field references switch 0
 //   zero-scale        (Info)    scale is (0,0,0) so the object would vanish
+//
+// `customObjects` (optional) is the CustomObjDatabase the BCSV editor keeps in
+// step with object sections. A name registered there is a modder's own object,
+// not a typo, so it must not raise `unknown-object`.
 [[nodiscard]] ValidationReport validateStage(const smg::StageArchive& stage,
-                                            const db::ObjectDatabase& database, int gameType);
+                                            const db::ObjectDatabase& database, int gameType,
+                                            const db::CustomObjDatabase* customObjects = nullptr);
 
 } // namespace whitehole::edit

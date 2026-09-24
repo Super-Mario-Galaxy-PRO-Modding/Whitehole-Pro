@@ -188,7 +188,7 @@ std::optional<std::size_t> BcsvTable::fieldIndex(std::uint32_t hash) const {
 }
 
 std::optional<std::size_t> BcsvTable::fieldIndex(std::string_view name) const {
-    return fieldIndex(jmapHash(name));
+    return fieldIndex(fieldHash(name));
 }
 
 std::string BcsvTable::getString(const BcsvRow& row, std::string_view name, std::string fallback) const {
@@ -261,8 +261,8 @@ std::int32_t BcsvTable::getInt(const BcsvRow& row, std::string_view name,
     return getIntById(row, jmapHash(name), fallback);
 }
 
-void BcsvTable::setString(BcsvRow& row, std::string_view name, std::string value) {
-    const auto index = fieldIndex(name);
+void BcsvTable::setStringById(BcsvRow& row, std::uint32_t hash, std::string value) {
+    const auto index = fieldIndex(hash);
     if (!index || *index >= row.values.size()) {
         return;
     }
@@ -271,14 +271,22 @@ void BcsvTable::setString(BcsvRow& row, std::string_view name, std::string value
     }
 }
 
-void BcsvTable::setFloat(BcsvRow& row, std::string_view name, float value) {
-    const auto index = fieldIndex(name);
+void BcsvTable::setString(BcsvRow& row, std::string_view name, std::string value) {
+    setStringById(row, fieldHash(name), std::move(value));
+}
+
+void BcsvTable::setFloatById(BcsvRow& row, std::uint32_t hash, float value) {
+    const auto index = fieldIndex(hash);
     if (!index || *index >= row.values.size()) {
         return;
     }
     if (std::holds_alternative<float>(row.values[*index])) {
         row.values[*index] = value;
     }
+}
+
+void BcsvTable::setFloat(BcsvRow& row, std::string_view name, float value) {
+    setFloatById(row, fieldHash(name), value);
 }
 
 bool BcsvTable::hasField(std::string_view name) const {
@@ -331,7 +339,7 @@ void BcsvTable::setIntById(BcsvRow& row, std::uint32_t hash, std::int32_t value)
 }
 
 void BcsvTable::setInt(BcsvRow& row, std::string_view name, std::int32_t value) {
-    setIntById(row, jmapHash(name), value);
+    setIntById(row, fieldHash(name), value);
 }
 
 void BcsvTable::setBoolById(BcsvRow& row, std::uint32_t hash, bool value) {
@@ -339,7 +347,7 @@ void BcsvTable::setBoolById(BcsvRow& row, std::uint32_t hash, bool value) {
 }
 
 void BcsvTable::setBool(BcsvRow& row, std::string_view name, bool value) {
-    setBoolById(row, jmapHash(name), value);
+    setBoolById(row, fieldHash(name), value);
 }
 
 std::size_t BcsvTable::addRow() {
@@ -379,7 +387,7 @@ bool BcsvTable::removeRow(std::size_t index) {
 }
 
 std::size_t BcsvTable::ensureField(std::string_view name, BcsvType type) {
-    const auto hash = jmapHash(name);
+    const auto hash = fieldHash(name);
     if (const auto existing = fieldIndex(hash)) {
         return *existing;
     }
@@ -413,6 +421,94 @@ std::size_t BcsvTable::ensureField(std::string_view name, BcsvType type) {
     }
     return fields_.size() - 1;
 }
+// Rebuilds the hash -> index map from scratch. Any structural edit (rename,
+// remove, type change) must call this: fieldIndex() only trusts the cache when
+// it covers every field, but rebuilding eagerly keeps lookups O(1).
+void BcsvTable::rebuildFieldLookup() {
+    fieldLookup_.clear();
+    fieldLookup_.reserve(fields_.size());
+    for (std::size_t index = 0; index < fields_.size(); ++index) {
+        fieldLookup_[fields_[index].hash] = index;
+    }
+}
+
+void BcsvTable::renameField(std::size_t index, std::string_view newName) {
+    if (index >= fields_.size()) {
+        throw std::out_of_range("BCSV field index out of range");
+    }
+    if (newName.empty()) {
+        throw std::runtime_error("A BCSV field name cannot be empty");
+    }
+    const auto hash = fieldHash(newName);
+    if (const auto other = fieldIndex(hash); other && *other != index) {
+        throw std::runtime_error("Another field already uses the name \"" +
+                                 std::string(newName) + "\"");
+    }
+    fields_[index].hash = hash;
+    rebuildFieldLookup();
+}
+
+bool BcsvTable::removeField(std::size_t index) {
+    if (index >= fields_.size()) {
+        return false;
+    }
+    fields_.erase(fields_.begin() + static_cast<std::ptrdiff_t>(index));
+    // Values are positional, so every row must drop the same slot. Rows that
+    // were already short are padded instead of skipped: serialize() requires
+    // one value per field, and a mismatch there would make the table unwritable.
+    for (auto& row : rows_) {
+        if (index < row.values.size()) {
+            row.values.erase(row.values.begin() + static_cast<std::ptrdiff_t>(index));
+        }
+        while (row.values.size() < fields_.size()) {
+            row.values.push_back(defaultValueFor(fields_[row.values.size()].type));
+        }
+    }
+    rebuildFieldLookup();
+    return true;
+}
+
+void BcsvTable::setFieldType(std::size_t index, BcsvType type) {
+    if (index >= fields_.size()) {
+        throw std::out_of_range("BCSV field index out of range");
+    }
+    BcsvField& field = fields_[index];
+    if (field.type == type) {
+        return;
+    }
+    const auto newWidth = static_cast<std::uint32_t>(fieldWidth(type));
+    // A wider field may only grow into unused space. Refusing the change beats
+    // writing over a neighbour: serialize() would silently clobber it.
+    for (std::size_t other = 0; other < fields_.size(); ++other) {
+        if (other == index) {
+            continue;
+        }
+        const std::uint32_t otherOffset = fields_[other].offset;
+        if (otherOffset >= field.offset && otherOffset < field.offset + newWidth) {
+            throw std::runtime_error(
+                "Cannot resize this field: it would overlap the storage of another field");
+        }
+    }
+    field.type = type;
+    // Java parity (Bcsv.Field.changeType): a type change drops any bit packing.
+    // Fixed strings are written as raw bytes, so their mask is meaningless.
+    field.mask = type == BcsvType::fixedString ? 0U : 0xFFFFFFFFU;
+    field.shift = 0;
+    const auto requiredSize = static_cast<std::uint32_t>(field.offset) + newWidth;
+    if (requiredSize > entrySize_) {
+        entrySize_ = requiredSize;
+    }
+    // Stored values must match the new variant arm, or serialize() would throw
+    // std::bad_variant_access for a field the user merely retyped.
+    for (auto& row : rows_) {
+        if (index < row.values.size()) {
+            row.values[index] = coerceToType(row.values[index], type);
+        }
+    }
+    rebuildFieldLookup();
+}
+
+
 
 BcsvValue defaultValueFor(BcsvType type) {
     switch (type) {

@@ -17,6 +17,7 @@
 #include "whitehole/app/theme_palette.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
+#include "whitehole/db/custom_obj_db.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
 #include "whitehole/db/name_table.hpp"
 #include "whitehole/db/object_db.hpp"
@@ -31,6 +32,7 @@
 #include "whitehole/util/text.hpp"
 #include "whitehole/render/viewport_win32.hpp"
 #include "whitehole/smg/game_archive.hpp"
+#include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/object_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 
@@ -138,6 +140,10 @@ struct EditorState {
     bool objectDbDownloadPending{false};
 
     db::ModelSubstitutions modelSubstitutions;
+    // Registry of the modder's own objects, kept in step with the BCSV editor's
+    // object sections (see syncBcsvCustomObjects). Lives beside the shipped data
+    // so it travels with the install and is shared by every BCSV it opened.
+    db::CustomObjDatabase customObjects;
     render::ModelLibrary modelLibrary;
     // Local-space KCL collision per ObjectData archive, parsed once per
     // workspace and baked into world-space triangles on every zone load by
@@ -258,6 +264,32 @@ struct EditorState {
 
     // --- Undo: one stack per editor session, cleared on load -----------------
     edit::UndoStack undoStack;
+
+    // --- BCSV editor --------------------------------------------------------
+    // A standalone table window: open any .bcsv from disk, edit its columns and
+    // rows, save it back. Object sections are kept in step with `customObjects`
+    // so a modder's own object names become previewable without hand-editing JSON.
+    bool showBcsvEditor{false};
+    bool bcsvDirty{false};
+    std::filesystem::path bcsvPath;      // the file Open loaded / Save writes
+    bool bcsvLittleEndian{false};
+    smg::BcsvTable bcsvTable;
+    // The in-progress column rename. A separate buffer, because the committed
+    // name may be refused (duplicate), in which case the buffer reverts.
+    char bcsvRenameBuf[96]{};
+    int bcsvRenameColumn{-1};
+    int bcsvTypeColumn{-1};              // column whose tools are open
+    char bcsvSearch[96]{};
+    int bcsvSelectedRow{-1};
+    // Row filter cache, recomputed only when the needle or the row count moves,
+    // so typing in the search box never re-scans a large table per frame.
+    std::string bcsvLastSearch;
+    std::vector<std::size_t> bcsvVisibleRows;
+    std::size_t bcsvLastRowCount{0};
+    bool bcsvAddColumnPopup{false};      // "Add column" modal
+    char bcsvNewColumnName[96]{};
+    int bcsvNewColumnType{0};
+    bool bcsvConfirmClose{false};        // guard for closing a dirty table
 
     // --- Tutorials panel (Help > Tutorials; first run opens it) ------------
     bool showTutorials{false};
@@ -3272,6 +3304,9 @@ void drawMenuBar(EditorState& state, bool& done) {
         if (ImGui::MenuItem("Open Game Directory...")) {
             requestOpenGame(state);
         }
+        if (ImGui::MenuItem("BCSV Editor...")) {
+            state.showBcsvEditor = true;
+        }
         if (ImGui::BeginMenu("Recent Maps")) {
             if (state.settings.recentMaps.empty()) {
                 ImGui::MenuItem("(none yet)", nullptr, false, false);
@@ -3527,7 +3562,7 @@ void refreshProblems(EditorState& state) {
     }
     const int gameType = state.game ? state.game->gameType() : 2;
     const edit::ValidationReport report =
-        edit::validateStage(*state.stage, state.objectDb, gameType);
+        edit::validateStage(*state.stage, state.objectDb, gameType, &state.customObjects);
     state.findings = report.findings;
     state.findingsCursor = state.undoStack.cursor();
 }
@@ -4059,6 +4094,508 @@ const std::vector<TutorialTopic>& tutorialTopics() {
     return topics;
 }
 
+// --- BCSV editor -------------------------------------------------------------
+//
+// The Java editor was a separate Swing window with a JTable per BCSV. This is
+// the same idea in one dockable ImGui window: a toolbar, the field (column)
+// header, the rows, and a side list of the modder's own objects.
+
+const char* bcsvTypeName(smg::BcsvType type) {
+    switch (type) {
+    case smg::BcsvType::integer: return "int";
+    case smg::BcsvType::fixedString: return "fixed string";
+    case smg::BcsvType::floatingPoint: return "float";
+    case smg::BcsvType::integer2: return "int (packed)";
+    case smg::BcsvType::shortInteger: return "short";
+    case smg::BcsvType::byte: return "byte";
+    case smg::BcsvType::stringOffset: return "string";
+    }
+    return "?";
+}
+
+// Combo order. Kept as one array so the combo and setFieldType can never drift.
+const smg::BcsvType kBcsvTypeOrder[] = {
+    smg::BcsvType::integer,      smg::BcsvType::floatingPoint, smg::BcsvType::fixedString,
+    smg::BcsvType::stringOffset, smg::BcsvType::integer2,      smg::BcsvType::shortInteger,
+    smg::BcsvType::byte,
+};
+const char* const kBcsvTypeNames[] = {"int", "float", "fixed string", "string",
+                                      "int (packed)", "short", "byte"};
+
+// Renders one cell and writes the edit straight into the table. The field type
+// decides the widget. Edits mark the table dirty but are not undoable: a raw
+// cell edit is cheap to redo by hand, and snapshotting the whole table on every
+// keystroke would cost far more than it buys.
+bool drawBcsvCell(smg::BcsvTable& table, std::size_t rowIndex, std::size_t fieldIndex) {
+    auto& row = table.rows()[rowIndex];
+    if (fieldIndex >= row.values.size()) {
+        return false;
+    }
+    const auto hash = table.fields()[fieldIndex].hash;
+    ImGui::PushID(static_cast<int>(rowIndex));
+    ImGui::PushID(static_cast<int>(fieldIndex));
+    bool changed = false;
+    if (const auto* text = std::get_if<std::string>(&row.values[fieldIndex])) {
+        // InputText needs stable storage across frames. scratch is rebuilt from
+        // the cell on entry, so it is only ever a mirror of the table.
+        static thread_local std::string scratch;
+        scratch = *text;
+        if (ImGui::InputText("##v", scratch.data(), scratch.size() + 1)) {
+            table.setStringById(row, hash, scratch);
+            changed = true;
+        }
+    } else if (const auto* number = std::get_if<float>(&row.values[fieldIndex])) {
+        float value = *number;
+        if (ImGui::DragFloat("##v", &value, 0.1F)) {
+            table.setFloatById(row, hash, value);
+            changed = true;
+        }
+    } else {
+        std::int32_t value = 0;
+        if (const auto* wide = std::get_if<std::int32_t>(&row.values[fieldIndex])) {
+            value = *wide;
+        } else if (const auto* narrow = std::get_if<std::int16_t>(&row.values[fieldIndex])) {
+            value = *narrow;
+        } else if (const auto* tiny = std::get_if<std::int8_t>(&row.values[fieldIndex])) {
+            value = *tiny;
+        }
+        if (ImGui::DragInt("##v", &value, 0.1F)) {
+            table.setIntById(row, hash, value);
+            changed = true;
+        }
+    }
+    ImGui::PopID();
+    ImGui::PopID();
+    return changed;
+}
+
+// Object names a BCSV's `name` column carries, de-duplicated in first-seen
+// order. Empty cells are skipped: a nameless row cannot be previewed.
+std::vector<std::string> bcsvObjectNames(const smg::BcsvTable& table) {
+    std::vector<std::string> names;
+    const auto nameIndex = table.fieldIndex(smg::jmapHash("name"));
+    if (!nameIndex || *nameIndex >= table.fields().size()) {
+        return names;
+    }
+    for (const auto& row : table.rows()) {
+        if (*nameIndex >= row.values.size()) {
+            continue;
+        }
+        const auto* text = std::get_if<std::string>(&row.values[*nameIndex]);
+        if (text == nullptr || text->empty()) {
+            continue;
+        }
+        if (std::find(names.begin(), names.end(), *text) == names.end()) {
+            names.push_back(*text);
+        }
+    }
+    return names;
+}
+
+// Reconciles the open table's object names against the custom registry and
+// persists it. `objectDb` is the shipped ObjectDatabase: without it sync adds
+// nothing, because a custom name cannot be told apart from a shipped one.
+void syncBcsvCustomObjects(EditorState& state) {
+    if (state.bcsvPath.empty()) {
+        return;
+    }
+    const auto outcome = state.customObjects.syncFromObjectSection(
+        state.bcsvPath.string(), bcsvObjectNames(state.bcsvTable), &state.objectDb);
+    if (!outcome.changed()) {
+        return;
+    }
+    try {
+        state.customObjects.save(state.dataRoot / "custom_objects.json");
+    } catch (const std::exception& error) {
+        // The table edit itself succeeded; only the registry write failed, so
+        // report it without discarding the user's work.
+        pushToast(state, std::string("Custom object registry not saved: ") + error.what(), true);
+        return;
+    }
+    // A changed registry can turn a placeholder into a real preview, so the
+    // model cache has to go (setCustomObjects clears it) and the viewport has
+    // to redraw the objects that use these names.
+    state.modelLibrary.setCustomObjects(&state.customObjects);
+    if (state.stage.has_value()) {
+        state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary);
+    }
+    for (const auto& name : outcome.added) {
+        pushLog(state, "Registered custom object " + name + " from " + state.bcsvPath.string());
+    }
+    for (const auto& name : outcome.removed) {
+        pushLog(state, "Removed custom object " + name + " (gone from " + state.bcsvPath.string() + ")");
+    }
+}
+
+void openBcsvFile(EditorState& state, const std::filesystem::path& path, bool littleEndian) {
+    try {
+        auto table = smg::BcsvTable::open(path, littleEndian ? io::Endian::little
+                                                             : io::Endian::big);
+        state.bcsvTable = std::move(table);
+        state.bcsvPath = path;
+        state.bcsvLittleEndian = littleEndian;
+        state.bcsvDirty = false;
+        state.bcsvSelectedRow = -1;
+        state.bcsvRenameColumn = -1;
+        state.bcsvTypeColumn = -1;
+        state.bcsvSearch[0] = '\0';
+        state.bcsvLastSearch.clear();
+        state.bcsvVisibleRows.clear();
+        state.bcsvLastRowCount = 0;
+        syncBcsvCustomObjects(state);
+        pushLog(state, "BCSV opened: " + path.string() + " (" +
+                           std::to_string(state.bcsvTable.rows().size()) + " rows, " +
+                           std::to_string(state.bcsvTable.fields().size()) + " columns)");
+    } catch (const std::exception& error) {
+        pushToast(state, std::string("Could not open BCSV: ") + error.what(), true);
+    }
+}
+
+void saveBcsvFile(EditorState& state) {
+    if (state.bcsvPath.empty()) {
+        return;
+    }
+    try {
+        io::writeFile(state.bcsvPath, state.bcsvTable.serialize());
+        state.bcsvDirty = false;
+        pushToast(state, "Saved " + state.bcsvPath.string());
+        pushLog(state, "BCSV saved: " + state.bcsvPath.string());
+    } catch (const std::exception& error) {
+        pushToast(state, std::string("Could not save BCSV: ") + error.what(), true);
+    }
+}
+
+// One column header cell: click to open the column tools, double-click to
+// rename. A rename reconciles the registry, because a `name` column renamed
+// away stops being one.
+void drawBcsvColumnHeader(EditorState& state, std::size_t columnIndex) {
+    auto& table = state.bcsvTable;
+    const auto field = table.fields()[columnIndex];
+    ImGui::PushID(static_cast<int>(columnIndex));
+    if (state.bcsvRenameColumn == static_cast<int>(columnIndex)) {
+        ImGui::SetNextItemWidth(120.0F);
+        if (ImGui::InputText("##rename", state.bcsvRenameBuf, sizeof(state.bcsvRenameBuf),
+                             ImGuiInputTextFlags_EnterReturnsTrue)) {
+            try {
+                table.renameField(columnIndex, state.bcsvRenameBuf);
+                state.bcsvDirty = true;
+                syncBcsvCustomObjects(state);
+            } catch (const std::exception& error) {
+                pushToast(state, std::string("Rename refused: ") + error.what(), true);
+            }
+            state.bcsvRenameColumn = -1;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Enter confirms, Esc cancels.\n"
+                              "A name like [1A2B3C4D] is the raw field hash.");
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            state.bcsvRenameColumn = -1;
+        }
+    } else {
+        ImGui::PushID(0);
+        // hashlookup.txt is not loaded in the GUI, so the header shows the hash
+        // in the game's own "[XXXXXXXX]" form. fieldHash() reads that form back
+        // as the literal hash, which makes a rename round trip lossless.
+        char header[16]{};
+        snprintf(header, sizeof(header), "[%08X]", field.hash);
+        if (ImGui::Button(header, ImVec2(96.0F, 0.0F))) {
+            state.bcsvTypeColumn = static_cast<int>(columnIndex);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s\nclick: column tools | double-click: rename",
+                              bcsvTypeName(field.type));
+            if (ImGui::IsMouseDoubleClicked(0)) {
+                snprintf(state.bcsvRenameBuf, sizeof(state.bcsvRenameBuf), "[%08X]", field.hash);
+                state.bcsvRenameColumn = static_cast<int>(columnIndex);
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+}
+
+// The registry side list: what the editor currently knows as a modder-made
+// object, with a one-click way to attach the exported model file.
+void drawBcsvCustomObjectList(EditorState& state) {
+    ImGui::SeparatorText("Custom objects");
+    if (state.objectDb.empty()) {
+        ImGui::TextWrapped("No official object database loaded, so a name cannot be told "
+                           "apart from a shipped one. Nothing is registered until it is.");
+    }
+    if (ImGui::Button("Reload registry")) {
+        try {
+            state.customObjects.load(state.dataRoot / "custom_objects.json");
+            state.modelLibrary.setCustomObjects(&state.customObjects);
+        } catch (const std::exception& error) {
+            pushToast(state, std::string("Could not read the custom object registry: ") +
+                                error.what(), true);
+        }
+    }
+    if (state.customObjects.empty()) {
+        ImGui::TextDisabled("None yet. Open a BCSV that has a name column.");
+        return;
+    }
+    for (const auto& entry : state.customObjects.entries()) {
+        ImGui::PushID(entry.name.c_str());
+        ImGui::TextUnformatted(entry.name.c_str());
+        if (entry.modelPath.empty()) {
+            ImGui::TextDisabled("no preview model assigned");
+        } else {
+            ImGui::TextDisabled("model: %s", entry.modelPath.c_str());
+        }
+        if (ImGui::SmallButton("Choose model...")) {
+            if (const auto picked = pickOpenFile(state.window)) {
+                state.customObjects.setModelPath(entry.name, picked->string());
+                state.modelLibrary.setCustomObjects(&state.customObjects);
+                if (state.stage.has_value()) {
+                    state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary);
+                }
+                pushLog(state, "Preview model for " + entry.name + " set to " + picked->string());
+            }
+        }
+        ImGui::PopID();
+    }
+}
+
+void drawBcsvEditorWindow(EditorState& state) {
+    if (!state.showBcsvEditor) {
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(1100.0F, 680.0F), ImGuiCond_FirstUseEver);
+    const std::string title = state.bcsvDirty ? "BCSV Editor*" : "BCSV Editor";
+    if (!ImGui::Begin(title.c_str(), &state.showBcsvEditor)) {
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::Button("Open...")) {
+        if (const auto picked = pickOpenFile(state.window)) {
+            openBcsvFile(state, *picked, state.bcsvLittleEndian);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save")) {
+        saveBcsvFile(state);
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Little-endian", &state.bcsvLittleEndian);
+    ImGui::SameLine();
+    if (ImGui::Button("Add column...")) {
+        state.bcsvAddColumnPopup = true;
+    }
+    if (state.bcsvPath.empty()) {
+        ImGui::Separator();
+        ImGui::TextDisabled("Open a .bcsv file to start editing.");
+        ImGui::End();
+        return;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s  (%zu rows x %zu columns)", state.bcsvPath.filename().string().c_str(),
+                        state.bcsvTable.rows().size(), state.bcsvTable.fields().size());
+    ImGui::Separator();
+
+    auto& table = state.bcsvTable;
+    // Row filter: recomputed only when the needle or the row count moves, so a
+    // large table does not re-scan on every keystroke elsewhere in the window.
+    const std::string needle = whitehole::util::toLower(state.bcsvSearch);
+    if (needle != state.bcsvLastSearch || table.rows().size() != state.bcsvLastRowCount) {
+        state.bcsvVisibleRows.clear();
+        for (std::size_t i = 0; i < table.rows().size(); ++i) {
+            if (needle.empty()) {
+                state.bcsvVisibleRows.push_back(i);
+                continue;
+            }
+            for (const auto& value : table.rows()[i].values) {
+                // std::to_string has no int8_t overload, and a string cell must
+                // keep its text, so the visit splits the two cases.
+                const auto text = std::visit(
+                    [](const auto& item) {
+                        using Item = std::decay_t<decltype(item)>;
+                        if constexpr (std::is_same_v<Item, std::string>) {
+                            return util::toLower(item);
+                        } else {
+                            return util::toLower(std::to_string(static_cast<int>(item)));
+                        }
+                    },
+                    value);
+                if (text.find(needle) != std::string::npos) {
+                    state.bcsvVisibleRows.push_back(i);
+                    break;
+                }
+            }
+        }
+        state.bcsvLastSearch = needle;
+        state.bcsvLastRowCount = table.rows().size();
+    }
+
+    ImGui::SetNextItemWidth(220.0F);
+    ImGui::InputTextWithHint("##bcsv-search", "Search rows...", state.bcsvSearch,
+                             sizeof(state.bcsvSearch));
+    ImGui::SameLine();
+    if (ImGui::Button("Add row")) {
+        try {
+            table.addRow();
+            state.bcsvDirty = true;
+        } catch (const std::exception& error) {
+            pushToast(state, std::string("Cannot add a row: ") + error.what(), true);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Duplicate row")) {
+        if (state.bcsvSelectedRow < 0 ||
+            static_cast<std::size_t>(state.bcsvSelectedRow) >= table.rows().size()) {
+            pushToast(state, "Select a row to duplicate.", true);
+        } else {
+            table.cloneRow(static_cast<std::size_t>(state.bcsvSelectedRow));
+            state.bcsvDirty = true;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete row")) {
+        if (state.bcsvSelectedRow < 0 ||
+            !table.removeRow(static_cast<std::size_t>(state.bcsvSelectedRow))) {
+            pushToast(state, "Select a row to delete.", true);
+        } else {
+            state.bcsvSelectedRow = -1;
+            state.bcsvDirty = true;
+        }
+    }
+
+    if (ImGui::BeginChild("##bcsv-grid", ImVec2(0.0F, -190.0F), true)) {
+        if (ImGui::BeginTable("##bcsv-table", static_cast<int>(table.fields().size()) + 1,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_ScrollX)) {
+            ImGui::TableSetupScrollFreeze(1, 1);
+            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 42.0F);
+            ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("#");
+            for (std::size_t c = 0; c < table.fields().size(); ++c) {
+                ImGui::TableNextColumn();
+                drawBcsvColumnHeader(state, c);
+            }
+            for (const auto rowIndex : state.bcsvVisibleRows) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                const bool selected = state.bcsvSelectedRow == static_cast<int>(rowIndex);
+                char label[16]{};
+                snprintf(label, sizeof(label), "%zu", rowIndex);
+                if (ImGui::Selectable(label, selected)) {
+                    state.bcsvSelectedRow = static_cast<int>(rowIndex);
+                }
+                for (std::size_t c = 0; c < table.fields().size(); ++c) {
+                    ImGui::TableNextColumn();
+                    if (!drawBcsvCell(table, rowIndex, c)) {
+                        continue;
+                    }
+                    state.bcsvDirty = true;
+                    // Only a `name` edit can change the registry, so only that
+                    // column pays for the reconciliation (a no-op otherwise).
+                    if (table.fields()[c].hash == smg::jmapHash("name")) {
+                        syncBcsvCustomObjects(state);
+                    }
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::EndChild();
+    }
+
+    if (state.bcsvTypeColumn >= 0 &&
+        static_cast<std::size_t>(state.bcsvTypeColumn) < table.fields().size()) {
+        const auto selected = static_cast<std::size_t>(state.bcsvTypeColumn);
+        ImGui::SeparatorText("Column");
+        char header[16]{};
+        snprintf(header, sizeof(header), "[%08X]", table.fields()[selected].hash);
+        ImGui::Text("Selected column %s (%s)", header, bcsvTypeName(table.fields()[selected].type));
+        int typeChoice = 0;
+        for (std::size_t i = 0; i < std::size(kBcsvTypeOrder); ++i) {
+            if (kBcsvTypeOrder[i] == table.fields()[selected].type) {
+                typeChoice = static_cast<int>(i);
+            }
+        }
+        ImGui::SetNextItemWidth(180.0F);
+        if (ImGui::Combo("Type", &typeChoice, kBcsvTypeNames,
+                         static_cast<int>(std::size(kBcsvTypeOrder)))) {
+            try {
+                table.setFieldType(selected, kBcsvTypeOrder[typeChoice]);
+                state.bcsvDirty = true;
+            } catch (const std::exception& error) {
+                pushToast(state, std::string("Type change refused: ") + error.what(), true);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete column")) {
+            if (table.removeField(selected)) {
+                state.bcsvTypeColumn = -1;
+                state.bcsvDirty = true;
+                syncBcsvCustomObjects(state);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Done")) {
+            state.bcsvTypeColumn = -1;
+        }
+    }
+
+    drawBcsvCustomObjectList(state);
+
+    if (state.bcsvAddColumnPopup) {
+        ImGui::OpenPopup("Add column");
+        state.bcsvAddColumnPopup = false;
+    }
+    if (ImGui::BeginPopupModal("Add column", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetNextItemWidth(200.0F);
+        ImGui::InputText("Name", state.bcsvNewColumnName, sizeof(state.bcsvNewColumnName));
+        ImGui::TextDisabled("Use [1A2B3C4D] to set a raw field hash.");
+        ImGui::SetNextItemWidth(200.0F);
+        ImGui::Combo("Type", &state.bcsvNewColumnType, kBcsvTypeNames,
+                     static_cast<int>(std::size(kBcsvTypeOrder)));
+        if (ImGui::Button("Add")) {
+            try {
+                table.ensureField(state.bcsvNewColumnName, kBcsvTypeOrder[state.bcsvNewColumnType]);
+                state.bcsvDirty = true;
+                state.bcsvNewColumnName[0] = '\0';
+                ImGui::CloseCurrentPopup();
+            } catch (const std::exception& error) {
+                pushToast(state, std::string("Cannot add the column: ") + error.what(), true);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (state.bcsvConfirmClose) {
+        ImGui::OpenPopup("Unsaved BCSV");
+        state.bcsvConfirmClose = false;
+    }
+    if (ImGui::BeginPopupModal("Unsaved BCSV", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("This BCSV has unsaved changes.");
+        if (ImGui::Button("Save and close")) {
+            saveBcsvFile(state);
+            state.showBcsvEditor = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard")) {
+            state.bcsvDirty = false;
+            state.showBcsvEditor = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Keep editing")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::End();
+}
+
 void drawTutorialsPanel(EditorState& state) {
     if (!state.showTutorials) {
         return;
@@ -4347,6 +4884,15 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         const auto cachePath =
             Settings::defaultConfigPath().parent_path() / "objectdb.cache";
         state.objectDb.load(state.dataRoot / "objectdb.json", cachePath);
+        // The custom-object registry is written by the BCSV editor, so it has to
+        // be in place before the first preview is asked for or custom objects
+        // would render as placeholders. A corrupt file is logged, not fatal.
+        try {
+            state.customObjects.load(state.dataRoot / "custom_objects.json");
+        } catch (const std::exception& error) {
+            pushLog(state, std::string("Custom object registry not loaded: ") + error.what());
+        }
+        state.modelLibrary.setCustomObjects(&state.customObjects);
         // A fresh install has no database at all (it is deliberately not
         // committed), which used to leave the editor with raw object names and
         // an empty parameter grid and no hint why. Fetch it once, quietly.
@@ -4520,6 +5066,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             drawRealLogWindow(state);
         }
         drawTutorialsPanel(state);
+        drawBcsvEditorWindow(state);
         drawAboutDialog(state);
         drawPreferencesDialog(state);
         pumpObjectDatabase(state);

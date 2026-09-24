@@ -70,6 +70,14 @@ public:
     // ---- object database -------------------------------------------------
     void setDatabase(const db::ObjectDatabase* database) noexcept { database_ = database; }
     [[nodiscard]] const db::ObjectDatabase* database() const noexcept { return database_; }
+    // Registry of the modder's own objects (names objectdb.json does not know).
+    // The BCSV editor keeps it in step with object sections; validation uses it
+    // so a custom object is never reported as an unknown one. The pointer is
+    // non-owning: the caller (the app) keeps the database alive.
+    void setCustomObjects(const db::CustomObjDatabase* customObjects) noexcept {
+        customObjects_ = customObjects;
+    }
+    [[nodiscard]] const db::CustomObjDatabase* customObjects() const noexcept { return customObjects_; }
     // Object view over the open stage. Empty (0 objects) when nothing is open.
     [[nodiscard]] smg::ObjectModel objectModel();
 
@@ -127,6 +135,7 @@ private:
     smg::StageArchive scratchStage_;
     db::ObjectDatabase scratchDatabase_;
     const db::ObjectDatabase* database_{nullptr};
+    const db::CustomObjDatabase* customObjects_{nullptr};
     std::string galaxyName_;
     std::string zoneName_;
     std::vector<std::size_t> selection_;

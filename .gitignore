@@ -1,7 +1,13 @@
 /build
+/build-msvc
+/build-vs18
+/build-lto
+/build-debug
 /dist
 /nbproject/private/
 data/objectdb.json
+# Written by the BCSV editor as the modder registers their own objects.
+data/custom_objects.json
 
 .idea
 *.iml

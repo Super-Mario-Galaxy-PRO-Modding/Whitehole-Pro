@@ -6,6 +6,7 @@
 #include "whitehole/db/areamanagerlimits.hpp"
 #include "whitehole/db/shortcuts.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
+#include "whitehole/db/custom_obj_db.hpp"
 #include "whitehole/db/specialrenderers.hpp"
 #include "whitehole/edit/document.hpp"
 #include "whitehole/edit/validation.hpp"
@@ -58,6 +59,10 @@ void expect(bool condition, const std::string& message) {
         throw std::runtime_error(message);
     }
 }
+
+// Defined further down with the inline fallback database; declared here so the
+// custom-object tests above that definition can use it too.
+void loadObjectDatabaseForTests(whitehole::db::ObjectDatabase& database);
 
 void testBinaryData() {
     whitehole::io::BinaryWriter writer(whitehole::io::Endian::big);
@@ -825,6 +830,280 @@ void testBcsvMutation() {
         threw = true;
     }
     expect(threw, "addRow should refuse a table without fields");
+}
+
+void testCustomObjDatabase() {
+    using whitehole::db::CustomObjectEntry;
+    using whitehole::db::CustomObjDatabase;
+
+    TemporaryDirectory temp;
+    const auto path = temp.path / "custom_objects.json";
+
+    // A missing file is an empty database, not an error: the registry is
+    // created on first use.
+    CustomObjDatabase db;
+    db.load(path);
+    expect(db.empty(), "a missing custom object file should load as empty");
+    expect(!std::filesystem::exists(path), "loading must not create a file");
+
+    CustomObjectEntry entry;
+    entry.name = "MyCustomRock";
+    entry.displayName = "Custom Rock";
+    entry.modelPath = "C:/models/MyCustomRock.bmd";
+    entry.notes = "first version";
+    entry.source = "/StageData/Planet1/Placement.bcsv";
+    expect(db.add(entry), "adding a new entry reported no change");
+    expect(!db.add(entry), "adding an identical entry reported a change");
+    expect(db.size() == 1, "custom object db size wrong after add");
+    expect(db.contains("MyCustomRock"), "custom object db lookup failed");
+    expect(db.find("MyCustomRock")->modelPath == "C:/models/MyCustomRock.bmd",
+           "custom object model path wrong");
+
+    // setModelPath creates a missing entry so "assign a model" works before
+    // the first sync, and a no-op assignment reports no change.
+    expect(db.setModelPath("AnotherOne", "/ObjectData/AnotherOne.bmd"),
+           "setModelPath did not create a missing entry");
+    expect(!db.setModelPath("AnotherOne", "/ObjectData/AnotherOne.bmd"),
+           "setModelPath reported a change for an identical path");
+
+    // Persistence round trip.
+    db.save(path);
+    expect(std::filesystem::exists(path), "save did not create the file");
+    CustomObjDatabase reloaded;
+    reloaded.load(path);
+    expect(reloaded.size() == 2, "custom object db size wrong after reload");
+    expect(reloaded.find("MyCustomRock")->displayName == "Custom Rock",
+           "custom object display name lost on reload");
+    expect(reloaded.find("MyCustomRock")->addedAt > 0, "custom object Added timestamp lost");
+
+    // An unchanged save must not touch the file: save() compares the
+    // serialized document with what was last written.
+    reloaded.setModelPath("AnotherOne", "/ObjectData/Changed.bmd");
+    reloaded.save(path);
+    const auto firstWrite = std::filesystem::last_write_time(path);
+    reloaded.save(path);
+    expect(std::filesystem::last_write_time(path) == firstWrite,
+           "an unchanged save rewrote the custom object file");
+
+    // Removal.
+    expect(reloaded.remove("AnotherOne"), "removing a known entry failed");
+    expect(!reloaded.remove("AnotherOne"), "removing an unknown entry reported success");
+    expect(!reloaded.contains("AnotherOne"), "removed entry is still present");
+
+    // Malformed JSON is reported instead of silently emptying the registry.
+    const auto broken = temp.path / "broken.json";
+    {
+        std::ofstream out(broken, std::ios::binary);
+        out << "{\"Objects\": [ {\"Name\":";
+    }
+    bool threw = false;
+    try {
+        CustomObjDatabase bad;
+        bad.load(broken);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    expect(threw, "a malformed custom object file was accepted");
+}
+
+void testCustomObjSync() {
+    using whitehole::db::CustomObjDatabase;
+    using whitehole::db::ObjectDatabase;
+
+    ObjectDatabase official;
+    loadObjectDatabaseForTests(official);
+    expect(!official.empty(), "objectdb.json did not load for the custom object sync test");
+    // A name the community database really knows, to prove filtering works.
+    const auto knownNames = official.names();
+    expect(!knownNames.empty(), "the official object database exposes no names");
+    const auto knownName = knownNames.front();
+
+    CustomObjDatabase db;
+    const std::string source = "/StageData/Planet1/Placement.bcsv";
+    const auto outcome = db.syncFromObjectSection(source, {knownName, "MyCustomRock", "MyOtherThing"},
+                                                  &official);
+    expect(outcome.added.size() == 2, "sync should add the two custom names only");
+    expect(!db.contains(knownName), "sync registered a vanilla name as custom");
+    expect(db.contains("MyCustomRock") && db.contains("MyOtherThing"),
+           "sync did not register the custom names");
+    expect(db.find("MyCustomRock")->source == source, "sync did not record the source");
+
+    // Re-syncing the same table is a no-op: no duplicates, no churn.
+    const auto again = db.syncFromObjectSection(source, {knownName, "MyCustomRock", "MyOtherThing"},
+                                                &official);
+    expect(!again.changed(), "re-syncing an unchanged table reported changes");
+
+    // Source isolation: a second table adds a name, then the first table is
+    // re-synced without one of its names -- only the first table's own entry
+    // disappears, never the other table's.
+    const std::string otherSource = "/StageData/Planet2/Placement.bcsv";
+    const auto second = db.syncFromObjectSection(otherSource, {"RockFromPlanet2"}, &official);
+    expect(second.added.size() == 1, "the second table's sync added nothing");
+    expect(db.contains("RockFromPlanet2"), "the second table's name was not registered");
+    const auto cleaned = db.syncFromObjectSection(source, {knownName, "MyOtherThing"}, &official);
+    expect(cleaned.removed.size() == 1 && cleaned.removed.front() == "MyCustomRock",
+           "removing a deleted name reported the wrong result");
+    expect(!db.contains("MyCustomRock"), "the deleted name is still registered");
+    expect(db.contains("RockFromPlanet2"), "the second table's entry was wrongly removed");
+    expect(db.contains("MyOtherThing"), "a still-present name was wrongly removed");
+
+    // An entry created by hand has no source, so no table owns it and none may
+    // delete it. Once a table that uses the name syncs, it adopts the entry
+    // and from then on owns it -- and a later deletion cleans it up.
+    CustomObjDatabase blind;
+    const auto noOfficial = blind.syncFromObjectSection(source, {"Kinopio", "Unknown"}, nullptr);
+    expect(noOfficial.added.empty(), "sync added names without the official database");
+    expect(blind.empty(), "the database must stay empty when official data is missing");
+    const auto emptyOfficialDb = ObjectDatabase();
+    const auto emptyOfficial = blind.syncFromObjectSection(source, {"Unknown"}, &emptyOfficialDb);
+    expect(emptyOfficial.added.empty(), "sync added names from an empty official database");
+
+    blind.setModelPath("Unknown", "model.bmd");
+    const auto foreign = blind.syncFromObjectSection(source, {}, nullptr);
+    expect(foreign.removed.empty(), "sync deleted an entry that no source owns");
+    expect(blind.contains("Unknown"), "an unowned entry was removed by a sync");
+
+    CustomObjDatabase owned;
+    owned.setModelPath("Unknown", "model.bmd");
+    ObjectDatabase real;
+    loadObjectDatabaseForTests(real);
+    const auto adopting = owned.syncFromObjectSection(source, {"Unknown"}, &real);
+    expect(adopting.adopted.size() == 1, "sync did not adopt the unowned entry");
+    expect(owned.find("Unknown")->source == source, "the adopted entry recorded no source");
+    expect(owned.find("Unknown")->modelPath == "model.bmd", "adopting the entry lost its model");
+    const auto stale = owned.syncFromObjectSection(source, {}, &real);
+    expect(stale.removed.size() == 1, "a source-owned entry was not removed when its name vanished");
+    expect(owned.empty(), "the stale entry survived a removal pass");
+}
+
+void testBcsvColumnEditing() {
+    using whitehole::smg::BcsvTable;
+    using whitehole::smg::BcsvType;
+    using whitehole::smg::fieldHash;
+
+    // A bracketed name is the literal hash, exactly like the game editor, so
+    // renaming an unknown column keeps pointing at the same data.
+    expect(fieldHash("[1A2B3C4D]") == 0x1A2B3C4DU, "fieldHash did not read the literal hash");
+    expect(fieldHash("number") == whitehole::smg::jmapHash("number"),
+           "fieldHash should hash a plain name with jmapHash");
+    expect(fieldHash("[notahex]") == whitehole::smg::jmapHash("[notahex]"),
+           "a non-hex bracket name should be hashed as text");
+    expect(fieldHash("[ABC]") == 0xABCU, "fieldHash should accept short hex");
+
+    BcsvTable table(makeTinyBcsv(whitehole::io::Endian::big), whitehole::io::Endian::big);
+    expect(table.fields().size() == 2, "tiny BCSV should have two fields");
+
+    // Rename keeps every value and the byte layout intact.
+    table.renameField(1, "renamed");
+    expect(!table.hasField("label"), "the old column name is still present");
+    expect(table.hasField("renamed"), "the new column name was not registered");
+    expect(table.getString(table.rows()[0], "renamed") == "Comet",
+           "renaming a column lost its value");
+    expectTablesEqual(table, BcsvTable(table.serialize(), whitehole::io::Endian::big),
+                      "renamed BCSV round trip");
+
+    // Duplicate and empty names are refused rather than silently merging two
+    // columns into one hash.
+    bool threw = false;
+    try {
+        table.renameField(0, "renamed");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    expect(threw, "renaming onto an existing column name was allowed");
+    threw = false;
+    try {
+        table.renameField(0, "");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    expect(threw, "renaming a column to an empty name was allowed");
+    threw = false;
+    try {
+        table.renameField(99, "whatever");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    expect(threw, "renaming an out-of-range column was allowed");
+
+    // Removing a column drops the value from every row and leaves the rest
+    // readable; the freed bytes become padding.
+    expect(!table.removeField(table.fields().size()), "removing an out-of-range column reported success");
+    expect(table.removeField(0), "removing a valid column failed");
+    expect(table.fields().size() == 1, "the column was not removed");
+    for (const auto& row : table.rows()) {
+        expect(row.values.size() == 1, "removing a column left a ragged row");
+    }
+    expect(table.getString(table.rows()[0], "renamed") == "Comet",
+           "removing a column damaged a neighbour");
+    expectTablesEqual(table, BcsvTable(table.serialize(), whitehole::io::Endian::big),
+                      "column-removed BCSV round trip");
+
+    // Type change: narrowing a byte to an integer is always safe.
+    BcsvTable typed;
+    const auto valueIndex = typed.ensureField("v", BcsvType::byte);
+    (void)typed.addRow();
+    typed.setInt(typed.rows()[0], "v", 100); // fits a signed byte
+    typed.setFieldType(valueIndex, BcsvType::integer);
+    expect(typed.fields()[valueIndex].type == BcsvType::integer, "setFieldType did not apply");
+    expect(typed.getInt(typed.rows()[0], "v") == 100, "setFieldType lost the value");
+    expect(typed.fields()[valueIndex].mask == 0xFFFFFFFFU, "setFieldType did not reset the mask");
+    expectTablesEqual(typed, BcsvTable(typed.serialize(), whitehole::io::Endian::big),
+                      "retyped BCSV round trip");
+
+    // Widening a field into its neighbour's storage is refused: serialize()
+    // would clobber the next column.
+    BcsvTable tight;
+    const auto first = tight.ensureField("a", BcsvType::byte);
+    (void)tight.ensureField("b", BcsvType::byte);
+    (void)tight.addRow();
+    threw = false;
+    try {
+        tight.setFieldType(first, BcsvType::floatingPoint);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    expect(threw, "widening a field over its neighbour was allowed");
+    expect(tight.fields()[first].type == BcsvType::byte, "a refused type change was applied anyway");
+}
+
+void testValidationCustomObjects() {
+    using whitehole::db::CustomObjDatabase;
+    using whitehole::db::ObjectDatabase;
+    using whitehole::edit::Severity;
+    using whitehole::edit::validateStage;
+
+    const auto root = std::filesystem::path(WHITEHOLE_SOURCE_DIR);
+    ObjectDatabase database;
+    loadObjectDatabaseForTests(database);
+    expect(!database.empty(), "objectdb.json did not load for the custom object validation test");
+
+    auto stage = whitehole::smg::StageArchive::openMapFile(root / "data" / "templates" / "SMG2BigGalaxyMap.arc");
+    expect(!stage.objects().empty(), "template stage has no objects to validate");
+    auto& objects = stage.objects();
+    objects[0].name = "MyModdedRock";
+    objects[0].scale = {1.0F, 1.0F, 1.0F};
+    stage.applyEdits();
+
+    // A name only the modder's own registry knows must not be flagged.
+    const auto unknownReport = validateStage(stage, database, 2);
+    bool flagged = false;
+    for (const auto& finding : unknownReport.findings) {
+        if (finding.code == "unknown-object" && finding.objectIndex == 0) {
+            flagged = true;
+        }
+    }
+    expect(flagged, "an unregistered custom name was not reported as unknown");
+
+    CustomObjDatabase custom;
+    custom.setModelPath("MyModdedRock", "rock.bmd");
+    const auto knownReport = validateStage(stage, database, 2, &custom);
+    for (const auto& finding : knownReport.findings) {
+        expect(!(finding.code == "unknown-object" && finding.objectIndex == 0),
+               "a registered custom object was still reported as unknown");
+    }
+    expect(knownReport.count(Severity::Warning) < unknownReport.count(Severity::Warning),
+           "registering a custom object did not reduce the warning count");
 }
 
 void testProjectArchives() {
@@ -3490,6 +3769,10 @@ int main() {
         testObjectDatabase();
         testObjectDatabaseV2();
         testObjectDatabaseCache();
+        testCustomObjDatabase();
+        testCustomObjSync();
+        testBcsvColumnEditing();
+        testValidationCustomObjects();
         testRealObjectDatabase();
         testDataHolderRoundTrip();
         testDbHelpersRoundTrip();

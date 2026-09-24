@@ -448,67 +448,39 @@ bool createDeviceD3D(HWND window) {
     desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    // Flip model requires at least two buffers; DXGI rejects a single-buffer
-    // flip chain outright, so this is not optional for the effects below.
     desc.BufferCount = 2;
     desc.OutputWindow = window;
     desc.Windowed = TRUE;
 
-    // THE FLICKER FIX. The editor hosts a plain Win32 child window that runs
-    // OpenGL inside a D3D11 shell. With the legacy bit-blit model
-    // (DXGI_SWAP_EFFECT_DISCARD) Present() copies the whole back buffer onto the
-    // front buffer -- including the rectangle the child occupies -- so every
-    // single frame the shell's opaque dock background is stamped over the 3D
-    // view, and the child has to repaint over the top. Whether the compositor
-    // samples between those two steps is a race, which is exactly the
-    // persistent, maddening flicker the old "draw the child after Present"
-    // workaround was fighting: it only changed which side of the race won.
+    // The bit-blit swap model is REQUIRED here, not a legacy leftover. The
+    // editor hosts a plain Win32 child window that runs OpenGL inside this
+    // D3D11 shell, and DWM composites a child window as its own surface stacked
+    // ABOVE the parent's -- that is the only reason the viewport is visible at
+    // all. Flip model (FLIP_DISCARD/FLIP_SEQUENTIAL) presents the parent as one
+    // self-contained surface that is NOT clipped around child windows, so it
+    // paints straight over the OpenGL child and the 3D view disappears behind
+    // the shell's dock background even though the child is visible, correctly
+    // sized and still rendering into its own back buffer.
     //
-    // Flip model hands DWM two independent redirection surfaces (one per HWND)
-    // and composites them atomically at present time, so the shell can never
-    // erase the viewport. FLIP_DISCARD is preferred (no stale-buffer copy),
-    // FLIP_SEQUENTIAL is the fallback for drivers that reject it, and the
-    // bit-blit model is kept only so an exotic driver still boots -- with a
-    // log line saying the flicker may return there.
-    const DXGI_SWAP_EFFECT kPreferred[] = {
-        DXGI_SWAP_EFFECT_FLIP_DISCARD,
-        DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        DXGI_SWAP_EFFECT_DISCARD,
-    };
+    // So the flicker cannot be fixed at the swap-chain level; it has to be
+    // fixed by ordering (draw the child after the parent presents) and by not
+    // needlessly invalidating it. See renderIfVisible() below.
+    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
     const D3D_FEATURE_LEVEL levels[] = {
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
         D3D_FEATURE_LEVEL_10_0,
     };
     D3D_FEATURE_LEVEL featureLevel{};
     HRESULT createHr = S_OK;
-    HRESULT hr = E_FAIL;
-    for (const DXGI_SWAP_EFFECT effect : kPreferred) {
-        desc.SwapEffect = effect;
-        hr = D3D11CreateDeviceAndSwapChain(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels,
-            static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION, &desc,
-            &g_swapChain, &g_device, &featureLevel, &g_context);
-        if (SUCCEEDED(hr)) {
-            if (effect == DXGI_SWAP_EFFECT_DISCARD) {
-                // No state exists this early, so report to the debugger rather
-                // than the (not yet running) log panel.
-                OutputDebugStringA("Whitehole: swap chain fell back to the bit-blit model; "
-                                   "the 3D viewport may flicker on this display driver.\n");
-            }
-            break;
-        }
-        // A failed attempt can leave a half-made device behind; drop it before
-        // retrying with a different effect.
-        if (g_swapChain != nullptr) { g_swapChain->Release(); g_swapChain = nullptr; }
-        if (g_device != nullptr) { g_device->Release(); g_device = nullptr; }
-        if (g_context != nullptr) { g_context->Release(); g_context = nullptr; }
-        createHr = hr;
-    }
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels,
+        static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION, &desc,
+        &g_swapChain, &g_device, &featureLevel, &g_context);
     if (FAILED(hr)) {
         // Hardware device failed (e.g. no GPU driver in a VM/RDP session);
         // fall back to the WARP software rasterizer so the editor still boots.
         createHr = hr;
-        desc.SwapEffect = kPreferred[0];
         hr = D3D11CreateDeviceAndSwapChain(
             nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels,
             static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION, &desc,
@@ -5280,25 +5252,20 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         g_context->ClearRenderTargetView(g_renderTarget, clearColor);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        // VSync. With flip model a fully occluded/minimized window reports
-        // DXGI_STATUS_OCCLUDED, which is a *success* code meaning "nothing was
-        // presented because you cannot see it" -- not an error. Skip the GL
-        // swap with it so a minimized editor does not keep rendering a scene
-        // nobody can see, and so the first frame after restoring is not built
-        // from a stale compositor state.
-        const HRESULT presentHr = g_swapChain->Present(1, 0);
-        const bool occluded = presentHr == DXGI_STATUS_OCCLUDED;
+        // VSync. DXGI_STATUS_OCCLUDED is a success code, not a failure, but it
+        // must NOT gate the GL child: the swap chain's visibility has nothing to
+        // do with whether the child HWND is on screen. Gating on it left the
+        // viewport blank for as long as the shell reported occluded, which is
+        // not something the child can recover from by itself.
+        g_swapChain->Present(1, 0);
 
-        // Draw the 3D child exactly once per loop. In flip model DWM composites
-        // the shell and the OpenGL child from two independent redirection
-        // surfaces, so this no longer races the parent present the way the old
-        // bit-blit swap chain did -- the shell can no longer stomp the viewport,
-        // which was the source of the persistent flicker.
-        if (!occluded) {
-            state.viewport.renderIfVisible();
-        } else {
-            state.viewport.invalidate(); // redraw as soon as it is visible again
-        }
+        // Draw the 3D child exactly once per loop, AFTER the parent presents.
+        // With the bit-blit swap model the parent's Present rewrites the whole
+        // window surface, so anything the child drew before it is erased --
+        // hence the ordering, which is what keeps the viewport on screen. It is
+        // also the reason the shell cannot be switched to flip model: that
+        // would stop erasing the child but would then composite over it.
+        state.viewport.renderIfVisible();
     }
 
     // --- Cleanup ---

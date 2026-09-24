@@ -69,7 +69,14 @@ public:
     // nullptr unbinds and drops every cached mesh (e.g. when a map archive is
     // opened without a game directory).
     void bind(const io::DirectoryFilesystem* filesystem);
+    // A workspace was opened: ObjectData lookups can resolve names.
     [[nodiscard]] bool bound() const noexcept { return filesystem_ != nullptr; }
+    // A custom-object registry is attached. This is deliberately separate from
+    // bound(): a registered model path is a plain OS path that loads without any
+    // game directory, so a session with only a map file can still preview a
+    // modder's own object. Gating scene rebuilds on bound() alone would silently
+    // drop those previews, which is exactly what this accessor exists to avoid.
+    [[nodiscard]] bool hasCustomObjects() const noexcept { return customObjects_ != nullptr; }
 
     // Optional name substitution table (data/modelsubstitutions.json).
     void setSubstitutions(const db::ModelSubstitutions* substitutions) noexcept { substitutions_ = substitutions; }

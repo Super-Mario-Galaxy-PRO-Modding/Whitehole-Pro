@@ -2169,6 +2169,37 @@ void testBmdMaterialTextureRouting() {
     deadStage.tevTexMap[0] = -1; // 0xFF: stage samples no texture
     deadStage.textureIndices[0] = 5;
     expect(deadStage.primaryTextureSlot() == 5, "dead TEV stage must fall back to the first used map");
+
+    // Depth compares must be restated for the viewport's reversed-Z buffer.
+    // The renderer clears depth to 0 and maps near to 1, so "nearer" is the
+    // LARGER value. Passing the authored compare through unchanged made
+    // LESS/LEQUAL reject every visible fragment, which is why textured models
+    // rendered nothing at all while the untextured path (no per-material depth
+    // func) still drew.
+    const auto reversed = [](std::uint8_t authored) {
+        BmdMaterial material{};
+        material.depthFunction = authored;
+        return material.depthFunctionReversedZ();
+    };
+    expect(reversed(1) == 4, "LESS must become GREATER under reversed-Z");
+    expect(reversed(3) == 6, "LEQUAL must become GEQUAL under reversed-Z");
+    expect(reversed(4) == 1, "GREATER must become LESS under reversed-Z");
+    expect(reversed(6) == 3, "GEQUAL must become LEQUAL under reversed-Z");
+    // Equality-only compares are symmetric and must pass through untouched.
+    expect(reversed(0) == 0, "NEVER must be unchanged by the depth-space flip");
+    expect(reversed(2) == 2, "EQUAL must be unchanged by the depth-space flip");
+    expect(reversed(5) == 5, "NOTEQUAL must be unchanged by the depth-space flip");
+    expect(reversed(7) == 7, "ALWAYS must be unchanged by the depth-space flip");
+    // The mapping must be an involution: applying it twice is the identity, so
+    // the frame default and the state-restore default cannot drift apart.
+    for (std::uint8_t compare = 0; compare < 8; ++compare) {
+        BmdMaterial material{};
+        material.depthFunction = compare;
+        const auto once = material.depthFunctionReversedZ();
+        material.depthFunction = once;
+        expect(material.depthFunctionReversedZ() == compare,
+               "reversed-Z depth mapping is not self-inverse");
+    }
 }
 
 

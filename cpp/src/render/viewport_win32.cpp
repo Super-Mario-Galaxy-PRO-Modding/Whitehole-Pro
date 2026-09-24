@@ -418,6 +418,25 @@ GlBlendEquation blendEquationProc() noexcept {
     return proc;
 }
 
+using GlActiveTexture = void(APIENTRY*)(unsigned int);
+
+// glActiveTexture is not declared by the legacy <GL/gl.h> header used by the
+// MinGW/MSYS2 toolchain. Resolve it through WGL like the other post-1.1
+// entry point above; a null result means the context only has the default
+// texture unit, which is already the desired unit.
+void selectDefaultTextureUnit() noexcept {
+    static const GlActiveTexture proc = []() -> GlActiveTexture {
+        const auto address = reinterpret_cast<std::intptr_t>(wglGetProcAddress("glActiveTexture"));
+        if (address == 0 || address == 1 || address == 2 || address == 3 || address == -1) {
+            return nullptr;
+        }
+        return reinterpret_cast<GlActiveTexture>(address);
+    }();
+    if (proc != nullptr) {
+        proc(0x84C0); // GL_TEXTURE0
+    }
+}
+
 } // namespace
 
 } // namespace
@@ -663,7 +682,7 @@ void ViewportWindow::drawTexturedModel(const std::shared_ptr<const ModelMesh>& m
             name = textureCache_.missingTexture();
         }
         if (name != boundName) {
-            glActiveTexture(GL_TEXTURE0);
+            selectDefaultTextureUnit();
             if (boundName != 0) {
                 glBindTexture(GL_TEXTURE_2D, 0);
             }
@@ -1510,7 +1529,7 @@ void ViewportWindow::drawFrame(bool pollInputFrame) {
         glEnable(GL_COLOR_MATERIAL);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        glActiveTexture(GL_TEXTURE0);
+        selectDefaultTextureUnit();
         glBindTexture(GL_TEXTURE_2D, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
@@ -1640,7 +1659,6 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     const float half = ViewportCamera::kFieldOfView * 0.5F;
-    const float tanHalf = static_cast<float>(std::tan(static_cast<double>(half)));
     // Dynamic clip planes: near tracks the orbit distance, far tracks distance
     // + scene radius, so 24-bit depth stays precise at every zoom instead of
     // z-fighting rails/overlays from a fixed 1..60000 frustum at galaxy range.

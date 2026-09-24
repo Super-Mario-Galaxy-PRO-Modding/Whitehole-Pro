@@ -697,6 +697,7 @@ void syncTransformBuffers(EditorState& state) {
 }
 
 bool markDirty(EditorState& state);
+void commitDragAsUndo(EditorState& state, const char* label);
 void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit);
 
 // Applies one gizmo message to the whole selection. Begin snapshots every

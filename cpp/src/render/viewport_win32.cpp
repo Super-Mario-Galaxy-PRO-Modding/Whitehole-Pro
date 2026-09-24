@@ -42,11 +42,6 @@ namespace {
 constexpr wchar_t kClassName[] = L"WhiteholeProViewport";
 bool classRegistered = false;
 
-// Forward declarations for the file-local gizmo helpers defined near drawGizmo.
-void drawGizmoCube(const math::Vec3f& centre, float half);
-void drawGizmoCone(const math::Vec3f& base, const math::Vec3f& direction, float radius, float length);
-void drawGizmoRing(const math::Vec3f& centre, const math::Vec3f& axis, float radius);
-
 // Number of shapes matches CategoryStyle::Shape; meshes are filled lazily on
 // first paint while the GL context is current.
 constexpr int kShapeCount = 5;
@@ -1319,9 +1314,17 @@ bool ViewportWindow::initGL() {
     // compositor always samples shell + viewport as one complete image. An
     // extension-less driver just keeps the old blocking behaviour.
     if (wglMakeCurrent(device_, glContext_) == TRUE) {
+        // PROC -> function-pointer reinterpret_cast trips -Wcast-function-type
+        // on GCC (PROC is int(*)()); route through intptr_t like
+        // blendEquationProc() below, and honour the WGL sentinel values.
         using SwapIntervalFn = BOOL(WINAPI*)(int);
-        const auto swapInterval =
-            reinterpret_cast<SwapIntervalFn>(wglGetProcAddress("wglSwapIntervalEXT"));
+        const auto procAddress =
+            reinterpret_cast<std::intptr_t>(wglGetProcAddress("wglSwapIntervalEXT"));
+        SwapIntervalFn swapInterval = nullptr;
+        if (procAddress != 0 && procAddress != 1 && procAddress != 2 && procAddress != 3 &&
+            procAddress != -1) {
+            swapInterval = reinterpret_cast<SwapIntervalFn>(procAddress);
+        }
         if (swapInterval != nullptr) {
             swapInterval(0);
         }

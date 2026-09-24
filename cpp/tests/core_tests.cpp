@@ -543,7 +543,7 @@ void testViewportScene() {
     // select empty proxy space.
     float emptyX = 0.0F;
     float emptyY = 0.0F;
-    expect(camera.worldToScreen(box.world.transformPoint({0.99F, 0.99F, 0.0F}), 800.0F, 600.0F,
+    expect(camera.worldToScreen(box.world.transformPoint({0.99F, 0.99F, 0.99F}), 800.0F, 600.0F,
                                 emptyX, emptyY),
            "the empty-proxy pick point must project");
     expect(!scene.pick(camera, emptyX, emptyY, 800.0F, 600.0F).has_value(),

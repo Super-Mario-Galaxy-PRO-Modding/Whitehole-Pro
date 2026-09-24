@@ -709,7 +709,7 @@ void ViewportWindow::drawTexturedModel(const std::shared_ptr<const ModelMesh>& m
             glDisable(GL_DEPTH_TEST);
         } else {
             glEnable(GL_DEPTH_TEST);
-            glDepthFunc(tableAt(kDepthFuncs, material != nullptr ? material->depthFunction : 1, GL_LESS));
+            glDepthFunc(tableAt(kDepthFuncs, material != nullptr ? material->depthFunction : 6, GL_GEQUAL));
         }
         GLboolean depthMask = material != nullptr && !material->depthWrite ? GL_FALSE : GL_TRUE;
         if (split && wantTranslucent) {
@@ -761,7 +761,7 @@ void ViewportWindow::drawTexturedModel(const std::shared_ptr<const ModelMesh>& m
     glDisable(GL_COLOR_LOGIC_OP);
     glDisable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GEQUAL);
     glDepthMask(GL_TRUE);
     glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
 }
@@ -1411,8 +1411,9 @@ bool ViewportWindow::initGL() {
             swapInterval = reinterpret_cast<SwapIntervalFn>(procAddress);
         }
         if (swapInterval != nullptr) {
-            swapInterval(0);
+            swapInterval(1);
         }
+        glClearDepth(0.0F);
         wglMakeCurrent(nullptr, nullptr);
     }
     RECT rect{};
@@ -1557,17 +1558,10 @@ bool ViewportWindow::renderIfVisible() {
         return false;
     }
 
-    // Input is sampled every host frame so held movement keys, wheel input and
-    // camera tweens remain responsive even when the scene itself is static.
-    // Those operations call invalidate() when they change the image. Avoid an
-    // unconditional clear/swap on every host Present: for a large galaxy that
-    // needless swap can outrun DWM's child composition and creates the visible
-    // blink we are trying to eliminate.
+    // A visible GL child is rendered every host tick. `dirty_` is retained
+    // only as an invalidation hint for callers; it must not gate the viewport
+    // pass or static scenes can appear frozen between compositor updates.
     pollInput();
-    if (!dirty_) {
-        ValidateRect(window_, nullptr);
-        return false;
-    }
     drawFrame(false);
     // Cancel the WM_PAINT invalidate() queued, so this redraw is not repeated
     // the next time the message queue drains.
@@ -1607,8 +1601,15 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     // z-fighting rails/overlays from a fixed 1..60000 frustum at galaxy range.
     const float nearPlane = camera_.nearPlane();
     const float farPlane = camera_.farPlane(scene_.frameDistance());
-    const float top = tanHalf * nearPlane;
-    glFrustum(-top * aspect, top * aspect, -top, top, nearPlane, farPlane);
+    const float depthRange = farPlane - nearPlane;
+    // Reversed-Z column-major matrix: near maps to 1, far maps to 0.
+    const float f = 1.0F / static_cast<float>(std::tan(static_cast<double>(half)));
+    const GLfloat projection[16]{
+        f / static_cast<float>(aspect), 0.0F, 0.0F, 0.0F,
+        0.0F, f, 0.0F, 0.0F,
+        0.0F, 0.0F, -nearPlane / depthRange, -1.0F,
+        0.0F, 0.0F, -(nearPlane * farPlane) / depthRange, 0.0F};
+    glLoadMatrixf(projection);
     glMatrixMode(GL_MODELVIEW);
     // Matrix4 keeps element (row, column) at values[4 * row + column], which is
     // exactly the column-major layout glLoadMatrixf expects, so the rendered

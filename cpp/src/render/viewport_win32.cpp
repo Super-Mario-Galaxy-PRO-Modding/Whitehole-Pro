@@ -1482,8 +1482,29 @@ bool ViewportWindow::initGL() {
             swapInterval = reinterpret_cast<SwapIntervalFn>(procAddress);
         }
         if (swapInterval != nullptr) {
-            swapInterval(1);
+            // 0 = present the child's patch immediately, do NOT wait for the
+            // next vblank. The shell's D3D Present(1, 0) already paces the app
+            // at the monitor refresh, and it rewrites the whole window surface --
+            // including this child's region -- every frame, so the child MUST
+            // re-patch its pixels straight afterwards to land in the same
+            // compositor sample.
+            //
+            // Passing 1 here (interval == vsync ON, the driver default) makes
+            // SwapBuffers block until the NEXT refresh, so the present's blank
+            // state stays on screen for a whole vblank and the scene is then
+            // drawn again for the one after it. That is precisely the
+            // alternating blink this comment describes, and it is worst with
+            // slow (large-galaxy) frames because the two halves drift in and
+            // out of phase. An extension-less driver keeps the blocking
+            // behaviour, so this is a mitigation rather than a guarantee.
+            swapInterval(0);
         }
+        // Double buffering only defines WHICH buffer we draw into, not that
+        // drawing to the back buffer is the driver's choice. Some drivers pick
+        // the front buffer, which lets the compositor sample half-drawn
+        // geometry; naming it explicitly removes that class of flicker.
+        glDrawBuffer(GL_BACK);
+        glReadBuffer(GL_BACK);
         glClearDepth(0.0F);
         wglMakeCurrent(nullptr, nullptr);
     }

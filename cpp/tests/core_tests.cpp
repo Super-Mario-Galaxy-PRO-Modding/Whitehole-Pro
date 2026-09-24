@@ -2312,6 +2312,23 @@ std::vector<std::uint8_t> makeMat3Body() {
     for (std::size_t entry = 0; entry < 8; ++entry) {
         putU16(body, kTextureIndexTable - 8 + entry * 2, entry == 0 ? 0 : 0xFFFF);
     }
+    // Non-zero ZMode / alpha-compare / blend-info / cull entries so the MAT3
+    // walk is proven to land on those tables: a shifted walk reads the same
+    // zeros a sparse fixture has, which would render as "never draw, no
+    // depth, no blend" just as silently as a correct walk of real zeros.
+    body[kCullTable - 8] = 2;               // cull back faces
+    body[kZModeTable - 8 + 0] = 1;          // depth test on
+    body[kZModeTable - 8 + 1] = 3;          // GL_LEQUAL
+    body[kZModeTable - 8 + 2] = 1;          // fragments update depth
+    body[kAlphaCompareTable - 8 + 0] = 4;   // GREATER
+    body[kAlphaCompareTable - 8 + 1] = 128; // reference 0
+    body[kAlphaCompareTable - 8 + 2] = 0;   // AND merge
+    body[kAlphaCompareTable - 8 + 3] = 7;   // ALWAYS
+    body[kAlphaCompareTable - 8 + 4] = 0;   // reference 1
+    body[kBlendInfoTable - 8 + 0] = 1;      // blend (not none/logic/subtract)
+    body[kBlendInfoTable - 8 + 1] = 4;      // src: SRC_ALPHA
+    body[kBlendInfoTable - 8 + 2] = 5;      // dst: ONE_MINUS_SRC_ALPHA
+    body[kBlendInfoTable - 8 + 3] = 0;      // op: add
     // The record's texture-index block sits at record + 0x84 and holds one
     // short per slot; the section grows to fit it before the tables.
     constexpr std::size_t kRecordTexBlock = kSectionStart + 0x84;
@@ -2426,6 +2443,24 @@ void testBmdParsing() {
     expect(std::abs(model.materials[0].ambientColor[1] - 1.0F) < 0.01F, "bmd ambient colour was not read");
     expect(model.materials[0].textureIndices[0] == 0, "bmd material texture index was not read");
     expect(model.materials[0].textureIndices[7] == -1, "bmd unused texture map should be -1");
+    // Phase C: ZMode / alpha-compare / blend-info / cull table values must
+    // land on the material -- only non-zero entries prove the record walk is
+    // aligned, since a shifted walk reads the fixture's zeros just fine.
+    expect(model.materials[0].cullingMode == 2, "bmd cull mode was not read");
+    expect(model.materials[0].depthTest && model.materials[0].depthWrite &&
+               model.materials[0].depthFunction == 3,
+           "bmd zmode (test/function/write) was not read");
+    expect(model.materials[0].alphaFunc0 == 4 && model.materials[0].alphaRef0 == 128 &&
+               model.materials[0].alphaOp == 0 && model.materials[0].alphaFunc1 == 7 &&
+               model.materials[0].alphaRef1 == 0,
+           "bmd alpha compare was not read");
+    expect(model.materials[0].alphaTestEnabled(),
+           "a GREATER/ALWAYS pair must run a real alpha test");
+    expect(model.materials[0].blendMode == 1 && model.materials[0].blendSrcFactor == 4 &&
+               model.materials[0].blendDstFactor == 5 && model.materials[0].blendOp == 0,
+           "bmd blend info was not read");
+    expect(model.materials[0].translucent(),
+           "a blend-mode material should join the translucent pass");
 
     expect(model.textures.size() == 1, "bmd texture count is wrong");
     expect(model.textures[0].width == 2 && model.textures[0].height == 2, "bmd texture header is wrong");
@@ -2442,6 +2477,43 @@ void testBmdParsing() {
            "model mesh lost the material colour");
     expect(mesh.triangles.front().materialIndex == 0, "model mesh lost the material index");
     expect(std::abs(mesh.triangles.front().b.normal.z - 1.0F) < 0.01F, "model mesh normals are wrong");
+
+    // Textures (Phase C): the mesh must carry the material/texture tables so
+    // the renderer can bind materialIndex -> textureIndices[0] -> textures[0]
+    // without keeping the parsed BmdModel alive.
+    expect(mesh.materials.size() == 1 && mesh.textures.size() == 1,
+           "model mesh did not carry the material/texture tables");
+    expect(mesh.materials[0].textureIndices[0] == 0, "mesh material lost its texture slot");
+    expect(mesh.textures[0].base().rgba[0] == 0x80, "mesh texture table lost the decoded BTI pixels");
+    expect(mesh.triangles.front().translucent, "model mesh lost the translucent pass flag");
+
+    // Multi-part merge (Phase A + C): appending a second part must shift the
+    // appended triangles' material indices past dst's material table AND shift
+    // the appended materials' texture indices past dst's texture table, so a
+    // PlantA01 triangle still points at ITS material/texture after the
+    // tables are concatenated.
+    {
+        auto first = buildModelMesh(model);
+        auto second = buildModelMesh(model);
+        whitehole::render::appendModelMesh(first, second);
+        expect(first.triangles.size() == 4, "appendModelMesh did not stack the part's triangles");
+        expect(first.materials.size() == 2 && first.textures.size() == 2,
+               "appendModelMesh did not concatenate the material/texture tables");
+        expect(first.triangles[0].materialIndex == 0, "original triangle material index changed on append");
+        expect(first.triangles[2].materialIndex == 1,
+               "appended triangle kept its unshifted material index");
+        expect(first.materials[1].textureIndices[0] == 1,
+               "appended material's texture index was not shifted past dst's texture table");
+        expect(first.skippedPrimitives == 0 && first.droppedEmptyMatrixTable == 0 &&
+                   first.droppedBadMatrixIndex == 0,
+               "appendModelMesh corrupted the drop counters");
+        // Bounds are NOT recomputed by append; the caller does it after all
+        // parts are in (ModelLibrary::loadModel does exactly that).
+        whitehole::render::recomputeMeshBounds(first);
+        expect(first.radius > 0.0F && std::abs(first.boundsMax.x - 1.0F) < 0.001F,
+               "recomputeMeshBounds after a merge produced wrong bounds");
+    }
+
     expect(model.valid(), "bmd model should report itself as valid");
 
     // Skinning safety: DRW1's matrix list and EVP1's envelope list are sized

@@ -29,6 +29,44 @@
 
 namespace whitehole::render {
 
+// GL model-texture cache: uploads decoded TEX1/BTI base mip levels as RGBA8
+// textures and hands out GL names per (mesh identity, texture slot).
+//
+// Why the mesh pointer is the key: BTI tables live on ModelMesh now, and the
+// mesh shared_ptr outlives any single frame, so keying on it needs no archive
+// plumbing in the renderer. Entries whose mesh died are dropped lazily on the
+// next lookup (meshes outlive display lists, so no live texture is ever
+// orphaned by the prune).
+//
+// Pure Win32+GL by design; the pure-data mesh side stays unit-testable. All
+// upload state is save/restored (pixel store, bound texture, texture-enable)
+// so the composited frame looks identical with the cache hot or cold.
+class ModelTextureCache {
+public:
+    ModelTextureCache() = default;
+    ~ModelTextureCache();
+
+    ModelTextureCache(const ModelTextureCache&) = delete;
+    ModelTextureCache& operator=(const ModelTextureCache&) = delete;
+
+    // GL name for `mesh.textures[textureIndex]`, uploading on first use.
+    // Returns 0 when texturing is unavailable or the slot is out of range
+    // (caller draws flat-colored then). The shared_ptr is what anchors the
+    // cache entry: the mesh outlives any frame via ViewportBox::model.
+    [[nodiscard]] unsigned int textureFor(const std::shared_ptr<const ModelMesh>& mesh,
+                                          std::size_t textureIndex, const char* filter);
+
+    // Forgets every uploaded texture (context loss, settings change).
+    void clear() noexcept;
+
+private:
+    struct Entry {
+        std::weak_ptr<const ModelMesh> mesh;
+        std::vector<unsigned int> names; // parallel to mesh.textures, 0 = not uploaded
+    };
+    std::vector<Entry> entries_;
+};
+
 class ViewportWindow {
 public:
     ViewportWindow();
@@ -101,6 +139,26 @@ public:
     void setRailHighlight(std::optional<RailPointRef> highlight) noexcept;
     void setOnGizmo(GizmoCallback callback) { onGizmo_ = std::move(callback); }
     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
+    // Drops every uploaded model texture (call when the GL context is about
+    // to die, or after the texture setting/filter changes).
+    void clearModelTextures() noexcept { textureCache_.clear(); }
+    // Model texturing: on = per-material TEX1 textures modulated by triangle
+    // color (Java parity); off = legacy flat material colors. Filter is
+    // "nearest" or "linear" from settings.textureFilter.
+    void setTexturedModels(bool textured) noexcept {
+        if (textured_ == textured) { return; }
+        textured_ = textured;
+        invalidate();
+    }
+    void setTextureFilter(const char* filter) noexcept;
+    // Model translucency: on = two-pass draw (opaque with depth writes, then
+    // the blended pass with depth writes off); off = single opaque pass, the
+    // legacy behaviour. Mirrors settings.translucentModels.
+    void setTranslucentModels(bool translucent) noexcept {
+        if (translucent_ == translucent) { return; }
+        translucent_ = translucent;
+        invalidate();
+    }
 
 private:
     // Cached GL display lists for one model mesh: `shaded` bakes the material
@@ -122,10 +180,24 @@ private:
     void paint();
     void updateSize(int width, int height);
     void applyCameraToGL(int width, int height);
-    void drawShape(const ViewportBox& box, bool selected, bool hovered);
+    // Which scene-wide model pass is drawing. drawFrame runs one box loop per
+    // pass (Java's GalaxyEditorForm renders OPAQUE then TRANSLUCENT through
+    // the same renderAllObjects loop twice), so drawShape needs the pass to
+    // skip the drawing that belongs to the other loop.
+    enum class ModelPass { Opaque, Translucent };
+    void drawShape(const ViewportBox& box, bool selected, bool hovered, ModelPass pass);
     void drawGizmo();
     void drawOverlays();
-    void drawModelTriangles(const ModelMesh& mesh, bool bakeColors);
+    // Flat path (display lists + untextured immediate). Textured models never
+    // use display lists -- see drawTexturedModel below.
+    void drawModelTriangles(const ModelMesh& mesh, bool bakeColors, const char* filter = nullptr,
+                            ModelTextureCache* textures = nullptr);
+    // Textured immediate path: per-triangle material texture binds from the
+    // upload cache, modulated by triangle colour (Java BmdRenderer parity),
+    // split into the opaque + blended translucent passes. selected/hovered
+    // swap the material colour for the same highlight the flat path uses.
+    void drawTexturedModel(const std::shared_ptr<const ModelMesh>& mesh, const char* filter,
+                           bool selected, bool hovered);
     unsigned int modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain);
     void pruneModelLists() noexcept;
     void drawGrid();
@@ -190,6 +262,15 @@ private:
     bool meshesFilled_{false};  // lazily built once per GL context
     std::vector<math::Vec3f> meshes_[5]; // unit triangles, one entry per CategoryStyle::Shape
     std::vector<ModelListEntry> modelLists_; // display lists, validated via weak_ptr
+    ModelTextureCache textureCache_;         // uploaded TEX1/BTI base levels
+    bool textured_{true};                    // settings.texturedModels mirror
+    bool translucent_{true};                 // settings.translucentModels mirror
+    // Set by drawShape while a textured pass runs; drawTexturedModel reads it
+    // to select its triangles and depth mask for the current pass.
+    ModelPass modelPass_{ModelPass::Opaque};
+    // Fixed-size filter mirror (no std::string in the render header): the GUI
+    // pushes settings.textureFilter here on every refresh.
+    char textureFilter_[8]{"linear"};
 
     // Fly-movement clock: reset whenever focus is lost or no key is held, so
     // pressing W after a pause never applies the paused time as one jump.

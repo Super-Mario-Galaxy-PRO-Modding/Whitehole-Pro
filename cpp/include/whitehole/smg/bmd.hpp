@@ -119,7 +119,12 @@ struct BmdMaterial {
     std::uint8_t blendSrcFactor{0};
     std::uint8_t blendDstFactor{0};
     std::uint8_t blendOp{0};
-    // GX depth compare function and the depth-write flag from ZMode.
+    // ZMode's three independent bytes: whether the depth test runs, which
+    // compare function it uses, and whether fragments update the depth buffer.
+    // Kept separate (like Bmd.java's BlendEnableDepthTest / BlendDepthFunction
+    // / BlendWriteToZBuffer) so the viewport can apply each one exactly as
+    // BmdRenderer does.
+    bool depthTest{true};
     std::uint8_t depthFunction{1};
     bool depthWrite{true};
     // Alpha-compare pair: func 0..7 (never/less/equal/lequal/greater/notequal/
@@ -137,11 +142,12 @@ struct BmdMaterial {
     [[nodiscard]] bool translucent() const noexcept {
         return pixelEngineMode == 4 || blendMode == 1 || blendMode == 3;
     }
-    // Alpha testing only matters when at least one comparison can fail.
+    // Whether BmdRenderer would enable GL_ALPHA_TEST: it only skips the test
+    // when an OR merge has an ALWAYS side (the comparison can never fail
+    // anyway). Every other combination runs a real test -- including the
+    // AND-with-NEVER case, which discards every fragment.
     [[nodiscard]] bool alphaTestEnabled() const noexcept {
-        return (alphaOp == 1 && (alphaFunc0 == 7 || alphaFunc1 == 7))
-                   ? false
-                   : !(alphaOp == 0 && (alphaFunc0 == 0 || alphaFunc1 == 0));
+        return !(alphaOp == 1 && (alphaFunc0 == 7 || alphaFunc1 == 7));
     }
 };
 

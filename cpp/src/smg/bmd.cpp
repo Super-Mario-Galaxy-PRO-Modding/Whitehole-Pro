@@ -667,6 +667,13 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
     const auto ambientColorOffset = reader.u32(sectionStart + 0x2C);
     const auto texGenCountOffset = reader.u32(sectionStart + 0x34);
     const auto tevStageCountOffset = reader.u32(sectionStart + 0x58);
+    // Swap tables, alpha-compare and blend-info (Java reads all four between
+    // the TEV stages and the fog slot; their absence changes how many bytes
+    // the record walk consumes, exactly as the Java reader handles it).
+    const auto tevSwapModeOffset = reader.u32(sectionStart + 0x60);
+    const auto tevSwapTableOffset = reader.u32(sectionStart + 0x64);
+    const auto alphaCompareOffset = reader.u32(sectionStart + 0x6C);
+    const auto blendInfoOffset = reader.u32(sectionStart + 0x70);
     const auto zModeOffset = reader.u32(sectionStart + 0x74);
     const auto zCompLocOffset = reader.u32(sectionStart + 0x78);
     const auto ditherOffset = reader.u32(sectionStart + 0x7C);
@@ -713,15 +720,17 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         (void)byteTable(sectionStart + zCompLocOffset, cursor);
         { // ZMode: one byte index into a four-byte-per-entry table. Java names
             // these BlendEnableDepthTest / BlendDepthFunction /
-            // BlendWriteToZBuffer; the entry doubles as the blend switch the
-            // game itself consults, so both land on the material together.
+            // BlendWriteToZBuffer; the fourth byte is NOT the blend switch (the
+            // blend mode comes from the BlendInfo table, read at the end of the
+            // record walk below, matching Bmd.java). All three stay independent
+            // the way Bmd.java keeps them: the renderer enables/disables the
+            // test and masks depth writes as separate GL calls.
             const auto zModeIndex = static_cast<std::size_t>(reader.u8(cursor));
             cursor += 1;
             const std::size_t zBase = sectionStart + zModeOffset + zModeIndex * 4;
-            const bool zTest = reader.u8(zBase) != 0;
+            material.depthTest = reader.u8(zBase) != 0;
             material.depthFunction = reader.u8(zBase + 1);
-            material.depthWrite = zTest && reader.u8(zBase + 2) != 0;
-            material.blendMode = reader.u8(zBase + 3) != 0 ? 1 : 0;
+            material.depthWrite = reader.u8(zBase + 2) != 0;
         } // ZMode
         // Dither enable flag (byte table lookup).
         (void)byteTable(sectionStart + ditherOffset, cursor);
@@ -758,6 +767,55 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
             cursor += 2;
             material.textureIndices[slot] = textureIndex == 0xFFFFU ? -1 : static_cast<std::int32_t>(textureIndex);
         }
+
+        // Tail of the record, walked exactly like Bmd.java: constant colours,
+        // TEV stage plumbing, the optional swap tables, fog, then the two
+        // tables this preview actually consumes.
+        cursor += 8;   // four TEV constant colours (short indices)
+        cursor += 16;  // per-stage constant colour ids (one byte each)
+        cursor += 16;  // per-stage constant alpha ids (one byte each)
+        cursor += 32;  // TEV orders (one short per slot)
+        cursor += 8;   // four TEV register colours (short indices)
+        cursor += 32;  // TEV stage table ids (one short per slot)
+        // Swap modes: an absent table consumes nothing for LIVE stages but
+        // still skips the dead ones; a present table is walked in full.
+        const auto stageCount =
+            std::clamp(static_cast<int>(tevStageCount), 0, 16);
+        if (tevSwapModeOffset != 0) {
+            cursor += 32;
+        } else {
+            cursor += 2 * static_cast<std::size_t>(16 - stageCount);
+        }
+        // Swap table: Java skips all sixteen shorts outright when the offset
+        // is zero (the "No swap modes stored in the file" branch).
+        cursor += tevSwapTableOffset != 0 ? 32 : 0;
+        cursor += 2; // fog index, unused by a static preview
+
+        { // Alpha compare: {func0, ref0, op, func1, ref1} + padding, 8 bytes
+            // per entry. Drives glAlphaFunc in the viewport (BmdRenderer's
+            // alphafunc decision, verbatim).
+            const auto alphaId = static_cast<std::size_t>(reader.u16(cursor));
+            cursor += 2;
+            const std::size_t alphaBase = sectionStart + alphaCompareOffset + alphaId * 8;
+            material.alphaFunc0 = reader.u8(alphaBase);
+            material.alphaRef0 = reader.u8(alphaBase + 1);
+            material.alphaOp = reader.u8(alphaBase + 2);
+            material.alphaFunc1 = reader.u8(alphaBase + 3);
+            material.alphaRef1 = reader.u8(alphaBase + 4);
+        }
+        { // Blend info: {mode, source factor, destination factor, operation},
+            // 4 bytes per entry. BlendMode 1 = blend, 3 = subtract; the source/
+            // destination factors index the GX blend tables the renderer maps
+            // to GL (BmdRenderer's blendsrc/blenddst, verbatim).
+            const auto blendId = static_cast<std::size_t>(reader.u16(cursor));
+            cursor += 2;
+            const std::size_t blendBase = sectionStart + blendInfoOffset + blendId * 4;
+            material.blendMode = reader.u8(blendBase);
+            material.blendSrcFactor = reader.u8(blendBase + 1);
+            material.blendDstFactor = reader.u8(blendBase + 2);
+            material.blendOp = reader.u8(blendBase + 3);
+        }
+        cursor += 2; // NBT scale index, unused by a static preview
     }
 }
 

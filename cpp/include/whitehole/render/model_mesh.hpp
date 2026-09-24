@@ -49,6 +49,12 @@ struct ModelMesh {
     // field-offset bug behind healthy-looking probe batches.
     std::size_t droppedEmptyMatrixTable{0};
     std::size_t droppedBadMatrixIndex{0};
+    // Material + texture tables copied from the parsed model, so the renderer
+    // can bind triangle.materialIndex -> materials[] -> textureIndices[0] ->
+    // textures[] without keeping the whole BmdModel alive. Stays empty for
+    // hand-built test meshes (which render flat-colored as before).
+    std::vector<smg::BmdMaterial> materials;
+    std::vector<smg::Bti> textures;
 
     [[nodiscard]] bool empty() const noexcept { return triangles.empty(); }
 };
@@ -57,5 +63,15 @@ struct ModelMesh {
 // fall outside the vertex arrays are skipped rather than clamped, so a damaged
 // file yields the geometry that is valid instead of failing the whole model.
 [[nodiscard]] ModelMesh buildModelMesh(const smg::BmdModel& model);
+
+// Appends every triangle of `src` onto `dst`, remapping triangle material
+// indices and material texture indices so multi-part merges (PlantA00 +
+// PlantA01, ...) keep pointing at the right material/texture after the tables
+// are concatenated. Counters are summed; bounds/radius are NOT recomputed
+// here (the caller runs recomputeMeshBounds after all parts are in).
+void appendModelMesh(ModelMesh& dst, const ModelMesh& src);
+
+// Re-derives boundsMin/boundsMax/radius from the triangle list.
+void recomputeMeshBounds(ModelMesh& mesh) noexcept;
 
 } // namespace whitehole::render

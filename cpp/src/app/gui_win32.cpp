@@ -632,6 +632,9 @@ void refreshViewport(EditorState& state, bool frame) {
     }
     state.viewport.setSelected(state.viewportSelected);
     state.viewport.setShowLabels(state.showLabels);
+    state.viewport.setTexturedModels(state.settings.texturedModels);
+    state.viewport.setTranslucentModels(state.settings.translucentModels);
+    state.viewport.setTextureFilter(state.settings.textureFilter.c_str());
     if (frame) {
         state.viewport.frameAll();
     } else {
@@ -2378,6 +2381,9 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
     state.viewport.setShowLabels(state.showLabels);
     state.viewport.setOverlayTheme(state.settings.darkMode);
     state.viewport.setOrbitInverted(state.settings.reverseRotation);
+    state.viewport.setTexturedModels(state.settings.texturedModels);
+    state.viewport.setTranslucentModels(state.settings.translucentModels);
+    state.viewport.setTextureFilter(state.settings.textureFilter.c_str());
     refreshViewport(state, true); // paint real content on the very first frame
     return true;
 }
@@ -2714,6 +2720,14 @@ void drawMenuBar(EditorState& state, bool& done) {
         }
         if (ImGui::MenuItem("Low-Poly Models", nullptr, &state.settings.lowPolyModels)) {
             state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
+            state.settings.save();
+            refreshViewport(state, false);
+        }
+        if (ImGui::MenuItem("Textured Models", nullptr, &state.settings.texturedModels)) {
+            state.settings.save();
+            refreshViewport(state, false);
+        }
+        if (ImGui::MenuItem("Translucent Models", nullptr, &state.settings.translucentModels)) {
             state.settings.save();
             refreshViewport(state, false);
         }
@@ -3096,6 +3110,14 @@ void drawPreferencesDialog(EditorState& state) {
     changed |= ImGui::Checkbox("Object labels", &state.showLabels);
     if (ImGui::Checkbox("Low-poly models", &state.settings.lowPolyModels)) {
         state.modelLibrary.setLowPoly(state.settings.lowPolyModels);
+        refreshViewport(state, false);
+        changed = true;
+    }
+    if (ImGui::Checkbox("Textured models", &state.settings.texturedModels)) {
+        refreshViewport(state, false);
+        changed = true;
+    }
+    if (ImGui::Checkbox("Translucent models", &state.settings.translucentModels)) {
         refreshViewport(state, false);
         changed = true;
     }
@@ -3754,6 +3776,39 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         syncViewportChild(state);
 
         // --- Keyboard shortcuts ---
+        // FOREGROUND GATE. GetAsyncKeyState reads system-wide key state, so
+        // without this every shortcut below also fires from keystrokes meant
+        // for other programs: Ctrl+O (browsers use it too) opened the map
+        // dialog at "random" times, and worse, Ctrl+S saved the map and
+        // Ctrl+Z/Y rewrote the undo history behind the author's back. The gate
+        // compares the real foreground window; child focus (the OpenGL child,
+        // an ImGui popup) keeps the top-level foreground so nothing flickers.
+        // Owned popups (the file dialog, message boxes) count as ours.
+        const HWND foregroundWindow = GetForegroundWindow();
+        const bool appForeground =
+            foregroundWindow != nullptr &&
+            (foregroundWindow == state.window || IsChild(state.window, foregroundWindow) != FALSE ||
+             GetWindow(foregroundWindow, GW_OWNER) == state.window);
+        // Stale-bit drain: a key pressed in another app in the same instant we
+        // reactivate would otherwise fire once on return. Consume every
+        // transition bit on the inactive->active edge.
+        static bool wasForeground = false;
+        if (appForeground && !wasForeground) {
+            constexpr int kDrainKeys[] = {'O', 'S', 'F', 'Z', 'Y', 'R', 'D', 'C', 'V',
+                                          'A', '1', '2', '3', VK_DELETE, VK_SPACE};
+            for (const int key : kDrainKeys) {
+                (void)(GetAsyncKeyState(key) & 1);
+            }
+            // Focus follow: alt-tabbing back lands keyboard focus on the main
+            // window, but WASD/arrows live in the viewport child -- which used
+            // to demand a click first. Hand focus over unless the author is
+            // mid-edit in a text field, so WASD works the instant we're back.
+            if (state.viewportReady && !ImGui::GetIO().WantTextInput) {
+                SetFocus(state.viewport.handle());
+            }
+        }
+        wasForeground = appForeground;
+        if (appForeground) {
         const bool ctrlDown =
             (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         if (ctrlDown && (GetAsyncKeyState('O') & 1)) {
@@ -3812,6 +3867,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
                 state.viewport.setGizmoMode(render::GizmoMode::Scale);
             }
         }
+        } // appForeground
 
         // --- Rendering ---
         ImGui::Render();

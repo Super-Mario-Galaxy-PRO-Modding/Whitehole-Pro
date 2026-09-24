@@ -8,27 +8,6 @@
 namespace whitehole::render {
 namespace {
 
-bool fetchVertex(const smg::BmdModel& model, const smg::BmdPrimitive& primitive, std::size_t vertexIndex,
-                 ModelVertex& out) {
-    if (vertexIndex >= primitive.positionIndices.size()) { return false; }
-    const auto positionIndex = static_cast<std::size_t>(primitive.positionIndices[vertexIndex]);
-    if (positionIndex >= model.positions.size()) { return false; }
-    out.position = model.positions[positionIndex];
-    if (vertexIndex < primitive.normalIndices.size()) {
-        const auto normalIndex = static_cast<std::size_t>(primitive.normalIndices[vertexIndex]);
-        if (normalIndex < model.normals.size()) { out.normal = model.normals[normalIndex]; }
-    }
-    const auto& texcoordIndices = primitive.texcoordIndices[0];
-    if (vertexIndex < texcoordIndices.size()) {
-        const auto texcoordIndex = static_cast<std::size_t>(texcoordIndices[vertexIndex]);
-        if (texcoordIndex < model.texcoords[0].size()) {
-            const auto& uv = model.texcoords[0][texcoordIndex];
-            out.texCoord = std::array<float, 2>{uv.x, uv.y};
-        }
-    }
-    return true;
-}
-
 math::Vec3f faceNormal(const ModelVertex& a, const ModelVertex& b, const ModelVertex& c) {
     const math::Vec3f normal = math::Vec3f::cross(b.position - a.position, c.position - a.position);
     return normal.length() < 0.000001F ? math::Vec3f{0.0F, 1.0F, 0.0F} : normal.normalized();
@@ -219,6 +198,8 @@ void transformPrimitive(ModelMesh& mesh, const smg::BmdModel& model, const smg::
 
 ModelMesh buildModelMesh(const smg::BmdModel& model) {
     ModelMesh mesh;
+    mesh.materials = model.materials;
+    mesh.textures = model.textures;
     if (model.positions.empty()) { return mesh; }
     const auto jointWorld = jointWorldMatrices(model);
     for (const auto& node : model.sceneGraph) {
@@ -242,9 +223,21 @@ ModelMesh buildModelMesh(const smg::BmdModel& model) {
         }
     }
     if (!mesh.triangles.empty()) {
-        mesh.boundsMin = mesh.triangles.front().a.position;
-        mesh.boundsMax = mesh.triangles.front().a.position;
-        for (const auto& triangle : mesh.triangles) {
+        recomputeMeshBounds(mesh);
+    }
+    return mesh;
+}
+
+void recomputeMeshBounds(ModelMesh& mesh) noexcept {
+    if (mesh.triangles.empty()) {
+        mesh.boundsMin = {};
+        mesh.boundsMax = {};
+        mesh.radius = 0.0F;
+        return;
+    }
+    mesh.boundsMin = mesh.triangles.front().a.position;
+    mesh.boundsMax = mesh.triangles.front().a.position;
+    for (const auto& triangle : mesh.triangles) {
             const ModelVertex* vertices[3] = {&triangle.a, &triangle.b, &triangle.c};
             for (const ModelVertex* vertex : vertices) {
                 mesh.boundsMin = {std::min(mesh.boundsMin.x, vertex->position.x),
@@ -256,8 +249,34 @@ ModelMesh buildModelMesh(const smg::BmdModel& model) {
             }
         }
         mesh.radius = (mesh.boundsMax - mesh.boundsMin).length() * 0.5F;
+}
+
+void appendModelMesh(ModelMesh& dst, const ModelMesh& src) {
+    if (src.triangles.empty()) {
+        return;
     }
-    return mesh;
+    // Shift triangle material indices past dst's table, then shift each
+    // appended material's texture indices past dst's texture table.
+    const auto materialBase = static_cast<std::int32_t>(dst.materials.size());
+    const auto textureBase = static_cast<std::int32_t>(dst.textures.size());
+    for (auto triangle : src.triangles) {
+        if (triangle.materialIndex >= 0) {
+            triangle.materialIndex += materialBase;
+        }
+        dst.triangles.push_back(triangle);
+    }
+    for (auto material : src.materials) {
+        for (auto& textureIndex : material.textureIndices) {
+            if (textureIndex >= 0) {
+                textureIndex += textureBase;
+            }
+        }
+        dst.materials.push_back(std::move(material));
+    }
+    dst.textures.insert(dst.textures.end(), src.textures.begin(), src.textures.end());
+    dst.skippedPrimitives += src.skippedPrimitives;
+    dst.droppedEmptyMatrixTable += src.droppedEmptyMatrixTable;
+    dst.droppedBadMatrixIndex += src.droppedBadMatrixIndex;
 }
 
 } // namespace whitehole::render

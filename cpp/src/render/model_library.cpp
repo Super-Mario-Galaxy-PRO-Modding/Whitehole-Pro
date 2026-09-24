@@ -7,6 +7,7 @@
 #include "whitehole/util/text.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 
 namespace whitehole::render {
@@ -75,6 +76,50 @@ bool ModelLibrary::archiveExists(std::string_view archiveName) const {
     }
     return archiveNames_.find(whitehole::util::toLower(archiveName)) != archiveNames_.end();
 }
+namespace {
+
+// Multi-part model archives: SMG ships some objects as numbered parts
+// (PlantA00..PlantA02) or body-part archives (GrapyonBody + GrapyonHead,
+// PatakuriWing) instead of one <Name>.arc. Candidates are only ever probed
+// against the user's real ObjectData listing, so a name never resolves on a
+// dump that lacks it — no guessed data, works on every computer.
+std::vector<std::string> variantCandidates(std::string_view base) {
+    std::vector<std::string> out;
+    out.reserve(14);
+    for (int n = 0; n <= 9; ++n) {
+        std::string variant(base);
+        variant += static_cast<char>('0' + n / 10);
+        variant += static_cast<char>('0' + n % 10);
+        out.push_back(std::move(variant));
+    }
+    for (const char* suffix : {"Body", "Wing", "Head", "Big"}) {
+        out.push_back(std::string(base) + suffix);
+    }
+    return out;
+}
+
+} // namespace
+
+std::string ModelLibrary::lookupArchive(std::string_view stem) const {
+    refreshListing();
+    if (listingFailed_) {
+        return {};
+    }
+    const auto found = archiveNames_.find(whitehole::util::toLower(std::string(stem) + ".arc"));
+    return found != archiveNames_.end() ? found->second : std::string{};
+}
+
+std::string ModelLibrary::substitutedCandidate(std::string_view objectName) const {
+    std::string candidate(objectName);
+    if (substitutions_ != nullptr && substitutions_->isLoaded()) {
+        std::string substitution = substitutions_->substitute(objectName);
+        if (!substitution.empty()) {
+            candidate = std::move(substitution);
+        }
+    }
+    return candidate;
+}
+
 std::string ModelLibrary::archiveNameFor(std::string_view objectName) const {
     if (filesystem_ == nullptr || objectName.empty()) {
         return {};
@@ -85,40 +130,89 @@ std::string ModelLibrary::archiveNameFor(std::string_view objectName) const {
         return {};
     }
 
-    const auto lookup = [&](std::string_view candidate) -> std::string {
-        const auto found = archiveNames_.find(whitehole::util::toLower(candidate));
-        return found != archiveNames_.end() ? found->second : std::string{};
-    };
-
-    std::string candidate(objectName);
-    if (substitutions_ != nullptr && substitutions_->isLoaded()) {
-        std::string substitution = substitutions_->substitute(objectName);
-        if (!substitution.empty()) {
-            candidate = std::move(substitution);
-        }
-    }
+    const std::string candidate = substitutedCandidate(objectName);
 
     // Java ModelSubstitutions.getSubstitutedModelName(): the Low/Middle
     // variants only apply while the low-poly setting is on. Return the
     // on-disk archive name so the case-insensitive listing stays consistent
     // with DirectoryFilesystem::read() on case-sensitive platforms.
     if (lowPoly_) {
-        if (auto low = lookup(candidate + "Low.arc"); !low.empty()) {
+        if (auto low = lookupArchive(candidate + "Low"); !low.empty()) {
             return low;
         }
-        if (auto middle = lookup(candidate + "Middle.arc"); !middle.empty()) {
+        if (auto middle = lookupArchive(candidate + "Middle"); !middle.empty()) {
             return middle;
         }
     }
-    if (auto exact = lookup(candidate + ".arc"); !exact.empty()) {
+    if (auto exact = lookupArchive(candidate); !exact.empty()) {
         return exact;
     }
+    // Multi-part / numbered model archives (PlantA00, GrapyonBody, ...):
+    // probe part variants against the on-disk listing, candidate first.
+    for (const auto& variant : variantCandidates(candidate)) {
+        if (auto hit = lookupArchive(variant); !hit.empty()) {
+            return hit;
+        }
+    }
     // A substitution that does not exist on disk falls back to the object's
-    // own name, exactly like the Java editor does.
+    // own name, exactly like the Java editor does — including its part variants.
     if (candidate != objectName) {
-        return lookup(std::string(objectName) + ".arc");
+        if (auto own = lookupArchive(objectName); !own.empty()) {
+            return own;
+        }
+        for (const auto& variant : variantCandidates(objectName)) {
+            if (auto hit = lookupArchive(variant); !hit.empty()) {
+                return hit;
+            }
+        }
     }
     return {};
+}
+
+std::vector<std::string> ModelLibrary::variantArchivesFor(std::string_view objectName) const {
+    // Companions only exist for objects WITHOUT a single exact archive: a
+    // present <Name>.arc is a self-contained object, and stacking extra part
+    // archives on it would draw unrelated models on the same slot.
+    std::vector<std::string> out;
+    if (filesystem_ == nullptr || objectName.empty()) {
+        return out;
+    }
+    refreshListing();
+    if (listingFailed_) {
+        return out;
+    }
+    const std::string candidate = substitutedCandidate(objectName);
+    if (!lookupArchive(candidate).empty() || !lookupArchive(objectName).empty()) {
+        return out;
+    }
+    const auto primaryLower = whitehole::util::toLower(archiveNameFor(objectName));
+    auto appendVariants = [&](std::string_view base) {
+        for (const auto& variant : variantCandidates(base)) {
+            auto hit = lookupArchive(variant);
+            if (hit.empty()) {
+                continue;
+            }
+            auto hitLower = whitehole::util::toLower(hit);
+            if (hitLower == primaryLower) {
+                continue; // the primary archive itself, already loaded
+            }
+            bool duplicate = false;
+            for (const auto& existing : out) {
+                if (whitehole::util::toLower(existing) == hitLower) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                out.push_back(std::move(hit));
+            }
+        }
+    };
+    appendVariants(candidate);
+    if (candidate != objectName) {
+        appendVariants(objectName);
+    }
+    return out;
 }
 
 std::shared_ptr<const ModelMesh> ModelLibrary::model(std::string_view objectName) {
@@ -209,24 +303,56 @@ const io::RarcEntry* findModelEntry(const io::RarcArchive& archive, std::string_
 }
 
 std::shared_ptr<const ModelMesh> ModelLibrary::loadModel(std::string_view objectName) {
+    // One archive -> one mesh. Empty when the archive holds no usable single
+    // BMD/BDL entry; a broken part is skipped instead of failing the object.
+    const auto meshFromArchive = [this](const std::string& archiveName) {
+        ModelMesh mesh;
+        if (archiveName.empty()) {
+            return mesh;
+        }
+        const auto bytes = filesystem_->read("/ObjectData/" + archiveName);
+        io::RarcArchive archive(bytes);
+        const std::string stem = archiveName.substr(0, archiveName.size() - 4); // strip ".arc"
+        const auto* entry = findModelEntry(archive, stem);
+        if (entry == nullptr) {
+            return mesh;
+        }
+        return buildModelMesh(smg::parseBmd(archive.read(*entry)));
+    };
+
     try {
         const std::string archiveName = archiveNameFor(objectName);
         if (archiveName.empty()) {
             return nullptr;
         }
-        const auto bytes = filesystem_->read("/ObjectData/" + archiveName);
-        io::RarcArchive archive(bytes);
+        auto mesh = std::make_shared<ModelMesh>(meshFromArchive(archiveName));
 
-        std::string stem = archiveName.substr(0, archiveName.size() - 4); // strip ".arc"
-        const auto* entry = findModelEntry(archive, stem);
-        if (entry == nullptr) {
-            return nullptr;
+        // Multi-part objects (PlantA -> PlantA00/01/02, Grapyon -> Body/Head)
+        // ship as several archives with no single <Name>.arc, so every
+        // companion part is stacked onto the same slot. Which parts exist is
+        // probed against the user's own ObjectData listing, never guessed.
+        const std::string primaryLower = whitehole::util::toLower(archiveName);
+        bool merged = false;
+        for (const auto& part : variantArchivesFor(objectName)) {
+            if (whitehole::util::toLower(part) == primaryLower) {
+                continue; // the primary archive is not its own companion
+            }
+            ModelMesh partMesh = meshFromArchive(part);
+            if (partMesh.empty()) {
+                continue;
+            }
+            // appendModelMesh remaps material/texture indices past dst's tables
+            // and concatenates the tables, so a PlantA01 triangle still points
+            // at ITS material after PlantA00's are appended.
+            appendModelMesh(*mesh, partMesh);
+            merged = true;
         }
-        const auto modelBytes = archive.read(*entry);
-        const auto parsed = smg::parseBmd(modelBytes);
-        auto mesh = std::make_shared<ModelMesh>(buildModelMesh(parsed));
+
         if (mesh->empty()) {
             return nullptr;
+        }
+        if (merged) {
+            recomputeMeshBounds(*mesh);
         }
         return mesh;
     } catch (...) {
@@ -246,6 +372,7 @@ ModelProbe ModelLibrary::probe(std::string_view objectName) const {
             report.error = "no ObjectData archive matches this object name";
             return report;
         }
+        report.partArchives = variantArchivesFor(objectName);
         const auto bytes = filesystem_->read("/ObjectData/" + report.archiveName);
         io::RarcArchive archive(bytes);
 

@@ -50,6 +50,10 @@ struct ModelProbe {
     // Emission-loop drops (used to be silent continues in buildModelMesh).
     std::size_t droppedEmptyMatrixTable{0};
     std::size_t droppedBadMatrixIndex{0};
+    // Multi-part objects: every companion archive merged into the mesh
+    // (numbered PlantA00-style parts, GrapyonBody/Head, ...). Empty for
+    // ordinary single-archive objects.
+    std::vector<std::string> partArchives;
     std::string error;         // first failing stage; empty when usable
 
     [[nodiscard]] bool usable() const noexcept { return parsed && triangles != 0; }
@@ -98,6 +102,15 @@ private:
 
     [[nodiscard]] std::shared_ptr<const ModelMesh> loadModel(std::string_view objectName);
     [[nodiscard]] bool archiveExists(std::string_view archiveName) const;
+    // Case-insensitive "<stem>.arc" lookup in the ObjectData listing cache
+    // (empty when unbound, the listing failed, or the archive is absent).
+    [[nodiscard]] std::string lookupArchive(std::string_view stem) const;
+    // Object name after ModelSubstitutions (unchanged when no rule applies).
+    [[nodiscard]] std::string substitutedCandidate(std::string_view objectName) const;
+    // Companion archives for multi-part objects: every on-disk numbered
+    // (00..09) / body-part (Body/Wing/Head/Big) variant when the object has
+    // no single exact <Name>.arc. Probed against the real listing only.
+    [[nodiscard]] std::vector<std::string> variantArchivesFor(std::string_view objectName) const;
     void refreshListing() const;
     void evictIfNeeded();
 

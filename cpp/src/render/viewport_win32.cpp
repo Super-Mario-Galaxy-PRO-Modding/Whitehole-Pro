@@ -26,6 +26,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -346,9 +347,204 @@ void LabelFont::draw(float x, float y, std::string_view utf8) const {
 
 LabelFont labelFont; // one viewport child per app; rebuilt with the GL context
 
+namespace {
+
+// The Win32 GL 1.1 header stops at GL_CLAMP; mirrored repeat arrived with
+// GL 1.4 / ARB_texture_mirrored_repeat. 0x8370 is the spec value, so this
+// fallback is safe whenever the SDK header does not provide it.
+#ifndef GL_MIRRORED_REPEAT
+#define GL_MIRRORED_REPEAT 0x8370
+#endif
+
+// GX wrap mode (from Bti::wrapS/wrapT) to GL. 0 = clamp, 1 = repeat,
+// 2 = mirror; anything else clamps, matching Java's conservative mapping.
+int glWrapFor(std::uint8_t wrap) noexcept {
+    switch (wrap) {
+        case 1: return GL_REPEAT;
+        case 2: return GL_MIRRORED_REPEAT;
+        default: return GL_CLAMP;
+    }
+}
+
+// Material's first used texture map, or -1 when the material is untextured.
+int materialTextureSlot(const smg::BmdMaterial& material) noexcept {
+    for (const auto slot : material.textureIndices) {
+        if (slot >= 0) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+// GX -> GL state tables, transcribed from BmdRenderer.render() so the C++
+// draw matches the Java editor. The index guards turn a corrupt MAT3 read
+// into the neutral factor instead of an out-of-bounds fetch.
+constexpr std::array<int, 10> kBlendSrcFactors{GL_ZERO,      GL_ONE,          GL_ONE,   GL_ZERO,
+                                               GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA,
+                                               GL_ONE_MINUS_DST_ALPHA, GL_DST_COLOR,
+                                               GL_ONE_MINUS_DST_COLOR};
+constexpr std::array<int, 10> kBlendDstFactors{GL_ZERO,      GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
+                                               GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA,
+                                               GL_ONE_MINUS_DST_ALPHA, GL_DST_COLOR,
+                                               GL_ONE_MINUS_DST_COLOR};
+constexpr std::array<int, 16> kLogicOps{GL_CLEAR,      GL_AND,         GL_AND_REVERSE, GL_COPY,
+                                        GL_AND_INVERTED, GL_NOOP,       GL_XOR,         GL_OR,
+                                        GL_NOR,        GL_EQUIV,       GL_INVERT,      GL_OR_REVERSE,
+                                        GL_COPY_INVERTED, GL_OR_INVERTED, GL_NAND,      GL_SET};
+constexpr std::array<int, 8> kCompareFuncs{GL_NEVER,  GL_LESS,    GL_EQUAL,   GL_LEQUAL,
+                                           GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+// GX compare enums line up with the GL ones for both alpha test and depth.
+constexpr std::array<int, 8> kAlphaFuncs = kCompareFuncs;
+constexpr std::array<int, 8> kDepthFuncs = kCompareFuncs;
+constexpr std::array<int, 3> kCullModes{GL_FRONT, GL_BACK, GL_FRONT_AND_BACK};
+
+template <std::size_t N>
+constexpr int tableAt(const std::array<int, N>& table, int index, int fallback) noexcept {
+    return index >= 0 && static_cast<std::size_t>(index) < N ? table[static_cast<std::size_t>(index)]
+                                                             : fallback;
+}
+
+// glBlendEquation arrived in GL 1.4, but opengl32.dll only exports GL 1.1,
+// so the entry point has to come from the driver via wglGetProcAddress. The
+// WGL spec allows sentinel return values (1/2/3/-1) instead of null for "not
+// available"; Java's isFunctionAvailable guard has the same effect -- without
+// the function the default add equation stays in force.
+#ifndef GL_FUNC_ADD
+#define GL_FUNC_ADD 0x8006
+#endif
+#ifndef GL_FUNC_SUBTRACT
+#define GL_FUNC_SUBTRACT 0x800A
+#endif
+using GlBlendEquation = void(APIENTRY*)(unsigned int);
+GlBlendEquation blendEquationProc() noexcept {
+    static const GlBlendEquation proc = []() -> GlBlendEquation {
+        const auto address = reinterpret_cast<std::intptr_t>(wglGetProcAddress("glBlendEquation"));
+        if (address == 0 || address == 1 || address == 2 || address == 3 || address == -1) {
+            return nullptr;
+        }
+        return reinterpret_cast<GlBlendEquation>(address);
+    }();
+    return proc;
+}
+
 } // namespace
 
-void ViewportWindow::drawModelTriangles(const ModelMesh& mesh, bool bakeColors) {
+} // namespace
+
+ModelTextureCache::~ModelTextureCache() = default;
+
+unsigned int ModelTextureCache::textureFor(const std::shared_ptr<const ModelMesh>& mesh,
+                                           std::size_t textureIndex, const char* filter) {
+    if (!mesh || textureIndex >= mesh->textures.size()) {
+        return 0;
+    }
+    const smg::Bti* source = &mesh->textures[textureIndex];
+
+    // Reuse an existing upload for this mesh, dropping dead entries first.
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        auto live = it->mesh.lock();
+        if (!live) {
+            for (const auto name : it->names) {
+                if (name != 0) {
+                    glDeleteTextures(1, &name);
+                }
+            }
+            it = entries_.erase(it);
+            continue;
+        }
+        if (live == mesh) {
+            if (textureIndex < it->names.size() && it->names[textureIndex] != 0) {
+                return it->names[textureIndex];
+            }
+            break;
+        }
+        ++it;
+    }
+
+    if (source->mipmaps.empty()) {
+        return 0;
+    }
+    const auto& image = source->mipmaps.front();
+    if (image.width == 0 || image.height == 0 || image.rgba.empty()) {
+        return 0;
+    }
+    const std::size_t want = image.rgba.size();
+    if (want != static_cast<std::size_t>(image.width) * image.height * 4U) {
+        return 0;
+    }
+
+    GLuint name = 0;
+    glGenTextures(1, &name);
+    if (name == 0) {
+        return 0;
+    }
+    // Save/restore everything the upload touches: the old code only saved the
+    // unpack alignment, and a leaked GL_TEXTURE_2D enable would tint every
+    // later flat-colored pass.
+    GLint previousAlignment = 4;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousAlignment);
+    GLint previousBinding = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousBinding);
+    const GLboolean wasEnabled = glIsEnabled(GL_TEXTURE_2D);
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glBindTexture(GL_TEXTURE_2D, name);
+    const GLint minFilter = (filter != nullptr && std::string_view(filter) == "nearest") ? GL_NEAREST
+                                                                                          : GL_LINEAR;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, minFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, glWrapFor(source->wrapS));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, glWrapFor(source->wrapT));
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(image.width),
+                 static_cast<GLsizei>(image.height), 0, GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data());
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, previousAlignment);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousBinding));
+    if (!wasEnabled) {
+        glDisable(GL_TEXTURE_2D);
+    }
+
+    // Record the upload against this mesh (grow the slot table as needed).
+    for (auto& entry : entries_) {
+        if (entry.mesh.lock() == mesh) {
+            if (entry.names.size() <= textureIndex) {
+                entry.names.resize(textureIndex + 1, 0);
+            }
+            entry.names[textureIndex] = name;
+            return name;
+        }
+    }
+    Entry fresh;
+    fresh.mesh = mesh;
+    fresh.names.assign(mesh->textures.size(), 0);
+    if (fresh.names.size() <= textureIndex) {
+        fresh.names.resize(textureIndex + 1, 0);
+    }
+    fresh.names[textureIndex] = name;
+    entries_.push_back(std::move(fresh));
+    return name;
+}
+
+void ModelTextureCache::clear() noexcept {
+    for (auto& entry : entries_) {
+        for (const auto name : entry.names) {
+            if (name != 0) {
+                glDeleteTextures(1, &name);
+            }
+        }
+    }
+    entries_.clear();
+}
+
+void ViewportWindow::drawModelTriangles(const ModelMesh& mesh, bool bakeColors, const char* filter,
+                                       ModelTextureCache* textures) {
+    // Legacy flat path (display lists + untextured immediate): no texture
+    // state touched at all, so the frame is identical with the cache hot/cold.
+    // Textured models NEVER go through display lists: a list bakes geometry
+    // but cannot bind per-triangle textures (the upload cache keys on the
+    // shared_ptr the list does not hold), so they draw immediate below.
+    (void)filter;
+    (void)textures;
     glBegin(GL_TRIANGLES);
     for (const auto& triangle : mesh.triangles) {
         if (bakeColors) {
@@ -361,6 +557,188 @@ void ViewportWindow::drawModelTriangles(const ModelMesh& mesh, bool bakeColors) 
         }
     }
     glEnd();
+}
+
+void ViewportWindow::drawTexturedModel(const std::shared_ptr<const ModelMesh>& mesh, const char* filter,
+                                       bool selected, bool hovered) {
+    // Per-material immediate draw (Java BmdRenderer parity): each material run
+    // applies its alpha test, blend/logic-op, cull and depth state, binds its
+    // texture and modulates it with the triangle colour. With the two-pass
+    // split on, only the current modelPass_'s triangles draw and the
+    // translucent pass never writes depth; split off = one pass, no blending.
+    // selected/hovered swap in the same highlight colours the flat path uses.
+    if (!mesh || mesh->triangles.empty()) {
+        return;
+    }
+    const bool split = translucent_;
+    const bool wantTranslucent = modelPass_ == ModelPass::Translucent;
+    const GLboolean wasTextured = glIsEnabled(GL_TEXTURE_2D);
+
+    // GL state calls are illegal between glBegin/glEnd, so a material change
+    // closes the current run, applies the new state, and a new run opens.
+    unsigned int boundName = ~0U; // force the first material through an explicit bind
+    bool texturing = wasTextured != 0;
+    int currentMaterial = -2;
+    bool inBatch = false;
+    const auto endBatch = [&] {
+        if (inBatch) {
+            glEnd();
+            inBatch = false;
+        }
+    };
+    const auto applyMaterial = [&](int materialIndex) {
+        currentMaterial = materialIndex;
+        const smg::BmdMaterial* material =
+            materialIndex >= 0 && static_cast<std::size_t>(materialIndex) < mesh->materials.size()
+                ? &mesh->materials[static_cast<std::size_t>(materialIndex)]
+                : nullptr;
+        endBatch();
+
+        // Texture: first used map, or texturing off (BmdRenderer parity).
+        unsigned int name = 0;
+        if (material != nullptr) {
+            const int slot = materialTextureSlot(*material);
+            if (slot >= 0) {
+                name = textureCache_.textureFor(mesh, static_cast<std::size_t>(slot), filter);
+            }
+        }
+        if (name != boundName) {
+            if (boundName != 0) {
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            if (name != 0) {
+                glBindTexture(GL_TEXTURE_2D, name);
+            }
+            boundName = name;
+        }
+        const bool wantTexturing = name != 0;
+        if (wantTexturing != texturing) {
+            if (wantTexturing) {
+                glEnable(GL_TEXTURE_2D);
+            } else {
+                glDisable(GL_TEXTURE_2D);
+            }
+            texturing = wantTexturing;
+        }
+
+        // Alpha test: BmdRenderer's three-branch decision, verbatim.
+        if (material == nullptr || !material->alphaTestEnabled()) {
+            glDisable(GL_ALPHA_TEST);
+        } else {
+            glEnable(GL_ALPHA_TEST);
+            const int op = material->alphaOp;
+            const int func0 = material->alphaFunc0;
+            const int func1 = material->alphaFunc1;
+            if (op == 0 && (func0 == 0 || func1 == 0)) {
+                glAlphaFunc(GL_NEVER, 0.0F); // AND with NEVER rejects everything
+            } else if ((op == 1 && func0 == 0) || (op == 0 && func0 == 7)) {
+                glAlphaFunc(tableAt(kAlphaFuncs, func1, GL_ALWAYS),
+                            static_cast<float>(material->alphaRef1) / 255.0F);
+            } else {
+                glAlphaFunc(tableAt(kAlphaFuncs, func0, GL_ALWAYS),
+                            static_cast<float>(material->alphaRef0) / 255.0F);
+            }
+        }
+
+        // Blend / logic op: only while the split is active (single-pass mode
+        // draws everything opaque); otherwise Java's case 0/1/3/2 + GX tables.
+        if (material == nullptr || !split) {
+            glDisable(GL_BLEND);
+            glDisable(GL_COLOR_LOGIC_OP);
+        } else {
+            switch (material->blendMode) {
+                case 1:
+                case 3:
+                    glDisable(GL_COLOR_LOGIC_OP);
+                    glEnable(GL_BLEND);
+                    if (const GlBlendEquation equation = blendEquationProc()) {
+                        equation(material->blendMode == 3 ? GL_FUNC_SUBTRACT : GL_FUNC_ADD);
+                    }
+                    glBlendFunc(tableAt(kBlendSrcFactors, material->blendSrcFactor, GL_ONE),
+                                tableAt(kBlendDstFactors, material->blendDstFactor, GL_ZERO));
+                    break;
+                case 2:
+                    glDisable(GL_BLEND);
+                    glEnable(GL_COLOR_LOGIC_OP);
+                    glLogicOp(tableAt(kLogicOps, material->blendOp, GL_COPY));
+                    break;
+                default:
+                    glDisable(GL_BLEND);
+                    glDisable(GL_COLOR_LOGIC_OP);
+                    break;
+            }
+        }
+
+        // Face culling: 0 off, 1..3 cull front/back/both.
+        if (material == nullptr || material->cullingMode == 0) {
+            glDisable(GL_CULL_FACE);
+        } else {
+            glEnable(GL_CULL_FACE);
+            glCullFace(tableAt(kCullModes, static_cast<int>(material->cullingMode) - 1, GL_BACK));
+        }
+
+        // Depth test/function from ZMode. The write mask follows the material
+        // except in the translucent pass, which never writes depth so nearer
+        // blended fragments cannot occlude the ones behind them.
+        if (material != nullptr && !material->depthTest) {
+            glDisable(GL_DEPTH_TEST);
+        } else {
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(tableAt(kDepthFuncs, material != nullptr ? material->depthFunction : 1, GL_LESS));
+        }
+        GLboolean depthMask = material != nullptr && !material->depthWrite ? GL_FALSE : GL_TRUE;
+        if (split && wantTranslucent) {
+            depthMask = GL_FALSE;
+        }
+        glDepthMask(depthMask);
+    };
+    for (const auto& triangle : mesh->triangles) {
+        if (split && triangle.translucent != wantTranslucent) {
+            continue; // belongs to the other scene-wide pass
+        }
+        if (triangle.materialIndex != currentMaterial) {
+            applyMaterial(triangle.materialIndex);
+        }
+        if (!inBatch) {
+            glBegin(GL_TRIANGLES);
+            inBatch = true;
+        }
+        if (selected) {
+            glColor4f(1.0F, 0.85F, 0.20F, 1.0F);
+        } else if (hovered) {
+            glColor4f(0.55F, 0.80F, 1.0F, 1.0F);
+        } else {
+            // Modulate: Java multiplies material colour by the texel.
+            glColor4f(triangle.color[0], triangle.color[1], triangle.color[2], triangle.color[3]);
+        }
+        const ModelVertex* vertices[3] = {&triangle.a, &triangle.b, &triangle.c};
+        for (const ModelVertex* vertex : vertices) {
+            glTexCoord2f(vertex->texCoord[0], vertex->texCoord[1]);
+            glNormal3f(vertex->normal.x, vertex->normal.y, vertex->normal.z);
+            glVertex3f(vertex->position.x, vertex->position.y, vertex->position.z);
+        }
+    }
+    endBatch();
+
+    // Hand every flag this walk may have raised back to the frame: overlays,
+    // the gizmo and the labels draw next, and they assume the plain state the
+    // old single-pass renderer left behind.
+    if (boundName != 0 && boundName != ~0U) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    if (wasTextured) {
+        glEnable(GL_TEXTURE_2D);
+    } else {
+        glDisable(GL_TEXTURE_2D);
+    }
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
+    glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
 }
 
 unsigned int ViewportWindow::modelDisplayList(const std::shared_ptr<const ModelMesh>& mesh, bool plain) {
@@ -505,6 +883,20 @@ void ViewportWindow::setGizmoEnabled(bool enabled) noexcept {
 
 void ViewportWindow::setHover(std::optional<std::size_t> hover) {
     hover_ = hover;
+    invalidate();
+}
+
+void ViewportWindow::setTextureFilter(const char* filter) noexcept {
+    const std::string_view want = filter != nullptr ? filter : "linear";
+    const std::string_view have(textureFilter_);
+    if (want == have) {
+        return;
+    }
+    const std::size_t count = std::min(want.size(), sizeof(textureFilter_) - 1);
+    std::copy_n(want.data(), count, textureFilter_);
+    textureFilter_[count] = '\0';
+    // Filter is baked at upload time, so existing uploads must be redone.
+    textureCache_.clear();
     invalidate();
 }
 
@@ -869,6 +1261,7 @@ void ViewportWindow::shutdownGL() noexcept {
         }
         modelLists_.clear();
         labelFont.destroy(); // atlas texture belongs to this context too
+        textureCache_.clear(); // model textures belong to it as well
         wglMakeCurrent(nullptr, nullptr);
         wglDeleteContext(glContext_);
         glContext_ = nullptr;
@@ -905,16 +1298,31 @@ void ViewportWindow::drawFrame() {
         glLightfv(GL_LIGHT0, GL_POSITION, position);
         glShadeModel(GL_FLAT);
         glEnable(GL_DEPTH_TEST);
+        // GX front faces wind clockwise; Java's editors set this once per frame
+        // too (GalaxyEditorForm's glFrontFace(GL_CW)), so per-material culling
+        // agrees with the game about which side is which.
+        glFrontFace(GL_CW);
         // Non-uniform object scales need normalisation so the fixed-function
         // pipeline renormalises the inverse-transpose-transformed normals
         // (display lists bake the normals, not the transform).
         glEnable(GL_NORMALIZE);
         pruneModelLists();
-        for (const auto& box : scene_.boxes()) {
-            const bool selected =
-                std::find(selection_.begin(), selection_.end(), box.objectIndex) != selection_.end();
-            const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
-            drawShape(box, selected, hovered);
+        // Scene-wide model passes, like GalaxyEditorForm's OPAQUE then
+        // TRANSLUCENT renderAllObjects loops: every box lays down its opaque
+        // geometry (and all the flat editor shapes) first, then a second loop
+        // blends the translucent triangles over the finished depth buffer in
+        // box order. Translucency off keeps the legacy single pass.
+        const auto drawBoxes = [&](ModelPass pass) {
+            for (const auto& box : scene_.boxes()) {
+                const bool selected =
+                    std::find(selection_.begin(), selection_.end(), box.objectIndex) != selection_.end();
+                const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
+                drawShape(box, selected, hovered, pass);
+            }
+        };
+        drawBoxes(ModelPass::Opaque);
+        if (translucent_) {
+            drawBoxes(ModelPass::Translucent);
         }
         // World overlays (rails, cameras, areas, gravity, axis): unlit lines
         // that depth-test against the models so rails hide behind geometry.
@@ -1014,14 +1422,27 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
-void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hovered) {
-    // Real game model path: the BMD triangles are drawn from a cached display
-    // list under the object's placement transform. Smooth vertex normals +
-    // material diffuse colors make the model read like the game's own render.
+void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hovered, ModelPass pass) {
+    // Real game model path. Textured models draw immediate (per-triangle binds
+    // from the upload cache) and honour the scene-wide pass split; untextured
+    // ones use the cached display lists and draw once, in the opaque loop.
+    // Smooth vertex normals + material diffuse colors make the model read like
+    // the game's own render.
     if (box.model != nullptr && !box.model->empty()) {
+        const bool textured = textured_ && !box.model->materials.empty() && !box.model->textures.empty();
+        if (!textured && pass != ModelPass::Opaque) {
+            return;
+        }
         glPushMatrix();
         glMultMatrixf(box.world.values.data());
         glShadeModel(GL_SMOOTH);
+        if (textured) {
+            modelPass_ = pass;
+            drawTexturedModel(box.model, textureFilter_, selected, hovered);
+            glShadeModel(GL_FLAT);
+            glPopMatrix();
+            return;
+        }
         if (selected || hovered) {
             // Tinted pass: the plain list (no baked colors) with one highlight
             // color, so a highlighted object is unmistakable at any zoom.
@@ -1049,6 +1470,9 @@ void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hover
         return;
     }
 
+    if (pass != ModelPass::Opaque) {
+        return; // placeholder cubes belong to the opaque loop only
+    }
     const CategoryStyle& style = categoryStyle(box.category);
     // Selection/hover tint the category color (instead of replacing it) so
     // the category stays readable while the object is clearly highlighted.

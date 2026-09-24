@@ -853,6 +853,9 @@ bool ViewportWindow::create(HWND parent, int controlId, HINSTANCE instance) {
 }
 
 void ViewportWindow::destroy() noexcept {
+    // Restore the pointer before tearing the window down: a hidden cursor
+    // outliving the viewport would follow the author around the whole desktop.
+    endFlyLook();
     shutdownGL();
     if (window_ != nullptr) {
         DestroyWindow(window_);
@@ -941,12 +944,65 @@ void ViewportWindow::setOverlayTheme(bool dark) noexcept {
     invalidate();
 }
 
+void ViewportWindow::setOrbitInverted(bool inverted) noexcept {
+    orbitInverted_ = inverted;
+    controller_.settings.invertOrbit = inverted;
+}
+
+void ViewportWindow::setNavSettings(const NavSettings& settings) {
+    const NavPreset preset = settings.preset;
+    controller_.settings = settings;
+    if (preset != NavPreset::Custom) {
+        // The named presets always own their button mapping; only Custom keeps
+        // whatever the user configured.
+        controller_.settings.mapping = mappingForPreset(preset);
+    }
+    orbitInverted_ = controller_.settings.invertOrbit;
+    invalidate();
+}
+
+void ViewportWindow::setCollisionTriangles(std::vector<SnapTriangle> triangles) {
+    collisionTriangles_ = std::move(triangles);
+    invalidate();
+}
+
+SnapScene ViewportWindow::buildSnapScene() const {
+    SnapScene snap;
+    snap.kcl = collisionTriangles_;
+    snap.boxes.reserve(scene_.boxes().size());
+    for (const auto& box : scene_.boxes()) {
+        SnapBox entry;
+        entry.objectIndex = box.objectIndex;
+        entry.center = box.center;
+        entry.halfExtents = box.halfExtents;
+        entry.pickWorld = box.pickWorld;
+        snap.boxes.push_back(entry);
+    }
+    return snap;
+}
+
+std::optional<SnapHit> ViewportWindow::snapDownwards(const math::Vec3f& position, float halfHeight,
+                                                     std::optional<std::size_t> ignoreIndex,
+                                                     float standOff, float maxDistance) const noexcept {
+    // Exact KCL triangles win over the coarse oriented-box approximation, so a
+    // drop onto a sculpted planet lands flush instead of on its bounding box.
+    const SnapScene snap = buildSnapScene();
+    return dropToSurface(snap, position, halfHeight, standOff, maxDistance,
+                         ignoreIndex.value_or(static_cast<std::size_t>(-1)));
+}
+
+float ViewportWindow::halfHeightFor(std::size_t objectIndex) const noexcept {
+    if (objectIndex >= scene_.boxes().size()) {
+        return 0.0F;
+    }
+    return scene_.boxes()[objectIndex].halfExtents.y;
+}
+
 void ViewportWindow::frameAll() {
     if (scene_.empty()) {
         return;
     }
-    camera_.frameTarget(scene_.center(), scene_.frameDistance());
-    invalidate();
+    startFocusTween(scene_.center(), scene_.frameDistance());
 }
 
 void ViewportWindow::frameSelection() {
@@ -987,12 +1043,9 @@ void ViewportWindow::frameSelection() {
                              (low.z + high.z) * 0.5F};
     const math::Vec3f extent{high.x - low.x, high.y - low.y, high.z - low.z};
     const float radius = std::max(std::max(extent.x, extent.y), extent.z) * 0.5F;
-    // Distance so the selection fills the view: 45 degrees at the FOV's half
-    // angle, with a margin so it never touches the screen edge.
-    const float framed = radius > 0.0F ? radius / std::tan(ViewportCamera::kFieldOfView * 0.5F) * 1.6F
-                                       : 300.0F;
-    camera_.frameTarget(center, std::max(framed, 300.0F));
-    invalidate();
+    // Ease onto the bounding sphere instead of teleporting: 'F' is pressed
+    // constantly while working, and a smooth move keeps the author oriented.
+    startFocusTween(center, frameDistanceForRadius(radius));
 }
 
 void ViewportWindow::invalidate() {
@@ -1160,12 +1213,22 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         draggingRight_ = true;
         lastX_ = GET_X_LPARAM(lParam);
         lastY_ = GET_Y_LPARAM(lParam);
+        // RMB is the flycam: full 3D flight + mouselook until it is released.
+        beginFlyLook();
         return 0;
     case WM_RBUTTONUP:
         if (draggingRight_) {
             ReleaseCapture();
             draggingRight_ = false;
+            endFlyLook();
         }
+        return 0;
+    case WM_KILLFOCUS:
+        // Never leave the cursor hidden or the flycam pinned when focus moves on.
+        endFlyLook();
+        return 0;
+    case WM_CAPTURECHANGED:
+        endFlyLook();
         return 0;
     case WM_MOUSEMOVE: {
         // Arm hover tracking so WM_MOUSELEAVE clears the highlight when the
@@ -1181,6 +1244,21 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         }
         const int x = GET_X_LPARAM(lParam);
         const int y = GET_Y_LPARAM(lParam);
+        if (flyLook_) {
+            // FPS mouselook: the cursor is parked on the viewport centre, so each
+            // event carries a fresh offset no matter how far the author sweeps,
+            // and the gesture never runs out of screen.
+            if (x != flyCenter_.x || y != flyCenter_.y) {
+                pendingDX_ += static_cast<float>(x - flyCenter_.x);
+                pendingDY_ += static_cast<float>(y - flyCenter_.y);
+                POINT center = flyCenter_;
+                ClientToScreen(window_, &center);
+                SetCursorPos(center.x, center.y);
+            }
+            lastX_ = flyCenter_.x;
+            lastY_ = flyCenter_.y;
+            return 0;
+        }
         const int dx = x - lastX_;
         const int dy = y - lastY_;
         lastX_ = x;
@@ -1213,17 +1291,18 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 if (dx != 0 || dy != 0) {
                     leftMoved_ = true;
                 }
-                camera_.pan(static_cast<float>(dx), static_cast<float>(dy));
-                invalidate();
+                // Queued, not applied: pollInput() is the single place that
+                // turns mouse motion into camera motion, so the control presets
+                // and their sensitivities govern every gesture.
+                pendingDX_ += static_cast<float>(dx);
+                pendingDY_ += static_cast<float>(dy);
             }
         } else if (draggingRight_ && (wParam & MK_RBUTTON) != 0) {
-            const float invert = orbitInverted_ ? -1.0F : 1.0F;
-            camera_.orbit(static_cast<float>(dx) * 0.008F * invert,
-                          static_cast<float>(dy) * 0.008F * invert);
-            invalidate();
+            pendingDX_ += static_cast<float>(dx);
+            pendingDY_ += static_cast<float>(dy);
         } else if (draggingMiddle_ && (wParam & MK_MBUTTON) != 0) {
-            camera_.pan(static_cast<float>(dx), static_cast<float>(dy));
-            invalidate();
+            pendingDX_ += static_cast<float>(dx);
+            pendingDY_ += static_cast<float>(dy);
         } else if (!draggingLeft_ && !draggingRight_ && !draggingMiddle_) {
             const auto hovered = pickAt(x, y);
             if (hovered != hover_) {
@@ -1242,7 +1321,7 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         return 0;
     case WM_MOUSEWHEEL: {
         // Accumulate raw deltas and apply whole notches, so high-resolution
-        // wheels and multi-notch flicks zoom smoothly instead of losing input.
+        // wheels and multi-notch flicks stay smooth instead of losing input.
         wheelAccumulator_ += GET_WHEEL_DELTA_WPARAM(wParam);
         int notches = 0;
         while (wheelAccumulator_ >= WHEEL_DELTA) {
@@ -1254,9 +1333,9 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
             wheelAccumulator_ += WHEEL_DELTA;
         }
         if (notches != 0) {
-            // Shift = fast zoom, Java's fast-scroll modifier (x3).
-            const int scaled = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ? notches * 3 : notches;
-            camera_.dolly(static_cast<float>(scaled));
+            // While flying, the wheel is the speed control (with an on-screen
+            // readout); otherwise it dollies toward the cursor (Shift = fast).
+            pendingWheel_ += static_cast<float>(notches);
             invalidate();
         }
         return 0;
@@ -1375,7 +1454,7 @@ void ViewportWindow::shutdownGL() noexcept {
 void ViewportWindow::drawFrame() {
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
-        pollFlyMovement(); // WASD/arrows while this child has keyboard focus
+        pollInput(); // one input frame: flycam, orbit/pan, dolly, nudge, focus
         ensureMeshes(meshesFilled_, meshes_);
         applyCameraToGL(width_, height_);
         drawGrid();
@@ -1793,6 +1872,22 @@ void ViewportWindow::drawLabels() {
         const float lineWidth = labelFont.measure(line);
         rect(legendX, legendY, lineWidth + padding * 2.0F, 22.0F, translucent(palette.panelBg, 0.92F));
         text(legendX + padding, legendY + 2.0F, line, palette.unsaved);
+        legendY += 26.0F;
+    }
+
+    // Fly-speed readout: the wheel changes the flycam speed while RMB is held,
+    // so the current multiplier is shown until the gesture has been idle a
+    // moment. Without this the speed change is invisible and feels like a bug.
+    if (hudTimer_ > 0.0F && hudSpeed_ > 0.0F) {
+        char line[64];
+        std::snprintf(line, sizeof(line), "Fly speed  %.2fx", static_cast<double>(hudSpeed_));
+        const float lineWidth = labelFont.measure(line);
+        const float fade = std::min(1.0F, hudTimer_ / 0.6F);
+        rect(legendX, legendY, lineWidth + padding * 2.0F, 22.0F,
+             translucent(palette.panelBg, 0.92F * fade));
+        text(legendX + padding, legendY + 2.0F, line,
+             app::Rgba{palette.text.r, palette.text.g, palette.text.b, fade});
+        legendY += 26.0F;
     }
 
     // Object name labels. Hovered/selected are always labeled; the View menu
@@ -1830,45 +1925,216 @@ void ViewportWindow::drawLabels() {
     glEnable(GL_DEPTH_TEST);
 }
 
-void ViewportWindow::pollFlyMovement() {
+void ViewportWindow::beginFlyLook() {
+    if (flyLook_) {
+        return;
+    }
+    flyLook_ = true;
+    controller_.resetFlySpeed();
+    orbitPivotSet_ = false;
+    if (window_ == nullptr) {
+        return;
+    }
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    flyCenter_.x = (rect.right - rect.left) / 2;
+    flyCenter_.y = (rect.bottom - rect.top) / 2;
+    // Park the cursor on the centre and hide it: mouselook then never runs out
+    // of screen, which is the whole difference between a flycam and a drag.
+    POINT center = flyCenter_;
+    ClientToScreen(window_, &center);
+    SetCursorPos(center.x, center.y);
+    if (!cursorHidden_) {
+        ShowCursor(FALSE);
+        cursorHidden_ = true;
+    }
+    lastX_ = flyCenter_.x;
+    lastY_ = flyCenter_.y;
+    invalidate();
+}
+
+void ViewportWindow::endFlyLook() noexcept {
+    if (!flyLook_) {
+        return;
+    }
+    flyLook_ = false;
+    if (cursorHidden_) {
+        ShowCursor(TRUE); // balanced against the hide in beginFlyLook
+        cursorHidden_ = false;
+    }
+}
+
+void ViewportWindow::applyCameraDelta(const CameraDelta& delta) {
+    const bool orbiting = delta.orbitYaw != 0.0F || delta.orbitPitch != 0.0F;
+    if (orbiting && !orbitPivotSet_) {
+        // Re-anchor once per gesture: an orbit should spin around what the
+        // author is working on, not around wherever the view happened to point.
+        orbitPivotSet_ = true;
+        if (!selection_.empty()) {
+            camera_.target = gizmoAnchor();
+        }
+    }
+    bool changed = false;
+    if (orbiting) {
+        camera_.orbit(delta.orbitYaw, delta.orbitPitch);
+        changed = true;
+    }
+    if (delta.panX != 0.0F || delta.panY != 0.0F) {
+        camera_.pan(delta.panX, delta.panY);
+        changed = true;
+    }
+    if (delta.dollyNotches != 0.0F) {
+        if (delta.dollyToCursor) {
+            camera_.dollyTowardCursor(delta.dollyNotches, static_cast<float>(lastX_),
+                                      static_cast<float>(lastY_), static_cast<float>(width_),
+                                      static_cast<float>(height_));
+        } else {
+            camera_.dolly(delta.dollyNotches);
+        }
+        changed = true;
+    }
+    if (delta.flyRight != 0.0F || delta.flyUp != 0.0F || delta.flyForward != 0.0F) {
+        // flyStep quotes its speed at distance 800, so the same keys move at a
+        // sensible rate in a 50-unit room and across a 50000-unit galaxy.
+        const float scale = camera_.distance / 800.0F;
+        camera_.fly(delta.flyRight * scale, delta.flyUp * scale, delta.flyForward * scale);
+        changed = true;
+    }
+    if (changed) {
+        // Any manual camera input takes over from an in-flight focus tween: the
+        // author always wins over the animation.
+        tween_.cancel();
+        invalidate();
+    }
+}
+
+void ViewportWindow::updateTween(float dt) {
+    if (!tween_.active()) {
+        return;
+    }
+    camera_.setPose(tween_.update(dt));
+    invalidate();
+}
+
+void ViewportWindow::startFocusTween(const math::Vec3f& center, float distance) {
+    const CameraPose from = camera_.pose();
+    CameraPose to = from;
+    to.target = center;
+    to.distance = std::clamp(distance, ViewportCamera::kMinDistance, ViewportCamera::kMaxDistance);
+    tween_.start(from, to, 0.45F);
+    invalidate();
+}
+
+void ViewportWindow::pollInput() {
     const auto now = std::chrono::steady_clock::now();
-    // Focus gate: only the viewport's own keyboard focus flies the camera, so
-    // typing in a panel can never move it. GetAsyncKeyState reads held state
-    // directly, so auto-repeat and focus handoff both behave. The tick resets
-    // while unfocused/idle, so the first key after a pause never jumps.
-    if (window_ == nullptr || GetFocus() != window_) {
-        lastFlyTick_ = now;
-        return;
-    }
-    const auto held = [](int virtualKey) { return (GetAsyncKeyState(virtualKey) & 0x8000) != 0; };
-    const bool forwardKey = held('W') || held(VK_UP);
-    const bool backKey = held('S') || held(VK_DOWN);
-    const bool leftKey = held('A') || held(VK_LEFT);
-    const bool rightKey = held('D') || held(VK_RIGHT);
-    const bool upKey = held('E') || held(VK_PRIOR);    // PgUp, Java keyMask parity
-    const bool downKey = held('Q') || held(VK_NEXT);   // PgDn, Java keyMask parity
-    if (!forwardKey && !backKey && !leftKey && !rightKey && !upKey && !downKey) {
-        lastFlyTick_ = now;
-        return;
-    }
+    // Delta time is real elapsed time, clamped so a stall (galaxy load, a
+    // debugger break) can never teleport the camera. The tick also resets
+    // whenever nothing is happening, so the first key after a pause starts from
+    // zero instead of applying the idle time as one jump.
     float dt = std::chrono::duration<float>(now - lastFlyTick_).count();
     lastFlyTick_ = now;
-    dt = std::clamp(dt, 0.0F, 0.1F); // a stall must not teleport the camera
-    // Speed scales with orbit distance (like pan) so the same keys feel right
-    // in a 50-unit room and a 50000-unit galaxy; Shift x3 / Ctrl x0.25 are
-    // Java's fast/slow modifiers.
-    float speed = camera_.distance * 1.5F * dt;
-    if (held(VK_SHIFT)) {
-        speed *= 3.0F;
+    dt = std::clamp(dt, 0.0F, 0.1F);
+
+    const auto held = [](int virtualKey) { return (GetAsyncKeyState(virtualKey) & 0x8000) != 0; };
+    const bool focused = window_ != nullptr && GetFocus() == window_;
+
+    InputIntent intent;
+    intent.dt = dt;
+    intent.shift = held(VK_SHIFT);
+    intent.ctrl = held(VK_CONTROL);
+    intent.alt = held(VK_MENU);
+    intent.rmbHeld = draggingRight_;
+    // A gizmo drag or a marquee owns the left button: those gestures must never
+    // also pan the camera.
+    intent.lmbHeld = draggingLeft_ && !draggingGizmo_ && !marqueeActive_;
+    intent.mmbHeld = draggingMiddle_;
+    intent.mouseDX = pendingDX_;
+    intent.mouseDY = pendingDY_;
+    intent.wheelNotches = pendingWheel_;
+    pendingDX_ = 0.0F;
+    pendingDY_ = 0.0F;
+    pendingWheel_ = 0.0F;
+    intent.width = static_cast<float>(width_);
+    intent.height = static_cast<float>(height_);
+    intent.cursorX = static_cast<float>(lastX_);
+    intent.cursorY = static_cast<float>(lastY_);
+
+    // Keyboard movement needs this child's focus, so typing in a panel can never
+    // fly the camera. WASD drives the flycam only while RMB is held (or when
+    // free-fly is opted into), which is what leaves W/E/R free to be the gizmo
+    // mode keys. Q/E verticals and the arrows belong to the flycam alone: with
+    // RMB released the arrows nudge the selection instead.
+    const bool moveKeys = flyLook_ || controller_.settings.freeFlyWithoutRmb;
+    if (focused) {
+        intent.forward = (moveKeys && held('W')) || (flyLook_ && held(VK_UP));
+        intent.back = (moveKeys && held('S')) || (flyLook_ && held(VK_DOWN));
+        intent.left = (moveKeys && held('A')) || (flyLook_ && held(VK_LEFT));
+        intent.right = (moveKeys && held('D')) || (flyLook_ && held(VK_RIGHT));
+        intent.up = flyLook_ && (held('E') || held(VK_PRIOR));
+        intent.down = flyLook_ && (held('Q') || held(VK_NEXT));
     }
-    if (held(VK_CONTROL)) {
-        speed *= 0.25F;
+
+    // The controller is the single authority on what a gesture means, which is
+    // what makes the control presets (and the unit tests) possible.
+    const CameraDelta delta = resolveCameraDelta(controller_, intent);
+    applyCameraDelta(delta);
+    if (delta.orbitYaw == 0.0F && delta.orbitPitch == 0.0F) {
+        orbitPivotSet_ = false; // the orbit gesture ended; the next one re-anchors
     }
-    const float rightAmount = (rightKey ? speed : 0.0F) - (leftKey ? speed : 0.0F);
-    const float upAmount = (upKey ? speed : 0.0F) - (downKey ? speed : 0.0F);
-    const float forwardAmount = (forwardKey ? speed : 0.0F) - (backKey ? speed : 0.0F);
-    camera_.fly(rightAmount, upAmount, forwardAmount);
-    invalidate();
+    updateTween(dt);
+    if (focused) {
+        pollNudge();
+    } else if (flyLook_) {
+        // Losing the keyboard mid-flight would otherwise leave the cursor hidden
+        // and the view pinned to a dead flycam.
+        endFlyLook();
+    }
+
+    // Fly-speed HUD: shown while flying and for a moment after the last change.
+    if (delta.flying) {
+        hudSpeed_ = controller_.flyMultiplier;
+        hudTimer_ = 1.4F;
+    } else if (hudTimer_ > 0.0F) {
+        hudTimer_ = std::max(0.0F, hudTimer_ - dt);
+    }
+}
+
+void ViewportWindow::pollNudge() {
+    if (!onNudge_ || selection_.empty() || flyLook_) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    constexpr int kKeyCount = 6;
+    const int virtualKeys[kKeyCount] = {VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_PRIOR, VK_NEXT};
+    const NudgeKey nudgeKeys[kKeyCount] = {NudgeKey::Left,  NudgeKey::Right,   NudgeKey::Up,
+                                           NudgeKey::Down,  NudgeKey::PageUp, NudgeKey::PageDown};
+    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    // Shift = fine placement, Ctrl = coarse; the plain step matches the gizmo's
+    // translate snap so both feel like the same grid.
+    const float step = shift ? std::max(nudgeStep_ * 0.1F, 0.01F)
+                             : (ctrl ? nudgeStep_ * 10.0F : nudgeStep_);
+
+    for (int index = 0; index < kKeyCount; ++index) {
+        const bool down = (GetAsyncKeyState(virtualKeys[index]) & 0x8000) != 0;
+        const bool edge = down && !nudgeWasDown_[index];
+        bool fire = edge;
+        if (down && !edge && now >= nextNudgeRepeat_) {
+            fire = true; // auto-repeat while held, but slow enough to be exact
+        }
+        nudgeWasDown_[index] = down;
+        if (!fire) {
+            continue;
+        }
+        const int axis = nudgeAxis(nudgeKeys[index]);
+        const math::Vec3f direction = nudgeDelta(nudgeKeys[index], step);
+        const float amount = axis == 0 ? direction.x : (axis == 1 ? direction.y : direction.z);
+        // Alt duplicates: the editor clones the selection once, on the press
+        // edge, so holding Alt+Left does not leave a trail of copies.
+        onNudge_(axis, amount, alt && edge);
+        nextNudgeRepeat_ = now + std::chrono::milliseconds(edge ? 380 : 60);
+    }
 }
 
 void ViewportWindow::drawGrid() {

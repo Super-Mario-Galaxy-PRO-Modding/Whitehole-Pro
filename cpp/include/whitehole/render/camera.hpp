@@ -7,6 +7,7 @@
 // works in raw SMG units with the equivalent near/far below.
 
 #include "whitehole/math/geometry.hpp"
+#include "whitehole/render/camera_tween.hpp"
 
 namespace whitehole::render {
 
@@ -70,7 +71,18 @@ public:
     void orbit(float deltaYaw, float deltaPitch) noexcept;
     void pan(float deltaX, float deltaY) noexcept;
     void dolly(float wheelDelta) noexcept;
+    // Wheel zoom that lands where the cursor points: the orbit target slides
+    // toward the point under the cursor by the same proportion the zoom moved,
+    // so "zoom into that crate over there" needs no panning first. Falls back to
+    // a plain dolly for degenerate screen sizes or a singularity-free miss.
+    void dollyTowardCursor(float wheelDelta, float screenX, float screenY, float width,
+                           float height) noexcept;
     void frameTarget(const math::Vec3f& point, float framedDistance = 300.0F) noexcept;
+
+    // Current pose, for the smooth-focus tween ('F').
+    [[nodiscard]] CameraPose pose() const noexcept;
+    // Applies a pose verbatim (used by the tween's per-frame interpolation).
+    void setPose(const CameraPose& pose) noexcept;
 
     // Fly movement (WASD/arrows): slides the orbit target along the camera
     // basis, so the eye follows rigidly. Amounts are world units per step.

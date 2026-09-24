@@ -59,6 +59,46 @@ public:
     // Editor controls
     bool reverseRotation{false};
 
+    // --- 3D viewport navigation ---------------------------------------------
+    // Control preset key: "unreal" | "blender" | "maya" | "custom".
+    std::string navPreset{"unreal"};
+    // Base fly speed in world units/second at an orbit distance of 800 units;
+    // the speed scales with zoom so the same keys feel right at every scale.
+    float flySpeed{1200.0F};
+    // Wheel gain while RMB-flying: fly speed multiplier per wheel notch.
+    float wheelSpeedGain{1.25F};
+    // Look/orbit sensitivity in radians per pixel, and pan in distance-relative
+    // pixels. Exposed so a trackpad user can slow the camera down.
+    float orbitSensitivity{0.008F};
+    float panSensitivity{0.0016F};
+    // Exponential smoothing of fly/orbit motion for a friction-free feel.
+    bool smoothCamera{true};
+    // Wheel dollies toward the cursor instead of straight down the view axis.
+    bool wheelZoomToCursor{true};
+    // Legacy free-fly: WASD moves the camera whenever the viewport has focus.
+    // Off by default so W/E/R can be the gizmo-mode keys; on, the modes move to
+    // the number row in the Viewport panel.
+    bool freeFlyWithoutRmb{false};
+
+    // --- Transform snapping --------------------------------------------------
+    bool snapEnabled{true};
+    // false (default) = the Snap toggle plus Shift for fine drags, the long
+    // standing behaviour. true = snapping only engages while Ctrl is held, the
+    // Unreal/Unity/Blender convention.
+    bool snapRequiresCtrl{false};
+    float snapTranslate{10.0F}; // world units (0 disables the channel)
+    float snapRotate{15.0F};    // degrees
+    float snapScale{0.1F};      // factor step
+    // Arrow-key nudge step in world units; 0 follows snapTranslate.
+    float nudgeStep{0.0F};
+    // 'End' drop-to-surface: also tilt the object onto the surface normal, and
+    // how far above the hit point the object should rest.
+    bool dropAlignToNormal{false};
+    float dropStandOff{0.0F};
+    // While dragging with the gizmo, keep the selection on the surface beneath
+    // it (snap-to-object-tops) instead of moving freely through geometry.
+    bool dropToSurfaceWhileDragging{false};
+
     // Layout: when false (default) docked panels can be rearranged inside the
     // workspace but never torn off into floating OS windows, which is what made
     // the old UI feel messy.

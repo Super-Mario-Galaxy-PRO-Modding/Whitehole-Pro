@@ -72,10 +72,14 @@ add_library(whitehole_core
     cpp/src/io/rarc.cpp
     cpp/src/io/yaz0.cpp
     cpp/src/render/camera.cpp
+    cpp/src/render/camera_controller.cpp
+    cpp/src/render/camera_tween.cpp
+    cpp/src/render/collision_kcl.cpp
     cpp/src/render/gizmo.cpp
     cpp/src/render/object_visual.cpp
     cpp/src/render/model_mesh.cpp
     cpp/src/render/model_library.cpp
+    cpp/src/render/surface_snap.cpp
     cpp/src/render/viewport_scene.cpp
     cpp/src/smg/bcsv.cpp
     cpp/src/smg/field_hashes.cpp

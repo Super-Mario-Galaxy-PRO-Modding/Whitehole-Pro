@@ -13,9 +13,14 @@ bool getB(const util::JsonValue& o, const char* k, bool fb) { return o.at(k).asB
 int getI(const util::JsonValue& o, const char* k, int fb) {
     return static_cast<int>(o.at(k).asNumber(static_cast<double>(fb)));
 }
+float getF(const util::JsonValue& o, const char* k, float fb) {
+    const double value = o.at(k).asNumber(static_cast<double>(fb));
+    return static_cast<float>(value);
+}
 void putS(util::JsonObject& o, const char* k, const std::string& v) { o[k] = util::JsonValue(v); }
 void putB(util::JsonObject& o, const char* k, bool v) { o[k] = util::JsonValue(v); }
 void putI(util::JsonObject& o, const char* k, int v) { o[k] = util::JsonValue(static_cast<double>(v)); }
+void putF(util::JsonObject& o, const char* k, float v) { o[k] = util::JsonValue(static_cast<double>(v)); }
 } // namespace
 Settings& Settings::instance() {
     static Settings s;
@@ -80,6 +85,32 @@ void Settings::load() {
     if (modelCacheSize < 16) modelCacheSize = 16;
     if (modelCacheSize > 4096) modelCacheSize = 4096;
     reverseRotation = getB(root, "reverseRotation", false);
+    navPreset = getS(root, "navPreset");
+    if (navPreset.empty()) navPreset = "unreal";
+    flySpeed = getF(root, "flySpeed", 1200.0F);
+    if (flySpeed < 10.0F) flySpeed = 10.0F;
+    if (flySpeed > 100000.0F) flySpeed = 100000.0F;
+    wheelSpeedGain = getF(root, "wheelSpeedGain", 1.25F);
+    if (wheelSpeedGain < 1.01F) wheelSpeedGain = 1.01F;
+    if (wheelSpeedGain > 4.0F) wheelSpeedGain = 4.0F;
+    orbitSensitivity = getF(root, "orbitSensitivity", 0.008F);
+    if (orbitSensitivity < 0.0005F) orbitSensitivity = 0.0005F;
+    if (orbitSensitivity > 0.05F) orbitSensitivity = 0.05F;
+    panSensitivity = getF(root, "panSensitivity", 0.0016F);
+    if (panSensitivity < 0.0001F) panSensitivity = 0.0001F;
+    if (panSensitivity > 0.02F) panSensitivity = 0.02F;
+    smoothCamera = getB(root, "smoothCamera", true);
+    wheelZoomToCursor = getB(root, "wheelZoomToCursor", true);
+    freeFlyWithoutRmb = getB(root, "freeFlyWithoutRmb", false);
+    snapEnabled = getB(root, "snapEnabled", true);
+    snapRequiresCtrl = getB(root, "snapRequiresCtrl", false);
+    snapTranslate = getF(root, "snapTranslate", 10.0F);
+    snapRotate = getF(root, "snapRotate", 15.0F);
+    snapScale = getF(root, "snapScale", 0.1F);
+    nudgeStep = getF(root, "nudgeStep", 0.0F);
+    dropAlignToNormal = getB(root, "dropAlignToNormal", false);
+    dropStandOff = getF(root, "dropStandOff", 0.0F);
+    dropToSurfaceWhileDragging = getB(root, "dropToSurfaceWhileDragging", false);
     allowFloatingPanels = getB(root, "allowFloatingPanels", false);
     recentMaps.clear();
     for (const auto& item : root.at("recentMaps").asArray()) {
@@ -108,6 +139,23 @@ void Settings::save() const {
     putS(o, "textureFilter", textureFilter);
     putI(o, "modelCacheSize", modelCacheSize);
     putB(o, "reverseRotation", reverseRotation);
+    putS(o, "navPreset", navPreset);
+    putF(o, "flySpeed", flySpeed);
+    putF(o, "wheelSpeedGain", wheelSpeedGain);
+    putF(o, "orbitSensitivity", orbitSensitivity);
+    putF(o, "panSensitivity", panSensitivity);
+    putB(o, "smoothCamera", smoothCamera);
+    putB(o, "wheelZoomToCursor", wheelZoomToCursor);
+    putB(o, "freeFlyWithoutRmb", freeFlyWithoutRmb);
+    putB(o, "snapEnabled", snapEnabled);
+    putB(o, "snapRequiresCtrl", snapRequiresCtrl);
+    putF(o, "snapTranslate", snapTranslate);
+    putF(o, "snapRotate", snapRotate);
+    putF(o, "snapScale", snapScale);
+    putF(o, "nudgeStep", nudgeStep);
+    putB(o, "dropAlignToNormal", dropAlignToNormal);
+    putF(o, "dropStandOff", dropStandOff);
+    putB(o, "dropToSurfaceWhileDragging", dropToSurfaceWhileDragging);
     putB(o, "allowFloatingPanels", allowFloatingPanels);
     util::JsonArray recent;
     for (const auto& m : recentMaps) recent.emplace_back(m);
@@ -128,6 +176,23 @@ void Settings::reset() {
     textureFilter = "linear";
     modelCacheSize = 256;
     reverseRotation = false;
+    navPreset = "unreal";
+    flySpeed = 1200.0F;
+    wheelSpeedGain = 1.25F;
+    orbitSensitivity = 0.008F;
+    panSensitivity = 0.0016F;
+    smoothCamera = true;
+    wheelZoomToCursor = true;
+    freeFlyWithoutRmb = false;
+    snapEnabled = true;
+    snapRequiresCtrl = false;
+    snapTranslate = 10.0F;
+    snapRotate = 15.0F;
+    snapScale = 0.1F;
+    nudgeStep = 0.0F;
+    dropAlignToNormal = false;
+    dropStandOff = 0.0F;
+    dropToSurfaceWhileDragging = false;
     allowFloatingPanels = false;
     loaded_ = true;
 }

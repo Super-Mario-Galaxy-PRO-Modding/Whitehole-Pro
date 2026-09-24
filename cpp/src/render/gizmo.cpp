@@ -289,4 +289,31 @@ math::Vec3f snapScale(math::Vec3f factors, float step) noexcept {
             1.0F + snapValue(factors.z - 1.0F, step)};
 }
 
+math::Vec3f nudgeDelta(NudgeKey key, float step) noexcept {
+    // A disabled channel (step <= 0) still nudges by one unit rather than
+    // silently eating the keypress.
+    const float s = step > 0.0F ? step : 1.0F;
+    switch (key) {
+    case NudgeKey::Left: return {-s, 0.0F, 0.0F};
+    case NudgeKey::Right: return {s, 0.0F, 0.0F};
+    case NudgeKey::Up: return {0.0F, 0.0F, -s};
+    case NudgeKey::Down: return {0.0F, 0.0F, s};
+    case NudgeKey::PageUp: return {0.0F, s, 0.0F};
+    case NudgeKey::PageDown: return {0.0F, -s, 0.0F};
+    }
+    return {};
+}
+
+int nudgeAxis(NudgeKey key) noexcept {
+    switch (key) {
+    case NudgeKey::Left:
+    case NudgeKey::Right: return 0;
+    case NudgeKey::PageUp:
+    case NudgeKey::PageDown: return 1;
+    case NudgeKey::Up:
+    case NudgeKey::Down: return 2;
+    }
+    return 0;
+}
+
 } // namespace whitehole::render

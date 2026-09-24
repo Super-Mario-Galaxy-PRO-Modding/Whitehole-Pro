@@ -5,9 +5,14 @@
 //
 // Lifetime: create() makes a child window of the editor, destroy() tears the
 // GL context down. setScene() copies oriented boxes in (cheap pointer-free
-// structs). Input: left-drag pan, right-drag orbit, middle-drag pan, wheel
-// dolly (Shift = fast), click select, WASD/arrows fly (Shift fast, Ctrl slow,
-// E/Q or PgUp/PgDn vertical), 1/2/3 gizmo mode, Space/Home frame.
+// structs).
+//
+// Navigation is the hybrid dual-control paradigm (see camera_controller.hpp):
+//  * RMB hold = FPS flycam: WASD + Q/E, mouselook, wheel = fly speed.
+//  * Alt+LMB / MMB = orbit the selection pivot, Shift+MMB = view-plane pan,
+//    wheel = dolly toward the cursor.
+//  * WASD still flies without RMB; arrow keys nudge the selection, and 'F'
+//    eases the camera onto it, 'End' drops it onto the surface below.
 //
 // Objects with a real game model (ViewportBox::model) are drawn from GL
 // display lists compiled once per mesh, so a whole zone of BMD models still
@@ -16,8 +21,11 @@
 #ifdef _WIN32
 
 #include "whitehole/render/camera.hpp"
+#include "whitehole/render/camera_controller.hpp"
+#include "whitehole/render/camera_tween.hpp"
 #include "whitehole/render/gizmo.hpp"
 #include "whitehole/render/model_mesh.hpp"
+#include "whitehole/render/surface_snap.hpp"
 #include "whitehole/render/viewport_scene.hpp"
 
 #include <chrono>
@@ -88,6 +96,11 @@ public:
     // One message from a gizmo drag (Begin/Update/End), already in world units.
     using GizmoCallback = std::function<void(const GizmoEdit&)>;
 
+    // Discrete edit gestures the viewport can start on its own (arrow nudge,
+    // Alt-held arrow duplicate). The editor owns the objects, so it turns these
+    // into undoable TransformCommands; the viewport only reports intent.
+    using NudgeCallback = std::function<void(int axis, float amount, bool duplicate)>;
+
     bool create(HWND parent, int controlId, HINSTANCE instance);
     void destroy() noexcept;
     [[nodiscard]] bool valid() const noexcept { return window_ != nullptr && glContext_ != nullptr; }
@@ -110,9 +123,37 @@ public:
     // overlay used to paint, which looked wrong inside a light-mode workspace.
     void setOverlayTheme(bool dark) noexcept;
     // Settings > "Invert camera motion": flips both orbit deltas.
-    void setOrbitInverted(bool inverted) noexcept { orbitInverted_ = inverted; }
+    // Defined in viewport_win32.cpp so the camera controller's invert flag
+    // stays in sync with orbitInverted_ (a header-only setter would skip it).
+    void setOrbitInverted(bool inverted) noexcept;
+    // Control preset + sensitivities (Settings > Navigation).
+    void setNavSettings(const NavSettings& settings);
+    [[nodiscard]] const NavSettings& navSettings() const noexcept { return controller_.settings; }
+    // True while RMB flycam owns the mouse: the editor uses this so W/E/R/Q
+    // switch gizmo modes only when the keys are not flying the camera.
+    [[nodiscard]] bool flycamActive() const noexcept { return flyLook_; }
+    // Fly-speed multiplier set by the wheel while flying (HUD readout).
+    [[nodiscard]] float flySpeedMultiplier() const noexcept { return controller_.flyMultiplier; }
+    // Optional exact collision geometry (KCL triangles) for surface snapping.
+    void setCollisionTriangles(std::vector<SnapTriangle> triangles);
+    // Step size for arrow-key nudging (mirrors the editor's snap steps).
+    void setNudgeStep(float step) noexcept { nudgeStep_ = step > 0.0F ? step : 10.0F; }
     void frameAll();
+    // Smooth ('F') framing: same maths as frameSelection, but the camera eases
+    // onto the selection instead of snapping there.
     void frameSelection();
+    // Raycasts down through the scene (KCL first, then oriented boxes) so the
+    // editor can drop an object flush onto the surface below it. `ignoreIndex`
+    // keeps an object from landing on itself, and `standOff` is the clearance
+    // baked into the returned hit. The caller places the object with
+    // `position.y = hit.point.y + halfHeight` so its base rests on the surface.
+    [[nodiscard]] std::optional<SnapHit> snapDownwards(const math::Vec3f& position, float halfHeight,
+                                                       std::optional<std::size_t> ignoreIndex,
+                                                       float standOff = 0.0F,
+                                                       float maxDistance = 20000.0F) const noexcept;
+    // Vertical half extent of one object's drawn/picked bounds -- the height the
+    // editor needs to rest an object on a surface instead of sinking it in.
+    [[nodiscard]] float halfHeightFor(std::size_t objectIndex) const noexcept;
     // Marks the surface as needing a redraw. Everything that can change what the
     // viewport looks like funnels through here, so the editor can poll one flag
     // instead of guessing when a repaint is due.
@@ -141,6 +182,7 @@ public:
     // the selected cube, so selection is visible without a gizmo.
     void setRailHighlight(std::optional<RailPointRef> highlight) noexcept;
     void setOnGizmo(GizmoCallback callback) { onGizmo_ = std::move(callback); }
+    void setOnNudge(NudgeCallback callback) { onNudge_ = std::move(callback); }
     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
     // Drops every uploaded model texture (call when the GL context is about
     // to die, or after the texture setting/filter changes).
@@ -211,10 +253,22 @@ private:
     // onto the front buffer after the swap, which raced the desktop compositor
     // and flickered -- worst with labels on.
     void drawLabels();
-    // WASD/arrow fly movement, polled once per frame while this child holds
-    // keyboard focus. Java's keyMask parity: E/Q (and PgUp/PgDn) vertical,
-    // Shift x3 / Ctrl x0.25 speed modifiers.
-    void pollFlyMovement();
+    // One frame of input: samples keys, folds in the mouse motion accumulated by
+    // the window messages, runs the controller and applies the result. Called
+    // once per drawn frame, which is what makes every camera motion
+    // frame-rate independent.
+    void pollInput();
+    // RMB mouselook plumbing: capture + park the cursor on the viewport centre
+    // and hide it, so a fly gesture never runs out of screen.
+    void beginFlyLook();
+    void endFlyLook() noexcept;
+    void applyCameraDelta(const CameraDelta& delta);
+    // Step the smooth-focus tween, if one is running.
+    void updateTween(float dt);
+    void startFocusTween(const math::Vec3f& center, float distance);
+    // Arrow-key nudging: fires on the press edge, then repeats while held.
+    void pollNudge();
+    [[nodiscard]] SnapScene buildSnapScene() const;
     // Scene-aware pick reach: a galaxy framed past 20000 units used to become
     // unclickable beyond that distance.
     [[nodiscard]] float pickDistance() const noexcept;
@@ -276,6 +330,35 @@ private:
     bool leftMoved_{false};
     int wheelAccumulator_{0};   // pending raw wheel deltas, applied in whole notches
     bool trackingMouse_{false}; // TrackMouseEvent armed so hover clears on leave
+    // Mouse motion accumulated by the window messages and consumed by pollInput:
+    // one code path for every gesture, so the controller (and its presets) is the
+    // only thing that decides what a drag means.
+    float pendingDX_{0.0F};
+    float pendingDY_{0.0F};
+    float pendingWheel_{0.0F};
+    // True once the current orbit gesture has re-anchored its pivot to the
+    // selection centre (done on the first frame of the drag, not every frame).
+    bool orbitPivotSet_{false};
+    // RMB flycam state.
+    bool flyLook_{false};
+    bool cursorHidden_{false};
+    POINT flyCenter_{0, 0}; // client-space centre the cursor is parked on
+    bool flyWarpGuard_{false};
+    // Fly-speed HUD: multiplier + time left on screen, drawn by drawLabels.
+    float hudSpeed_{0.0F};
+    float hudTimer_{0.0F};
+    CameraController controller_{};
+    CameraTween tween_{};
+    // Arrow nudge: per-key held state so a press fires once, then repeats.
+    bool nudgeWasDown_[6]{false, false, false, false, false, false};
+    std::chrono::steady_clock::time_point nextNudgeRepeat_{};
+    std::chrono::steady_clock::time_point lastNudgeTick_{};
+    NudgeCallback onNudge_;
+    // Nudge step, pushed by the editor so arrow keys, gizmo drags and the
+    // Properties panel all move objects by the same amount.
+    float nudgeStep_{10.0F};
+    // Optional exact collision for surface snapping.
+    std::vector<SnapTriangle> collisionTriangles_;
     bool meshesFilled_{false};  // lazily built once per GL context
     std::vector<math::Vec3f> meshes_[5]; // unit triangles, one entry per CategoryStyle::Shape
     std::vector<ModelListEntry> modelLists_; // display lists, validated via weak_ptr

@@ -24,6 +24,7 @@
 #include "whitehole/edit/commands.hpp"
 #include "whitehole/edit/undo.hpp"
 #include "whitehole/edit/validation.hpp"
+#include "whitehole/render/collision_kcl.hpp"
 #include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/smg/path.hpp"
@@ -59,6 +60,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // MSVC needs these to pull in the shell/COM imports. Every other toolchain gets
@@ -137,6 +139,10 @@ struct EditorState {
 
     db::ModelSubstitutions modelSubstitutions;
     render::ModelLibrary modelLibrary;
+    // Local-space KCL collision per ObjectData archive, parsed once per
+    // workspace and baked into world-space triangles on every zone load by
+    // refreshZoneCollision(). Cleared when a different game opens.
+    std::unordered_map<std::string, std::vector<render::SnapTriangle>> kclCache;
     Settings settings;
     std::optional<smg::GameArchive> game;
     std::vector<std::string> galaxies;
@@ -185,10 +191,17 @@ struct EditorState {
     // Shift-drag marquee extend it; the gizmo anchors on the whole group and a
     // drag commits as one undo step.
     std::vector<std::size_t> selection;
-    // Transform snapping for gizmo drags + nudge keys. Shift held = fine
-    // (snap off); the Viewport panel checkbox toggles the master switch.
+    // Transform snapping for gizmo drags + nudge keys. The Viewport panel owns
+    // the master switch + steps; Shift held = fine (snap off), and with
+    // settings.snapRequiresCtrl set, Ctrl must be held for snapping to engage.
     bool snapEnabled{true};
     render::TransformSnap snapSteps{};
+    // While dragging with the gizmo, keep the selection on the surface under it
+    // (snap-to-object-tops). Off by default: it changes what a drag does, so it
+    // stays an explicit choice.
+    bool surfaceSnapOnDrag{false};
+    // 'Q' toggles the transform handles off for pure select-and-inspect.
+    bool showGizmo{true};
     char searchBuf[160]{};   // object list filter
     char nameBuf[160]{};     // selected object name (committed on Enter)
     float transform[9]{};    // pos.xyz, rot.xyz, scale.xyz (display values)
@@ -742,11 +755,14 @@ void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit) {
         state.dragSelection = live;
         state.draggingTransform = true;
     }
-    // Shift = fine drag (snap off), matching every 3D editor. The viewport
-    // reports cumulative values from Begin, so snap the value itself — never
-    // the per-frame delta, which would quantise into stairs.
+    // Shift = fine drag (snap off). With settings.snapRequiresCtrl the snap only
+    // engages while Ctrl is held, the Unreal/Unity/Blender convention; otherwise
+    // the Viewport panel toggle owns it. The viewport reports cumulative values
+    // from Begin, so snap the value itself — never the per-frame delta, which
+    // would quantise into stairs.
     const bool fine = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    const bool snap = state.snapEnabled && !fine;
+    const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool snap = state.snapEnabled && !fine && (!state.settings.snapRequiresCtrl || ctrl);
     math::Vec3f value = edit.value;
     const char* label = "Move objects";
     if (edit.mode == render::GizmoMode::Translate) {
@@ -764,6 +780,17 @@ void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit) {
         if (edit.mode == render::GizmoMode::Translate) {
             object.position = {start.position.x + value.x, start.position.y + value.y,
                                start.position.z + value.z};
+            // Snap-to-object-tops: while moving, keep the object resting on
+            // whatever surface is under it instead of leaving it floating or
+            // buried. Only the Y channel is overridden; X/Z follow the cursor.
+            if (state.surfaceSnapOnDrag && state.viewportReady) {
+                const float halfHeight = state.viewport.halfHeightFor(live[slot]);
+                const auto hit = state.viewport.snapDownwards(object.position, halfHeight, live[slot],
+                                                             state.settings.dropStandOff);
+                if (hit.has_value()) {
+                    object.position.y = hit->point.y + halfHeight;
+                }
+            }
         } else if (edit.mode == render::GizmoMode::Rotate) {
             object.rotation = {start.rotation.x + value.x, start.rotation.y + value.y,
                                start.rotation.z + value.z};
@@ -903,6 +930,222 @@ void requestOpenGame(EditorState& state);
 // Re-reads the selected rail's row into the property widgets (defined with the
 // other rail helpers below).
 void refreshRailBuffers(EditorState& state);
+
+// --- Viewport-driven edits ---------------------------------------------------
+// Arrow-key nudging, Alt+arrow duplicate-drag and 'End' drop-to-surface all
+// arrive from the 3D viewport, which knows the surface geometry but not the
+// BCSV tables. Each lands on the undo stack as one step.
+
+// Maps the persisted settings onto the viewport's navigation configuration. Kept
+// in one place so Preferences, the Viewport panel and the boot push can never
+// disagree about what a preset means.
+render::NavSettings navSettingsFrom(const Settings& settings) {
+    render::NavSettings nav;
+    nav.preset = render::navPresetFromKey(settings.navPreset);
+    nav.mapping = render::mappingForPreset(nav.preset);
+    nav.invertOrbit = settings.reverseRotation;
+    nav.flyBaseSpeed = settings.flySpeed;
+    nav.flyWheelGain = settings.wheelSpeedGain;
+    nav.orbitSensitivity = settings.orbitSensitivity;
+    nav.panSensitivity = settings.panSensitivity;
+    nav.smoothing = settings.smoothCamera;
+    nav.freeFlyWithoutRmb = settings.freeFlyWithoutRmb;
+    if (!settings.wheelZoomToCursor) {
+        nav.mapping.wheelToCursor = false;
+    }
+    return nav;
+}
+
+// Clones every selected object, highest index first (duplicateObject inserts
+// beside its source, which renumbers the rows after it), and returns the new
+// indices in ascending order.
+std::vector<std::size_t> duplicateSelectionGroup(EditorState& state) {
+    std::vector<std::size_t> sources = state.selection;
+    if (sources.empty() && state.selectedObject.has_value()) {
+        sources.push_back(*state.selectedObject);
+    }
+    if (!state.stage || sources.empty()) {
+        return {};
+    }
+    std::sort(sources.begin(), sources.end());
+    sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+    std::vector<std::size_t> created;
+    for (auto it = sources.rbegin(); it != sources.rend(); ++it) {
+        if (*it >= state.stage->objects().size()) {
+            continue;
+        }
+        const auto copy = edit::duplicateObject(*state.stage, state.undoStack, *it);
+        if (copy.has_value()) {
+            created.push_back(copy->objectIndex);
+        }
+    }
+    std::sort(created.begin(), created.end());
+    return created;
+}
+
+// Forces the transform widgets to re-read the selected object. Unlike
+// syncTransformBuffers this never clears the drag baselines, so it is safe to
+// call from the middle of a nudge gesture.
+void refreshTransformWidgets(EditorState& state) {
+    if (!state.stage || !state.selectedObject ||
+        *state.selectedObject >= state.stage->objects().size()) {
+        return;
+    }
+    const auto& object = state.stage->objects()[*state.selectedObject];
+    state.transform[0] = object.position.x;
+    state.transform[1] = object.position.y;
+    state.transform[2] = object.position.z;
+    state.transform[3] = object.rotation.x;
+    state.transform[4] = object.rotation.y;
+    state.transform[5] = object.rotation.z;
+    state.transform[6] = object.scale.x;
+    state.transform[7] = object.scale.y;
+    state.transform[8] = object.scale.z;
+    state.dragStart = object;
+}
+
+// Applies a batch of before/after transforms as one undo step and repaints.
+void commitTransformBatch(EditorState& state, std::vector<smg::PlacementObject> before,
+                          std::vector<smg::PlacementObject> after, std::string label) {
+    if (!state.stage || before.empty() || before.size() != after.size()) {
+        return;
+    }
+    try {
+        state.undoStack.push(std::make_unique<edit::TransformCommand>(
+            *state.stage, std::move(before), std::move(after), std::move(label)));
+    } catch (const std::exception& error) {
+        pushToast(state, error.what(), true);
+        return;
+    }
+    state.stage->rebuildObjects();
+    refreshObjects(state);
+    refreshTransformWidgets(state);
+    markDirty(state);
+    refreshViewport(state, false);
+}
+
+// One arrow-key nudge over the whole selection, as one undo step. Alt turns it
+// into duplicate-drag: clone first, then move the copies, which is the gesture
+// every 3D editor spells "Alt + drag".
+void nudgeSelection(EditorState& state, int axis, float amount, bool duplicate) {
+    if (!state.stage || amount == 0.0F) {
+        return;
+    }
+    if (state.draggingTransform) {
+        commitDragAsUndo(state, "Edit object"); // a live drag owns the baselines
+    }
+    if (duplicate) {
+        const auto created = duplicateSelectionGroup(state);
+        if (created.empty()) {
+            return;
+        }
+        state.selection = created;
+        state.selectedObject = created.front();
+        state.viewportSelected = created.front();
+        if (state.viewportReady) {
+            state.viewport.setSelected(created.front());
+            state.viewport.setSelection(created);
+        }
+    }
+    if (state.selection.empty()) {
+        return;
+    }
+    std::vector<std::size_t> live;
+    live.reserve(state.selection.size());
+    for (const auto index : state.selection) {
+        if (index < state.stage->objects().size()) {
+            live.push_back(index);
+        }
+    }
+    if (live.empty()) {
+        return;
+    }
+    std::vector<smg::PlacementObject> before;
+    before.reserve(live.size());
+    for (const auto index : live) {
+        before.push_back(state.stage->objects()[index]);
+    }
+    for (const auto index : live) {
+        auto& object = state.stage->objects()[index];
+        if (axis == 0) {
+            object.position.x += amount;
+        } else if (axis == 1) {
+            object.position.y += amount;
+        } else {
+            object.position.z += amount;
+        }
+        state.stage->writeObject(object);
+    }
+    std::vector<smg::PlacementObject> after;
+    after.reserve(live.size());
+    for (const auto index : live) {
+        after.push_back(state.stage->objects()[index]);
+    }
+    commitTransformBatch(state, std::move(before), std::move(after),
+                         duplicate ? "Duplicate and move" : "Nudge objects");
+    const char* axisName = axis == 0 ? "X" : (axis == 1 ? "Y" : "Z");
+    setStatus(state, std::string(duplicate ? "Duplicated and moved " : "Moved ") +
+                         std::to_string(live.size()) + (live.size() == 1 ? " object " : " objects ") +
+                         std::string(axisName) + " by " + std::to_string(amount) + ".");
+}
+
+// 'End': rest every selected object on the surface directly beneath it. KCL
+// triangles are used when the zone has them, otherwise the oriented box tops of
+// the surrounding objects -- so this works on a bare map with no collision mesh.
+void dropSelectionToSurface(EditorState& state) {
+    if (!state.stage || state.selection.empty() || !state.viewportReady) {
+        setStatus(state, "Select an object first, then press End to drop it onto the surface.");
+        return;
+    }
+    if (state.draggingTransform) {
+        commitDragAsUndo(state, "Edit object");
+    }
+    std::vector<std::size_t> live;
+    for (const auto index : state.selection) {
+        if (index < state.stage->objects().size()) {
+            live.push_back(index);
+        }
+    }
+    if (live.empty()) {
+        return;
+    }
+    std::vector<smg::PlacementObject> before;
+    before.reserve(live.size());
+    for (const auto index : live) {
+        before.push_back(state.stage->objects()[index]);
+    }
+    std::size_t dropped = 0;
+    bool usedCollision = false;
+    for (const auto index : live) {
+        auto& object = state.stage->objects()[index];
+        const float halfHeight = state.viewport.halfHeightFor(index);
+        const auto hit = state.viewport.snapDownwards(object.position, halfHeight, index,
+                                                     state.settings.dropStandOff);
+        if (!hit.has_value()) {
+            continue;
+        }
+        // Rest the base on the surface: the hit names the surface, not the pivot.
+        object.position.y = hit->point.y + halfHeight;
+        if (state.settings.dropAlignToNormal) {
+            object.rotation = render::alignUpToNormal(object.rotation, hit->normal);
+        }
+        state.stage->writeObject(object);
+        usedCollision = usedCollision || hit->fromKcl;
+        ++dropped;
+    }
+    if (dropped == 0) {
+        pushToast(state, "Nothing below the selection to drop onto.", true);
+        return;
+    }
+    std::vector<smg::PlacementObject> after;
+    after.reserve(live.size());
+    for (const auto index : live) {
+        after.push_back(state.stage->objects()[index]);
+    }
+    commitTransformBatch(state, std::move(before), std::move(after), "Drop to surface");
+    pushToast(state, "Dropped " + std::to_string(dropped) + (dropped == 1 ? " object onto " : " objects onto ") +
+                         (usedCollision ? "collision geometry." : "the surface below."));
+}
 
 // True when the undo cursor has moved away from the last save point. That is
 // what makes undoing back to the saved state report clean again.
@@ -1410,6 +1653,126 @@ void requestOpenMap(EditorState& state);
 void requestOpenGame(EditorState& state);
 void requestSave(EditorState& state);
 
+// --- Zone collision ----------------------------------------------------------
+// Surface snapping prefers exact KCL triangles over the oriented-box
+// approximation. Two sources feed it, both resolved once per zone load:
+//  * a zone-level .kcl shipped inside the stage map archive itself (custom
+//    and modded maps), consumed as-is in file space; and
+//  * every placed object's own model collision from the workspace's
+//    ObjectData archives, transformed into the world with the object's
+//    placement matrix -- which is where vanilla SMG keeps its terrain
+//    collision (each MapParts-style object carries <Name>/<Name>.kcl beside
+//    its BMD, exactly like the Java editor's KclRenderer reads it).
+// Local triangles are parsed once per archive and cached on the state, so
+// flipping between zones never re-reads the same ObjectData arc twice.
+
+// Local-space KCL for one ObjectData archive, or empty when it has none.
+const std::vector<render::SnapTriangle>& objectCollisionFor(EditorState& state,
+                                                            const std::string& archiveName) {
+    std::string stem = archiveName;
+    if (stem.size() > 4 && util::equalIgnoreCase(stem.substr(stem.size() - 4), ".arc")) {
+        stem.resize(stem.size() - 4);
+    }
+    const auto [it, inserted] = state.kclCache.try_emplace(stem);
+    std::vector<render::SnapTriangle>& local = it->second;
+    if (!inserted || !state.game || stem.empty()) {
+        return local;
+    }
+    try {
+        const io::RarcArchive archive(state.game->filesystem().read("/ObjectData/" + archiveName));
+        const std::string exact = "/" + stem + "/" + stem + ".kcl";
+        if (archive.fileExists(exact)) {
+            local = render::parseKclTriangles(archive.read(exact));
+        } else {
+            // Renamed or companion-part archives: take their single KCL entry.
+            for (const auto& entry : archive.entries()) {
+                if (!entry.directory && render::isKclPath(entry.path)) {
+                    local = render::parseKclTriangles(archive.read(entry));
+                    break;
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        // Missing or unreadable KCL just means this object contributes no
+        // exact collision; the box approximation still covers it.
+        local.clear();
+    }
+    return local;
+}
+
+// (Re)builds the viewport's exact collision for the current zone. Call on
+// every zone load; with no stage loaded it clears the soup instead.
+void refreshZoneCollision(EditorState& state) {
+    if (!state.viewportReady) {
+        return;
+    }
+    std::vector<render::SnapTriangle> world;
+    if (!state.stage) {
+        state.viewport.setCollisionTriangles(std::move(world));
+        return;
+    }
+
+    // 1) Zone-level collision shipped inside the stage archive itself.
+    try {
+        const auto& source = state.stage->sourcePath();
+        if (std::filesystem::exists(source)) {
+            const io::RarcArchive stageArc = io::RarcArchive::open(source);
+            for (const auto& entry : stageArc.entries()) {
+                if (!entry.directory && render::isKclPath(entry.path)) {
+                    auto parsed = render::parseKclTriangles(stageArc.read(entry));
+                    world.insert(world.end(), std::make_move_iterator(parsed.begin()),
+                                 std::make_move_iterator(parsed.end()));
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        // A non-RARC or corrupt stage file must not block the zone from
+        // opening; snapping simply keeps the box approximation.
+    }
+
+    // 2) Per-object model collision from the game workspace.
+    if (state.game && state.modelLibrary.bound()) {
+        const auto& objects = state.stage->objects();
+        world.reserve(world.size() + objects.size() * 8); // rough starter hint
+        for (std::size_t index = 0; index < objects.size(); ++index) {
+            const auto& object = objects[index];
+            const std::string archiveName = state.modelLibrary.archiveNameFor(object.name);
+            if (archiveName.empty()) {
+                continue;
+            }
+            const auto& local = objectCollisionFor(state, archiveName);
+            if (local.empty()) {
+                continue;
+            }
+            const math::Matrix4 placement = render::objectWorldMatrix(object);
+            const auto& values = placement.values;
+            for (const auto& triangle : local) {
+                render::SnapTriangle placed = triangle;
+                placed.a = placement.transformPoint(triangle.a);
+                placed.b = placement.transformPoint(triangle.b);
+                placed.c = placement.transformPoint(triangle.c);
+                // Normals rotate (never translate); a proper inverse-transpose
+                // would be needed for skewed non-uniform scale, but placements
+                // are axis-scale + rotation so the rotation part plus a
+                // renormalise is exact for every real object.
+                placed.normal =
+                    math::Vec3f{triangle.normal.x * values[0] + triangle.normal.y * values[4] +
+                                    triangle.normal.z * values[8],
+                                triangle.normal.x * values[1] + triangle.normal.y * values[5] +
+                                    triangle.normal.z * values[9],
+                                triangle.normal.x * values[2] + triangle.normal.y * values[6] +
+                                    triangle.normal.z * values[10]}
+                        .normalized();
+                // Tag the owner so End-drop never lands an object on its own roof.
+                placed.sourceIndex = index;
+                world.push_back(placed);
+            }
+        }
+    }
+
+    state.viewport.setCollisionTriangles(std::move(world));
+}
+
 void openMapImpl(EditorState& state, const std::filesystem::path& path) {
     state.stage = smg::StageArchive::openMapFile(path);
     state.zones = {state.stage->stageName()};
@@ -1422,6 +1785,7 @@ void openMapImpl(EditorState& state, const std::filesystem::path& path) {
     refreshObjects(state);
     selectObject(state, std::nullopt);
     refreshViewport(state, true);
+    refreshZoneCollision(state);
     rememberMap(state, path);
     state.unsaved = false;
     pushToast(state, "Opened map archive with " +
@@ -1454,11 +1818,16 @@ void openGameImpl(EditorState& state, const std::filesystem::path& path, bool qu
     state.undoStack.clear(); // a new workspace means a new history
     state.savedUndoCursor = 0;
     state.modelFailureLogged = false; // re-log model failures for this workspace
+    // The cached local KCLs belong to the workspace that was just replaced.
+    state.kclCache.clear();
     if (!quiet) {
         state.settings.lastGameDir = path.string();
         state.settings.save();
     }
     refreshViewport(state, false);
+    // Stage is reset above, so this pushes an empty collision set: a fresh
+    // workspace starts every zone clean until its own load fills it in.
+    refreshZoneCollision(state);
     // quiet = the silent boot re-open: no toast, no settings rewrite.
     if (!quiet) {
         pushToast(state, "Opened SMG" + std::to_string(state.game->gameType()) +
@@ -1497,6 +1866,7 @@ void selectZone(EditorState& state, int index) {
     refreshObjects(state);
     selectObject(state, std::nullopt);
     refreshViewport(state, true);
+    refreshZoneCollision(state);
     if (state.stage) {
         pushToast(state, "Loaded " + zone + " (" +
                              std::to_string(state.stage->objects().size()) + " objects).");
@@ -2605,6 +2975,11 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         }
     });
     state.viewport.setOnGizmo([&state](const render::GizmoEdit& edit) { handleGizmoEdit(state, edit); });
+    // Arrow keys nudge the selection from inside the viewport (it owns the key
+    // polling), while the objects and their BCSV rows belong to the editor.
+    state.viewport.setOnNudge([&state](int axis, float amount, bool duplicate) {
+        nudgeSelection(state, axis, amount, duplicate);
+    });
     // Picking happens inside the viewport's own message handling, so it must not
     // re-enter the selection helpers in the middle of their own work.
     state.viewport.setOnSelect([&state](std::optional<std::size_t> picked) {
@@ -2641,8 +3016,17 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         selectRail(state, hit.pathIndex, hit.pointIndex, hit.part);
     });
     state.viewport.setShowLabels(state.showLabels);
+    state.viewport.setGizmoEnabled(state.showGizmo);
+    // Arrow-nudge step: an explicit Preferences value wins, otherwise the
+    // move snap step drives it (settings.nudgeStep == 0 means "follow move").
+    state.viewport.setNudgeStep(state.settings.nudgeStep > 0.0F
+                                    ? state.settings.nudgeStep
+                                    : state.snapSteps.translate);
     state.viewport.setOverlayTheme(state.settings.darkMode);
     state.viewport.setOrbitInverted(state.settings.reverseRotation);
+    // Boot push of the whole navigation block (preset, speeds, smoothing,
+    // free-fly) so the first frame never runs on default controls.
+    state.viewport.setNavSettings(navSettingsFrom(state.settings));
     state.viewport.setTexturedModels(state.settings.texturedModels);
     state.viewport.setTranslucentModels(state.settings.translucentModels);
     state.viewport.setTextureFilter(state.settings.textureFilter.c_str());
@@ -2695,11 +3079,21 @@ void placeViewportChild(EditorState& state) {
     }
     ImGui::SameLine();
     if (ImGui::Checkbox("Snap", &state.snapEnabled)) {
-        setStatus(state, state.snapEnabled ? "Snapping on (hold Shift for fine drags)"
-                                           : "Snapping off — drags are free");
+        setStatus(state, state.settings.snapRequiresCtrl
+                             ? (state.snapEnabled ? "Snapping on (engages while Ctrl is held)"
+                                                  : "Snapping off — drags are free")
+                             : (state.snapEnabled ? "Snapping on (hold Shift for fine drags)"
+                                                  : "Snapping off — drags are free"));
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Snap gizmo drags to the grid:\nmove 10u · rotate 15° · scale 0.1\nHold Shift while dragging for fine control.");
+        ImGui::SetTooltip(
+            "Snap gizmo drags to the grid:\nmove %g · rotate %g° · scale %g\n%s",
+            static_cast<double>(state.snapSteps.translate),
+            static_cast<double>(state.snapSteps.rotate),
+            static_cast<double>(state.snapSteps.scale),
+            state.settings.snapRequiresCtrl
+                ? "Snapping engages only while Ctrl is held."
+                : "Hold Shift while dragging for fine control.");
     }
     ImGui::SameLine();
     if (ImGui::Button("Frame Sel")) {
@@ -3405,6 +3799,70 @@ void drawPreferencesDialog(EditorState& state) {
     changed |= ImGui::Checkbox("Paths", &state.settings.showPaths);
     ImGui::SeparatorText("Editor controls");
     changed |= ImGui::Checkbox("Invert camera motion", &state.settings.reverseRotation);
+    ImGui::SeparatorText("Navigation");
+    {
+        // Preset combo: the machine keys double as the settings-file values,
+        // and the labels come from the controller so the UI can never drift
+        // from what mappingForPreset implements.
+        static const char* const kPresetKeys[] = {"unreal", "blender", "maya"};
+        std::array<const char*, 4> presetLabels{};
+        int presetCount = 0;
+        int presetCurrent = -1;
+        for (const char* key : kPresetKeys) {
+            presetLabels[presetCount] = render::navPresetLabel(render::navPresetFromKey(key));
+            if (state.settings.navPreset == key) {
+                presetCurrent = presetCount;
+            }
+            ++presetCount;
+        }
+        if (presetCurrent < 0) { // hand-edited file with "custom"
+            presetLabels[presetCount++] = "Custom";
+            presetCurrent = presetCount - 1;
+        }
+        if (ImGui::Combo("Control preset", &presetCurrent, presetLabels.data(), presetCount)) {
+            constexpr int kPresetCount = 3; // "Custom" is the entry after these
+            state.settings.navPreset = presetCurrent < kPresetCount
+                                           ? kPresetKeys[presetCurrent]
+                                           : "custom";
+            changed = true;
+        }
+        ImGui::SetItemTooltip("RMB is always the flycam; the preset decides which\ngestures orbit and pan.");
+        changed |= ImGui::DragFloat("Fly speed", &state.settings.flySpeed, 10.0F, 10.0F, 20000.0F,
+                                    "%.0f u/s");
+        ImGui::SetItemTooltip("Base fly speed quoted at an orbit distance of 800;\nthe wheel adjusts it while RMB-flying.");
+        changed |= ImGui::DragFloat("Wheel speed gain", &state.settings.wheelSpeedGain, 0.05F,
+                                    1.0F, 2.0F, "%.2fx");
+        changed |= ImGui::DragFloat("Orbit sensitivity", &state.settings.orbitSensitivity, 0.0005F,
+                                    0.001F, 0.05F, "%.4f");
+        changed |= ImGui::DragFloat("Pan sensitivity", &state.settings.panSensitivity, 0.0002F,
+                                    0.0002F, 0.01F, "%.5f");
+        changed |= ImGui::Checkbox("Smooth camera motion", &state.settings.smoothCamera);
+        changed |= ImGui::Checkbox("Wheel zooms toward the cursor", &state.settings.wheelZoomToCursor);
+        if (ImGui::Checkbox("Free-fly WASD without RMB", &state.settings.freeFlyWithoutRmb)) {
+            changed = true;
+            pushToast(state, state.settings.freeFlyWithoutRmb
+                                 ? "WASD now flies whenever the viewport has focus; "
+                                   "gizmo modes live on 1/2/3."
+                                 : "WASD flies only while RMB is held; W/E/R switch "
+                                   "gizmo modes again.");
+        }
+    }
+    ImGui::SeparatorText("Snapping");
+    changed |= ImGui::Checkbox("Enable snapping", &state.settings.snapEnabled);
+    changed |= ImGui::Checkbox("Hold Ctrl to snap", &state.settings.snapRequiresCtrl);
+    ImGui::SetItemTooltip("Off: the Snap toggle plus Shift for fine drags.\nOn: snapping engages only while Ctrl is held.");
+    changed |= ImGui::DragFloat("Move step", &state.settings.snapTranslate, 0.5F, 0.0F, 1000.0F,
+                                "%.2f u");
+    changed |= ImGui::DragFloat("Rotate step", &state.settings.snapRotate, 0.5F, 0.0F, 180.0F,
+                                "%.1f°");
+    changed |= ImGui::DragFloat("Scale step", &state.settings.snapScale, 0.01F, 0.0F, 1.0F, "%.3f");
+    changed |= ImGui::DragFloat("Nudge step (0 = move step)", &state.settings.nudgeStep, 0.5F,
+                                0.0F, 1000.0F, "%.2f u");
+    changed |= ImGui::Checkbox("Drop aligns to surface normal", &state.settings.dropAlignToNormal);
+    changed |= ImGui::DragFloat("Drop stand-off", &state.settings.dropStandOff, 1.0F, 0.0F,
+                                1000.0F, "%.1f u");
+    changed |= ImGui::Checkbox("Keep drags on the surface below",
+                               &state.settings.dropToSurfaceWhileDragging);
     ImGui::SeparatorText("Layout");
     if (ImGui::Checkbox("Allow floating panels", &state.settings.allowFloatingPanels)) {
         changed = true;
@@ -3437,6 +3895,20 @@ void drawPreferencesDialog(EditorState& state) {
         // The orbit direction is read live by the viewport, so push the new
         // value over instead of waiting for a scene rebuild.
         state.viewport.setOrbitInverted(state.settings.reverseRotation);
+        // Navigation (preset, speeds, smoothing, wheel behaviour, free-fly)
+        // lives in the camera controller: push the whole block so the
+        // viewport never keeps running on a stale mapping after the dialog.
+        state.viewport.setNavSettings(navSettingsFrom(state.settings));
+        // Snapping is shared between the editor (drags, nudges, Properties)
+        // and the viewport (arrow keys), so every mirror updates together.
+        state.snapEnabled = state.settings.snapEnabled;
+        state.snapSteps = render::TransformSnap{state.settings.snapTranslate,
+                                                state.settings.snapRotate,
+                                                state.settings.snapScale};
+        state.surfaceSnapOnDrag = state.settings.dropToSurfaceWhileDragging;
+        state.viewport.setNudgeStep(state.settings.nudgeStep > 0.0F
+                                        ? state.settings.nudgeStep
+                                        : state.snapSteps.translate);
         // Overlay/label/quality toggles change what the viewport draws, so the
         // scene has to be rebuilt for them to show up without another edit.
         refreshViewport(state, false);
@@ -3844,6 +4316,12 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
     // --- Editor state ---
     EditorState state;
     state.settings = settings;
+    // Snapping lives on the editor (drags, nudges and the Properties panel all
+    // share it), so seed it from the persisted preferences once at boot.
+    state.snapEnabled = settings.snapEnabled;
+    state.snapSteps = render::TransformSnap{settings.snapTranslate, settings.snapRotate,
+                                            settings.snapScale};
+    state.surfaceSnapOnDrag = settings.dropToSurfaceWhileDragging;
     state.window = hwnd;
     state.buildDefaultLayout = !std::filesystem::exists(layoutIniPath);
     state.dataRoot = dataRoot;
@@ -4155,19 +4633,35 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             state.showAddObject = true;
             state.addMatchesStale = true;
         }
-        // Gizmo mode on the number row (1/2/3): the old W/E/R scheme in the
-        // header docs collided with the WASD fly keys, and neither existed as
-        // actual code until now.
+        // Gizmo mode. 'W'/'E'/'R' are the industry standard; 'Q' hides the
+        // handles for pure select-and-inspect. They only apply when the RMB
+        // flycam is idle, because W/A/S/D/E/Q are also the fly keys -- that
+        // collision is exactly why this used to live on the number row, and the
+        // flycam check is what lets both schemes coexist. 1/2/3 stay as aliases.
         if (!typing && !ctrlDown && state.viewportReady) {
-            if ((GetAsyncKeyState('1') & 1) != 0) {
+            const bool flying = state.viewport.flycamActive();
+            // With free-fly on, W/E/R are camera keys, so only the number row
+            // switches modes (the panel says so).
+            const bool letterKeys = !flying && !state.settings.freeFlyWithoutRmb;
+            if ((GetAsyncKeyState('1') & 1) != 0 || (letterKeys && (GetAsyncKeyState('W') & 1) != 0)) {
                 state.viewport.setGizmoMode(render::GizmoMode::Translate);
             }
-            if ((GetAsyncKeyState('2') & 1) != 0) {
+            if ((GetAsyncKeyState('2') & 1) != 0 || (letterKeys && (GetAsyncKeyState('E') & 1) != 0)) {
                 state.viewport.setGizmoMode(render::GizmoMode::Rotate);
             }
-            if ((GetAsyncKeyState('3') & 1) != 0) {
+            if ((GetAsyncKeyState('3') & 1) != 0 || (letterKeys && (GetAsyncKeyState('R') & 1) != 0)) {
                 state.viewport.setGizmoMode(render::GizmoMode::Scale);
             }
+            if (!flying && (GetAsyncKeyState('Q') & 1) != 0) {
+                state.showGizmo = !state.showGizmo;
+                state.viewport.setGizmoEnabled(state.showGizmo);
+                setStatus(state, state.showGizmo ? "Transform handles shown."
+                                                 : "Transform handles hidden (Q to show).");
+            }
+        }
+        // 'End' drops the selection onto the surface below it.
+        if (!typing && !ctrlDown && (GetAsyncKeyState(VK_END) & 1) != 0) {
+            dropSelectionToSurface(state);
         }
         } // appForeground
 

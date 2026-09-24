@@ -87,6 +87,16 @@ struct TransformSnap {
 [[nodiscard]] math::Vec3f snapRotate(math::Vec3f degrees, float step) noexcept;
 [[nodiscard]] math::Vec3f snapScale(math::Vec3f factors, float step) noexcept;
 
+// Arrow-key nudging. One press moves the selection by `step` along one world
+// axis; `step <= 0` falls back to 1 so a disabled channel never freezes a key.
+// The mapping is the one every 2D-ish placement list implies:
+//   Left/Right  -> -X / +X        Up/Down     -> -Z / +Z
+//   PageUp/Down -> +Y / -Y
+enum class NudgeKey : std::uint8_t { Left, Right, Up, Down, PageUp, PageDown };
+[[nodiscard]] math::Vec3f nudgeDelta(NudgeKey key, float step) noexcept;
+// Which world axis a nudge touches: 0 = X, 1 = Y, 2 = Z.
+[[nodiscard]] int nudgeAxis(NudgeKey key) noexcept;
+
 enum class GizmoPhase : std::uint8_t { Begin, Update, End };
 
 // One message from the viewport to the editor as a gizmo drag unfolds.

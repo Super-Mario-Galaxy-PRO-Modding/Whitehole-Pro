@@ -143,6 +143,54 @@ void ViewportCamera::fly(float rightAmount, float upAmount, float forwardAmount)
     target.z += sideways.z * rightAmount + upwards.z * upAmount + forwards.z * forwardAmount;
 }
 
+void ViewportCamera::dollyTowardCursor(float wheelDelta, float screenX, float screenY, float width,
+                                      float height) noexcept {
+    const float notches = std::clamp(wheelDelta, -4.0F, 4.0F);
+    if (notches == 0.0F) {
+        return;
+    }
+    const float before = distance;
+    dolly(notches);
+    if (width <= 0.0F || height <= 0.0F) {
+        return;
+    }
+    const float factor = distance / before; // < 1 when zooming in
+    // Where the cursor ray crosses the plane through the current target: that is
+    // the point the author is aiming at, at the depth they are already framing.
+    const Ray ray = screenToRay(screenX, screenY, width, height);
+    const math::Vec3f facing = forward();
+    const math::Vec3f eyePosition = eye();
+    const math::Vec3f toTarget{target.x - eyePosition.x, target.y - eyePosition.y,
+                               target.z - eyePosition.z};
+    const float denominator = math::Vec3f::dot(ray.direction, facing);
+    if (std::abs(denominator) < 0.000001F) {
+        return; // ray parallel to the view plane: plain dolly is the right answer
+    }
+    const float along = math::Vec3f::dot(toTarget, facing) / denominator;
+    if (!(along > 0.0F)) {
+        return;
+    }
+    const math::Vec3f hit{ray.origin.x + ray.direction.x * along,
+                          ray.origin.y + ray.direction.y * along,
+                          ray.origin.z + ray.direction.z * along};
+    // Pull the pivot by the same proportion the camera moved, clamped so a fast
+    // zoom-out widens the view instead of flinging the target off-screen.
+    const float pull = std::clamp(1.0F - factor, -0.35F, 0.35F);
+    target = {target.x + (hit.x - target.x) * pull, target.y + (hit.y - target.y) * pull,
+              target.z + (hit.z - target.z) * pull};
+}
+
+CameraPose ViewportCamera::pose() const noexcept {
+    return CameraPose{target, distance, yawRadians, pitchRadians};
+}
+
+void ViewportCamera::setPose(const CameraPose& pose) noexcept {
+    target = pose.target;
+    distance = std::clamp(pose.distance, kMinDistance, kMaxDistance);
+    yawRadians = pose.yawRadians;
+    pitchRadians = std::clamp(pose.pitchRadians, -kMaxPitch, kMaxPitch);
+}
+
 float ViewportCamera::nearPlane() const noexcept {
     // 1% of the orbit distance, clamped into a sane band: close zooms keep a
     // 1-unit near so nothing clips through the camera, far zooms lift it so the

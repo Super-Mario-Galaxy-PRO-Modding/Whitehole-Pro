@@ -21,6 +21,7 @@
 #include "whitehole/util/text.hpp"
 #include "whitehole/math/geometry.hpp"
 #include "whitehole/render/camera.hpp"
+#include "whitehole/render/collision_kcl.hpp"
 #include "whitehole/render/gizmo.hpp"
 #include "whitehole/render/model_mesh.hpp"
 #include "whitehole/render/object_visual.hpp"
@@ -3280,6 +3281,121 @@ void testOverlayScene() {
     expect((railPathColor(7) & 0xFFu) == 0xFFu, "rail colour must be opaque");
 }
 
+// Builds a minimal but structurally exact big-endian KCL -- header, one
+// position, four normals, the dummy prism slot the engine skips, one real
+// prism -- and checks the parser rebuilds the intended floor triangle, that
+// raycastDown lands on it, and that owner tagging and truncation behave.
+void testKclParsing() {
+    using whitehole::io::BinaryWriter;
+    using whitehole::io::Endian;
+    using whitehole::render::SnapTriangle;
+    namespace render = whitehole::render;
+
+    const auto near = [](float a, float b) { return std::abs(a - b) < 1e-4F; };
+
+    // Wedge data for a unit floor at y = 100: face normal +Y (outward),
+    // edge0 +X, edge1 +Z, edge2 the diagonal plane. height is chosen so the
+    // edge-plane reconstruction lands exactly on (1,0,0) and (0,0,1) steps.
+    constexpr float kDiagonal = 0.70710678F;
+
+    BinaryWriter writer(Endian::big);
+    constexpr std::uint32_t kPositionOffset = 0x38;
+    constexpr std::uint32_t kNormalOffset = kPositionOffset + 12;    // 1 position
+    constexpr std::uint32_t kPrismOffset = kNormalOffset + 4 * 12;   // 4 normals
+    constexpr std::uint32_t kPrismStart = kPrismOffset + 0x10;       // dummy slot
+    constexpr std::uint32_t kOctreeOffset = kPrismStart + 0x10;      // 1 prism
+    writer.writeU32(kPositionOffset);
+    writer.writeU32(kNormalOffset);
+    writer.writeU32(kPrismOffset);
+    writer.writeU32(kOctreeOffset);
+    writer.writeSpanRepeated(0x28, 0); // thickness + octree origin/masks/shifts
+
+    // Position 0: the prism's base vertex.
+    writer.writeF32(0.0F);
+    writer.writeF32(100.0F);
+    writer.writeF32(0.0F);
+
+    // Normals: 0 = face (+Y), 1 = edge0 (+X), 2 = edge1 (+Z), 3 = edge2.
+    writer.writeF32(0.0F);
+    writer.writeF32(1.0F);
+    writer.writeF32(0.0F);
+    writer.writeF32(1.0F);
+    writer.writeF32(0.0F);
+    writer.writeF32(0.0F);
+    writer.writeF32(0.0F);
+    writer.writeF32(0.0F);
+    writer.writeF32(1.0F);
+    writer.writeF32(kDiagonal);
+    writer.writeF32(0.0F);
+    writer.writeF32(kDiagonal);
+
+    writer.writeSpanRepeated(0x10, 0); // dummy prism slot (engine reads [1+index])
+
+    // The real prism: height, position, face, edge0, edge1, edge2, attribute.
+    writer.writeF32(kDiagonal);
+    writer.writeU16(0);
+    writer.writeU16(0);
+    writer.writeU16(1);
+    writer.writeU16(2);
+    writer.writeU16(3);
+    writer.writeU16(0);
+
+    const std::vector<std::uint8_t> bytes = std::move(writer).take();
+    const auto triangles = render::parseKclTriangles(bytes);
+    expect(triangles.size() == 1, "KCL parse produced the wrong triangle count");
+    const SnapTriangle& triangle = triangles.front();
+    expect(near(triangle.a.x, 0.0F) && near(triangle.a.y, 100.0F) && near(triangle.a.z, 0.0F),
+           "KCL base vertex was rebuilt at the wrong place");
+    expect(near(triangle.b.x, 1.0F) && near(triangle.b.y, 100.0F) && near(triangle.b.z, 0.0F),
+           "KCL vertex 1 did not follow the edge-plane reconstruction");
+    expect(near(triangle.c.x, 0.0F) && near(triangle.c.y, 100.0F) && near(triangle.c.z, 1.0F),
+           "KCL vertex 2 did not follow the edge-plane reconstruction");
+    expect(near(triangle.normal.x, 0.0F) && near(triangle.normal.y, 1.0F) &&
+               near(triangle.normal.z, 0.0F),
+           "KCL face normal should be the outward +Y surface normal");
+    expect(triangle.sourceIndex == render::kCollisionNoOwner,
+           "Parsed KCL triangles must start unowned");
+
+    // A downward ray above the triangle snaps to y = 100 and reports KCL.
+    render::SnapScene scene;
+    scene.kcl = triangles;
+    const auto hit = render::raycastDown(scene, {0.5F, 150.0F, 0.25F}, 1000.0F,
+                                         render::kCollisionNoOwner);
+    expect(hit.has_value() && hit->fromKcl, "raycastDown missed the parsed KCL triangle");
+    expect(near(hit->point.y, 100.0F), "KCL raycast hit at the wrong height");
+    expect(near(hit->normal.y, 1.0F), "KCL raycast returned the wrong surface normal");
+
+    // Owner-tagged collision is skipped for its own object but stays live
+    // for every other ignore index (and for the zone-level sentinel).
+    scene.kcl.front().sourceIndex = 7;
+    const auto skipped = render::raycastDown(scene, {0.5F, 150.0F, 0.25F}, 1000.0F, 7);
+    expect(!skipped.has_value(), "an object must not snap onto its own collision");
+    const auto kept = render::raycastDown(scene, {0.5F, 150.0F, 0.25F}, 1000.0F, 8);
+    expect(kept.has_value() && kept->fromKcl,
+           "another object's collision must stay hittable");
+    const auto zoneLevel = [&] {
+        scene.kcl.front().sourceIndex = render::kCollisionNoOwner;
+        return render::raycastDown(scene, {0.5F, 150.0F, 0.25F}, 1000.0F,
+                                   render::kCollisionNoOwner);
+    }();
+    expect(zoneLevel.has_value(), "zone-level collision must never be self-ignored");
+
+    // Malformed input is rejected loudly, not read out of bounds.
+    bool threw = false;
+    try {
+        (void)render::parseKclTriangles(std::vector<std::uint8_t>{0x00, 0x01, 0x02});
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    expect(threw, "a truncated KCL should be rejected instead of parsed");
+
+    // Path filter used by the archive scanners.
+    expect(render::isKclPath("/Stage/Collision.kcl"), "isKclPath missed an uppercase extension");
+    expect(render::isKclPath("foo.KCL"), "isKclPath missed a lowercase-insensitive extension");
+    expect(!render::isKclPath("foo.kcl.bak"), "isKclPath matched a non-KCL suffix");
+    expect(!render::isKclPath("kcl"), "isKclPath matched a bare extensionless name");
+}
+
 int main() {
     try {
         testBinaryData();
@@ -3322,6 +3438,7 @@ int main() {
         testRailMath();
         testPathData();
         testOverlayScene();
+        testKclParsing();
         std::cout << "All Whitehole native core tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -429,6 +429,9 @@ unsigned int ModelTextureCache::textureFor(const std::shared_ptr<const ModelMesh
     if (!mesh || textureIndex >= mesh->textures.size()) {
         return 0;
     }
+    if (!mesh->renderState || !mesh->renderState->isReadyToRender.load(std::memory_order_acquire)) {
+        return 0;
+    }
     const smg::Bti* source = &mesh->textures[textureIndex];
 
     // Reuse an existing upload for this mesh, dropping dead entries first.
@@ -550,6 +553,31 @@ unsigned int ModelTextureCache::textureFor(const std::shared_ptr<const ModelMesh
     return name;
 }
 
+unsigned int ModelTextureCache::missingTexture() {
+    if (missingTexture_ != 0) {
+        return missingTexture_;
+    }
+    constexpr unsigned char pixels[] = {
+        255, 64, 64, 255,  64, 64, 255, 255,  64, 64, 255, 255, 255, 64, 64, 255,
+        64, 255, 64, 255,  64, 64, 255, 255,  64, 64, 255, 255, 255, 64, 64, 255,
+    };
+    GLint oldAlignment = 4;
+    GLint oldBinding = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldAlignment);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldBinding);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glGenTextures(1, &missingTexture_);
+    glBindTexture(GL_TEXTURE_2D, missingTexture_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, oldAlignment);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(oldBinding));
+    return missingTexture_;
+}
+
 void ModelTextureCache::clear() noexcept {
     for (auto& entry : entries_) {
         for (const auto name : entry.names) {
@@ -559,6 +587,10 @@ void ModelTextureCache::clear() noexcept {
         }
     }
     entries_.clear();
+    if (missingTexture_ != 0) {
+        glDeleteTextures(1, &missingTexture_);
+        missingTexture_ = 0;
+    }
 }
 
 void ViewportWindow::drawModelTriangles(const ModelMesh& mesh, bool bakeColors, const char* filter,
@@ -627,7 +659,11 @@ void ViewportWindow::drawTexturedModel(const std::shared_ptr<const ModelMesh>& m
                 name = textureCache_.textureFor(mesh, static_cast<std::size_t>(slot), filter);
             }
         }
+        if (name == 0 && material != nullptr) {
+            name = textureCache_.missingTexture();
+        }
         if (name != boundName) {
+            glActiveTexture(GL_TEXTURE0);
             if (boundName != 0) {
                 glBindTexture(GL_TEXTURE_2D, 0);
             }
@@ -1472,6 +1508,11 @@ void ViewportWindow::drawFrame(bool pollInputFrame) {
         glEnable(GL_LIGHTING);
         glEnable(GL_LIGHT0);
         glEnable(GL_COLOR_MATERIAL);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
         const float ambient[]{0.42F, 0.43F, 0.48F, 1.0F};
         const float diffuse[]{0.72F, 0.71F, 0.68F, 1.0F};
@@ -1592,6 +1633,10 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     const float safeHeight = static_cast<float>(height > 0 ? height : 1);
     const float aspect = static_cast<float>(width) / safeHeight;
     glViewport(0, 0, width, height);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GEQUAL);
+    glDepthMask(GL_TRUE);
+    glClearDepth(0.0F);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     const float half = ViewportCamera::kFieldOfView * 0.5F;
@@ -1628,7 +1673,9 @@ void ViewportWindow::drawShape(const ViewportBox& box, bool selected, bool hover
     // ones use the cached display lists and draw once, in the opaque loop.
     // Smooth vertex normals + material diffuse colors make the model read like
     // the game's own render.
-    if (box.model != nullptr && !box.model->empty()) {
+    if (box.model != nullptr && !box.model->empty() &&
+        box.model->renderState &&
+        box.model->renderState->isReadyToRender.load(std::memory_order_acquire)) {
         const bool textured = textured_ && !box.model->materials.empty() && !box.model->textures.empty();
         if (!textured && pass != ModelPass::Opaque) {
             return;

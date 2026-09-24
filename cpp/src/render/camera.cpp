@@ -192,9 +192,9 @@ void ViewportCamera::setPose(const CameraPose& pose) noexcept {
 }
 
 float ViewportCamera::nearPlane() const noexcept {
-    // 1% of the orbit distance, clamped into a sane band: close zooms keep a
-    // 1-unit near so nothing clips through the camera, far zooms lift it so the
-    // near/far ratio (and therefore depth precision) stays bounded.
+    // 1% of the orbit distance, clamped into a safe band. The hard floor is
+    // 10 units: large galaxy bounds otherwise make the projection denominator
+    // too small for the precision required by the depth buffer.
     return std::clamp(distance * 0.01F, kNearPlane, kMaxDynamicNear);
 }
 

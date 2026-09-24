@@ -11,8 +11,10 @@
 #include "whitehole/smg/bmd.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace whitehole::render {
@@ -35,7 +37,15 @@ struct ModelTriangle {
     bool translucent{false};
 };
 
+struct ModelRenderState {
+    // Published only after the complete CPU-side mesh/material/texture payload
+    // is available. GPU uploads remain render-thread work and use the fallback
+    // texture until their upload completes.
+    std::atomic_bool isReadyToRender{false};
+};
+
 struct ModelMesh {
+    std::shared_ptr<ModelRenderState> renderState{std::make_shared<ModelRenderState>()};
     std::vector<ModelTriangle> triangles;
     math::Vec3f boundsMin{};
     math::Vec3f boundsMax{};

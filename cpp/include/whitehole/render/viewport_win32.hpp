@@ -68,12 +68,17 @@ public:
     // Forgets every uploaded texture (context loss, settings change).
     void clear() noexcept;
 
+    // Deterministic diagnostic texture used whenever a material has no valid
+    // texture name. Created lazily only while the WGL context is current.
+    [[nodiscard]] unsigned int missingTexture();
+
 private:
     struct Entry {
         std::weak_ptr<const ModelMesh> mesh;
         std::vector<unsigned int> names; // parallel to mesh.textures, 0 = not uploaded
     };
     std::vector<Entry> entries_;
+    unsigned int missingTexture_{0};
 };
 
 class ViewportWindow {

@@ -233,6 +233,10 @@ ModelMesh buildModelMesh(const smg::BmdModel& model) {
     if (!mesh.triangles.empty()) {
         recomputeMeshBounds(mesh);
     }
+    // The mesh is only publishable after all CPU-side geometry and material
+    // tables have been assembled. This is also the synchronization point for
+    // future async galaxy loaders.
+    mesh.renderState->isReadyToRender.store(true, std::memory_order_release);
     return mesh;
 }
 

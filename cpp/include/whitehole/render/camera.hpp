@@ -31,7 +31,7 @@ public:
     // 1..60000 frustum quantised depth to ~20 world units at galaxy range,
     // which z-fought rails and overlays while zoomed out; the clip planes now
     // track the camera distance (see nearPlane()/farPlane()).
-    static constexpr float kNearPlane = 1.0F;
+    static constexpr float kNearPlane = 10.0F;
     static constexpr float kFarPlane = 60000.0F; // legacy fallback, rarely reached
 
     // Zoom/framing bounds. 150000 (was 20000) spans the largest SMG galaxies

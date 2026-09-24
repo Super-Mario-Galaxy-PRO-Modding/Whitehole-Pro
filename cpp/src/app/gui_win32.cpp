@@ -181,6 +181,14 @@ struct EditorState {
     int selectedGalaxy{-1};
     int selectedZone{-1};
     std::optional<std::size_t> selectedObject;
+    // Full multi-selection (first entry == selectedObject). Shift-click and the
+    // Shift-drag marquee extend it; the gizmo anchors on the whole group and a
+    // drag commits as one undo step.
+    std::vector<std::size_t> selection;
+    // Transform snapping for gizmo drags + nudge keys. Shift held = fine
+    // (snap off); the Viewport panel checkbox toggles the master switch.
+    bool snapEnabled{true};
+    render::TransformSnap snapSteps{};
     char searchBuf[160]{};   // object list filter
     char nameBuf[160]{};     // selected object name (committed on Enter)
     float transform[9]{};    // pos.xyz, rot.xyz, scale.xyz (display values)
@@ -188,6 +196,9 @@ struct EditorState {
     // may differ from it, which is how the panel knows it has local edits; when
     // a drag commits, the before/after pair becomes one TransformCommand.
     smg::PlacementObject dragStart{};
+    // Baselines for the whole dragged group (parallel to dragSelection).
+    std::vector<smg::PlacementObject> dragGroupStart;
+    std::vector<std::size_t> dragSelection;
     bool draggingTransform{false};
     char fieldFilter[96]{};    // field-grid filter box (Properties panel)
     bool draggingField{false}; // an ObjectModel setter is mid-float-drag,
@@ -624,13 +635,30 @@ void refreshViewport(EditorState& state, bool frame) {
     state.viewport.setScene(state.viewportScene);
     if (!state.stage || state.stage->objects().empty()) {
         state.viewportSelected.reset();
+        state.selection.clear();
         state.viewport.setSelected(std::nullopt);
         return;
     }
     if (state.viewportSelected.has_value() && *state.viewportSelected >= state.stage->objects().size()) {
         state.viewportSelected.reset();
     }
-    state.viewport.setSelected(state.viewportSelected);
+    // Prune the multi-selection against the new row count, then re-push it so
+    // a live gizmo drag survives the scene rebuild its own Update triggers.
+    state.selection.erase(std::remove_if(state.selection.begin(), state.selection.end(),
+                                         [&](std::size_t index) {
+                                             return index >= state.stage->objects().size();
+                                         }),
+                          state.selection.end());
+    if (state.selection.empty()) {
+        state.selectedObject.reset();
+        state.viewportSelected.reset();
+        state.viewport.setSelected(std::nullopt);
+    } else {
+        state.selectedObject = state.selection.front();
+        state.viewportSelected = state.selection.front();
+        state.viewport.setSelected(state.selection.front());
+        state.viewport.setSelection(state.selection);
+    }
     state.viewport.setShowLabels(state.showLabels);
     state.viewport.setTexturedModels(state.settings.texturedModels);
     state.viewport.setTranslucentModels(state.settings.translucentModels);
@@ -663,10 +691,107 @@ void syncTransformBuffers(EditorState& state) {
     state.transform[7] = object.scale.y;
     state.transform[8] = object.scale.z;
     state.dragStart = object;
+    state.dragGroupStart.clear();
+    state.dragSelection.clear();
     state.draggingTransform = false;
 }
 
 bool markDirty(EditorState& state);
+void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit);
+
+// Applies one gizmo message to the whole selection. Begin snapshots every
+// member, Update paints live (snapped unless Shift is held), End commits one
+// TransformCommand. Rail drags keep their own path and ignore these.
+void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit) {
+    if (!state.stage || state.selection.empty()) {
+        return;
+    }
+    // Drop stale indices once per message; the viewport may hold a selection
+    // captured before a delete/undo re-numbered the rows.
+    std::vector<std::size_t> live;
+    live.reserve(state.selection.size());
+    for (const auto index : state.selection) {
+        if (index < state.stage->objects().size()) {
+            live.push_back(index);
+        }
+    }
+    if (live.empty()) {
+        state.selection.clear();
+        state.selectedObject.reset();
+        state.viewportSelected.reset();
+        return;
+    }
+    state.selection = live;
+    if (edit.phase == render::GizmoPhase::Begin) {
+        state.dragGroupStart.clear();
+        state.dragGroupStart.reserve(live.size());
+        for (const auto index : live) {
+            state.dragGroupStart.push_back(state.stage->objects()[index]);
+        }
+        state.dragSelection = live;
+        state.draggingTransform = true;
+        return;
+    }
+    if (state.dragGroupStart.size() != live.size() || !state.draggingTransform) {
+        // Missed Begin (e.g. callback wired mid-gesture): rebuild baselines.
+        state.dragGroupStart.clear();
+        for (const auto index : live) {
+            state.dragGroupStart.push_back(state.stage->objects()[index]);
+        }
+        state.dragSelection = live;
+        state.draggingTransform = true;
+    }
+    // Shift = fine drag (snap off), matching every 3D editor. The viewport
+    // reports cumulative values from Begin, so snap the value itself — never
+    // the per-frame delta, which would quantise into stairs.
+    const bool fine = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool snap = state.snapEnabled && !fine;
+    math::Vec3f value = edit.value;
+    const char* label = "Move objects";
+    if (edit.mode == render::GizmoMode::Translate) {
+        value = snap ? render::snapTranslate(value, state.snapSteps.translate) : value;
+    } else if (edit.mode == render::GizmoMode::Rotate) {
+        value = snap ? render::snapRotate(value, state.snapSteps.rotate) : value;
+        label = "Rotate objects";
+    } else {
+        value = snap ? render::snapScale(value, state.snapSteps.scale) : value;
+        label = "Scale objects";
+    }
+    for (std::size_t slot = 0; slot < live.size(); ++slot) {
+        auto& object = state.stage->objects()[live[slot]];
+        const auto& start = state.dragGroupStart[slot];
+        if (edit.mode == render::GizmoMode::Translate) {
+            object.position = {start.position.x + value.x, start.position.y + value.y,
+                               start.position.z + value.z};
+        } else if (edit.mode == render::GizmoMode::Rotate) {
+            object.rotation = {start.rotation.x + value.x, start.rotation.y + value.y,
+                               start.rotation.z + value.z};
+        } else {
+            object.scale = {std::max(start.scale.x * value.x, 0.001F),
+                            std::max(start.scale.y * value.y, 0.001F),
+                            std::max(start.scale.z * value.z, 0.001F)};
+        }
+        state.stage->writeObject(object);
+    }
+    state.stage->rebuildObjects();
+    refreshObjects(state);
+    if (state.selectedObject && *state.selectedObject < state.stage->objects().size()) {
+        const auto& object = state.stage->objects()[*state.selectedObject];
+        state.transform[0] = object.position.x;
+        state.transform[1] = object.position.y;
+        state.transform[2] = object.position.z;
+        state.transform[3] = object.rotation.x;
+        state.transform[4] = object.rotation.y;
+        state.transform[5] = object.rotation.z;
+        state.transform[6] = object.scale.x;
+        state.transform[7] = object.scale.y;
+        state.transform[8] = object.scale.z;
+    }
+    refreshViewport(state, false);
+    if (edit.phase == render::GizmoPhase::End) {
+        commitDragAsUndo(state, label);
+    }
+}
 
 // Pushes the property widgets into the selected object through the real write
 // path (BCSV row, not just the in-memory copy), then repaints the scene.
@@ -701,9 +826,62 @@ void applyTransform(EditorState& state) {
 
 // Finishes an in-flight drag as one undoable step. Drags paint live (so the 3D
 // model follows the cursor) but only the before/after snapshots land on the
-// undo stack, keeping Ctrl+Z behaviour exactly one gesture per step.
+// undo stack, keeping Ctrl+Z behaviour exactly one gesture per step. Group
+// drags snapshot every member, so a multi-selection moves as one entry.
 void commitDragAsUndo(EditorState& state, const char* label) {
-    if (!state.draggingTransform || !state.stage || !state.selectedObject ||
+    if (!state.draggingTransform || !state.stage) {
+        state.draggingTransform = false;
+        state.dragGroupStart.clear();
+        state.dragSelection.clear();
+        return;
+    }
+    if (!state.dragSelection.empty()) {
+        std::vector<smg::PlacementObject> before = std::move(state.dragGroupStart);
+        std::vector<smg::PlacementObject> after;
+        after.reserve(state.dragSelection.size());
+        bool anyLive = false;
+        for (const auto index : state.dragSelection) {
+            if (index < state.stage->objects().size()) {
+                after.push_back(state.stage->objects()[index]);
+                anyLive = true;
+            }
+        }
+        state.dragGroupStart.clear();
+        state.dragSelection.clear();
+        state.draggingTransform = false;
+        if (!anyLive || before.size() != after.size()) {
+            if (state.selectedObject && *state.selectedObject < state.stage->objects().size()) {
+                state.dragStart = state.stage->objects()[*state.selectedObject];
+            }
+            return;
+        }
+        // Identical snapshots (e.g. Esc-cancelled) record nothing.
+        bool changed = before.size() != after.size();
+        for (std::size_t i = 0; !changed && i < before.size(); ++i) {
+            const auto& a = before[i];
+            const auto& b = after[i];
+            changed = a.position.x != b.position.x || a.position.y != b.position.y ||
+                      a.position.z != b.position.z || a.rotation.x != b.rotation.x ||
+                      a.rotation.y != b.rotation.y || a.rotation.z != b.rotation.z ||
+                      a.scale.x != b.scale.x || a.scale.y != b.scale.y || a.scale.z != b.scale.z;
+        }
+        if (!changed) {
+            if (state.selectedObject && *state.selectedObject < state.stage->objects().size()) {
+                state.dragStart = state.stage->objects()[*state.selectedObject];
+            }
+            return;
+        }
+        auto command =
+            std::make_unique<edit::TransformCommand>(*state.stage, std::move(before), std::move(after), label);
+        state.undoStack.push(std::move(command));
+        if (state.selectedObject && *state.selectedObject < state.stage->objects().size()) {
+            state.dragStart = state.stage->objects()[*state.selectedObject];
+        }
+        markDirty(state);
+        refreshViewport(state, false);
+        return;
+    }
+    if (!state.selectedObject ||
         *state.selectedObject >= state.stage->objects().size()) {
         state.draggingTransform = false;
         return;
@@ -798,11 +976,16 @@ void performRedo(EditorState& state) {
 }
 
 void syncViewportSelection(EditorState& state, std::optional<std::size_t> selected) {
-
-// --- authoring ---
+    // --- authoring ---
     state.viewportSelected = selected;
+    if (selected.has_value()) {
+        state.selection = {*selected};
+    } else {
+        state.selection.clear();
+    }
     if (state.viewportReady) {
         state.viewport.setSelected(selected);
+        state.viewport.setSelection(state.selection);
     }
     // Always update the canonical selection: callers like the object list
     // wrap this function with syncingSelection=true, and the guard below
@@ -2349,6 +2532,78 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         return false;
     }
     state.viewportReady = true;
+    // Additive pick: Ctrl/Shift-click toggles one object into the set.
+    auto applyAdditivePick = [&state](std::optional<std::size_t> picked) {
+        if (!picked.has_value()) {
+            return;
+        }
+        auto found = std::find(state.selection.begin(), state.selection.end(), *picked);
+        if (found != state.selection.end()) {
+            state.selection.erase(found);
+        } else {
+            state.selection.push_back(*picked);
+        }
+        if (state.selection.empty()) {
+            state.selectedObject.reset();
+            state.viewportSelected.reset();
+            state.viewport.setSelected(std::nullopt);
+            state.viewport.setSelection({});
+        } else {
+            state.selectedObject = state.selection.front();
+            state.viewportSelected = state.selection.front();
+            state.viewport.setSelected(state.selection.front());
+            state.viewport.setSelection(state.selection);
+        }
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
+        syncTransformBuffers(state);
+        setStatus(state, std::to_string(state.selection.size()) + " objects selected");
+    };
+    state.viewport.setOnSelectMany([&state, applyAdditivePick](std::optional<std::size_t> picked, bool additive) {
+        if (state.syncingSelection) {
+            return;
+        }
+        if (additive) {
+            state.syncingSelection = true;
+            applyAdditivePick(picked);
+            state.syncingSelection = false;
+            return;
+        }
+    });
+    state.viewport.setOnSelectRect([&state](std::vector<std::size_t> hits, bool additive) {
+        if (state.syncingSelection) {
+            return;
+        }
+        state.syncingSelection = true;
+        if (!additive) {
+            state.selection = std::move(hits);
+        } else {
+            for (const auto hit : hits) {
+                if (std::find(state.selection.begin(), state.selection.end(), hit) ==
+                    state.selection.end()) {
+                    state.selection.push_back(hit);
+                }
+            }
+        }
+        if (state.selection.empty()) {
+            state.selectedObject.reset();
+            state.viewportSelected.reset();
+            state.viewport.setSelected(std::nullopt);
+        } else {
+            state.selectedObject = state.selection.front();
+            state.viewportSelected = state.selection.front();
+            state.viewport.setSelected(state.selection.front());
+        }
+        state.viewport.setSelection(state.selection);
+        state.selectedRail.reset();
+        state.viewport.setRailHighlight(std::nullopt);
+        syncTransformBuffers(state);
+        state.syncingSelection = false;
+        if (!state.selection.empty()) {
+            setStatus(state, std::to_string(state.selection.size()) + " objects selected");
+        }
+    });
+    state.viewport.setOnGizmo([&state](const render::GizmoEdit& edit) { handleGizmoEdit(state, edit); });
     // Picking happens inside the viewport's own message handling, so it must not
     // re-enter the selection helpers in the middle of their own work.
     state.viewport.setOnSelect([&state](std::optional<std::size_t> picked) {
@@ -2358,7 +2613,13 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         state.syncingSelection = true;
         state.selectedObject = picked;
         state.viewportSelected = picked;
+        if (picked.has_value()) {
+            state.selection = {*picked};
+        } else {
+            state.selection.clear();
+        }
         state.viewport.setSelected(picked);
+        state.viewport.setSelection(state.selection);
         // Rail picks arrive through their own callback, so anything reaching
         // here is object-world (or empty space): drop any rail selection too.
         state.selectedRail.reset();
@@ -2432,7 +2693,20 @@ void placeViewportChild(EditorState& state) {
         refreshViewport(state, false);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Left-drag pan  ·  Right-drag orbit  ·  Wheel zoom  ·  WASD fly  ·  Click select");
+    if (ImGui::Checkbox("Snap", &state.snapEnabled)) {
+        setStatus(state, state.snapEnabled ? "Snapping on (hold Shift for fine drags)"
+                                           : "Snapping off — drags are free");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Snap gizmo drags to the grid:\nmove 10u · rotate 15° · scale 0.1\nHold Shift while dragging for fine control.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Frame Sel")) {
+        state.viewport.frameSelection();
+    }
+    ImGui::SetItemTooltip("Frame the current selection  (F)");
+    ImGui::SameLine();
+    ImGui::TextDisabled("Click select · Shift-drag box · Ctrl/Shift-click add · 1/2/3 gizmo");
     // Self-diagnosing model state: placeholders are BY DESIGN without a game
     // workspace, but the old editor never said so -- authors just saw boxes and
     // assumed the renderer was broken. Same when a workspace loads zero models.
@@ -3795,7 +4069,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         static bool wasForeground = false;
         if (appForeground && !wasForeground) {
             constexpr int kDrainKeys[] = {'O', 'S', 'F', 'Z', 'Y', 'R', 'D', 'C', 'V',
-                                          'A', '1', '2', '3', VK_DELETE, VK_SPACE};
+                                          'A', '1', '2', '3', VK_DELETE, VK_ESCAPE, VK_SPACE};
             for (const int key : kDrainKeys) {
                 (void)(GetAsyncKeyState(key) & 1);
             }
@@ -3847,6 +4121,33 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         }
         if (!typing && (GetAsyncKeyState(VK_DELETE) & 1) && state.selectedObject) {
             deleteSelection(state);
+        }
+        if (!typing && (GetAsyncKeyState(VK_ESCAPE) & 1)) {
+            // Esc clears the selection — and cancels a gizmo drag first by
+            // rolling the live objects back to their Begin snapshots.
+            if (state.draggingTransform && !state.dragGroupStart.empty()) {
+                for (std::size_t slot = 0; slot < state.dragSelection.size() &&
+                                           slot < state.dragGroupStart.size();
+                     ++slot) {
+                    const auto index = state.dragSelection[slot];
+                    if (state.stage && index < state.stage->objects().size()) {
+                        state.stage->objects()[index] = state.dragGroupStart[slot];
+                        state.stage->writeObject(state.stage->objects()[index]);
+                    }
+                }
+                if (state.stage) {
+                    state.stage->rebuildObjects();
+                    refreshObjects(state);
+                    syncTransformBuffers(state);
+                    refreshViewport(state, false);
+                }
+                state.dragGroupStart.clear();
+                state.dragSelection.clear();
+                state.draggingTransform = false;
+            } else if (state.selectedObject || !state.selection.empty()) {
+                selectObject(state, std::nullopt);
+                refreshViewport(state, false);
+            }
         }
         if (!typing && !ctrlDown && (GetAsyncKeyState('A') & 1) &&
             (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) {

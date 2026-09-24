@@ -42,6 +42,11 @@ namespace {
 constexpr wchar_t kClassName[] = L"WhiteholeProViewport";
 bool classRegistered = false;
 
+// Forward declarations for the file-local gizmo helpers defined near drawGizmo.
+void drawGizmoCube(const math::Vec3f& centre, float half);
+void drawGizmoCone(const math::Vec3f& base, const math::Vec3f& direction, float radius, float length);
+void drawGizmoRing(const math::Vec3f& centre, const math::Vec3f& axis, float radius);
+
 // Number of shapes matches CategoryStyle::Shape; meshes are filled lazily on
 // first paint while the GL context is current.
 constexpr int kShapeCount = 5;
@@ -356,24 +361,15 @@ namespace {
 #define GL_MIRRORED_REPEAT 0x8370
 #endif
 
-// GX wrap mode (from Bti::wrapS/wrapT) to GL. 0 = clamp, 1 = repeat,
-// 2 = mirror; anything else clamps, matching Java's conservative mapping.
-int glWrapFor(std::uint8_t wrap) noexcept {
-    switch (wrap) {
-        case 1: return GL_REPEAT;
-        case 2: return GL_MIRRORED_REPEAT;
-        default: return GL_CLAMP;
-    }
-}
+// GX wrap/filter mapping lives in smg::btiSamplerInfo (Java ImageUtils
+// parity, unit-tested in core_tests); the uploader below uses it directly.
 
-// Material's first used texture map, or -1 when the material is untextured.
+// Material's primary TEV texture (Java Bmd parity: first live stage whose
+// texmap resolves to a real TEX1 entry), or -1 when the material is
+// untextured. Replaces the old "first used map" heuristic that bound the
+// wrong layer on multi-texture materials.
 int materialTextureSlot(const smg::BmdMaterial& material) noexcept {
-    for (const auto slot : material.textureIndices) {
-        if (slot >= 0) {
-            return slot;
-        }
-    }
-    return -1;
+    return material.primaryTextureSlot();
 }
 
 // GX -> GL state tables, transcribed from BmdRenderer.render() so the C++
@@ -489,14 +485,48 @@ unsigned int ModelTextureCache::textureFor(const std::shared_ptr<const ModelMesh
 
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glBindTexture(GL_TEXTURE_2D, name);
-    const GLint minFilter = (filter != nullptr && std::string_view(filter) == "nearest") ? GL_NEAREST
-                                                                                          : GL_LINEAR;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, minFilter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, glWrapFor(source->wrapS));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, glWrapFor(source->wrapT));
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(image.width),
-                 static_cast<GLsizei>(image.height), 0, GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data());
+    // BTI header wins: `filter` ("nearest") only forces nearest below; the
+    // base-level sanity check above stays the upload gate.
+    const smg::BtiSamplerInfo sampler = smg::btiSamplerInfo(*source);
+    GLint samplerMin = sampler.glMinFilter;
+    GLint magFilter = sampler.glMagFilter;
+    if (filter != nullptr && std::string_view(filter) == "nearest") {
+        samplerMin = GL_NEAREST;
+        magFilter = GL_NEAREST;
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, samplerMin);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, sampler.glWrapS);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, sampler.glWrapT);
+    glTexParameterf(GL_TEXTURE_2D, 0x813A /* GL_TEXTURE_MIN_LOD */, source->minLod);
+    glTexParameterf(GL_TEXTURE_2D, 0x813B /* GL_TEXTURE_MAX_LOD */, source->maxLod);
+    glTexParameterf(GL_TEXTURE_2D, 0x8501 /* GL_TEXTURE_LOD_BIAS */, source->lodBias);
+    {
+        // Java ImageUtils.getAnisotropy: 1 -> 2x, 2 -> 4x, else 1x. Guarded by
+        // the driver's max so a bare GL 1.1 context never errors.
+        const GLfloat wantAniso =
+            source->maxAnisotropy == 1 ? 2.0F : (source->maxAnisotropy == 2 ? 4.0F : 1.0F);
+        if (wantAniso > 1.0F) {
+            GLfloat driverMax = 1.0F;
+            glGetFloatv(0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */, &driverMax);
+            if (driverMax >= 2.0F) {
+                glTexParameterf(GL_TEXTURE_2D, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */,
+                                wantAniso < driverMax ? wantAniso : driverMax);
+            }
+        }
+    }
+    // Java BmdRenderer parity: every decoded mip uploads to its own level
+    // (mipmapCount levels, 0..N-1) instead of base-only.
+    glTexParameteri(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */,
+                    static_cast<GLint>(source->mipmaps.size() > 0 ? source->mipmaps.size() - 1 : 0));
+    for (std::size_t level = 0; level < source->mipmaps.size(); ++level) {
+        const auto& mip = source->mipmaps[level];
+        if (mip.width == 0 || mip.height == 0 || mip.rgba.empty()) { continue; }
+        if (mip.rgba.size() != static_cast<std::size_t>(mip.width) * mip.height * 4U) { continue; }
+        glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA8,
+                     static_cast<GLsizei>(mip.width), static_cast<GLsizei>(mip.height), 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, mip.rgba.data());
+    }
 
     glPixelStorei(GL_UNPACK_ALIGNMENT, previousAlignment);
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousBinding));
@@ -843,8 +873,11 @@ void ViewportWindow::setScene(ViewportScene scene) {
     if (hover_.has_value() && *hover_ >= scene_.boxes().size()) {
         hover_.reset();
     }
-    // A rebuild re-indexes every box, so the multi-selection cannot survive it.
-    selection_.clear();
+    // A rebuild re-indexes boxes by objectIndex (not position), so prune stale
+    // members instead of dropping the whole multi-selection.
+    selection_.erase(std::remove_if(selection_.begin(), selection_.end(),
+                                    [&](std::size_t index) { return index >= scene_.boxes().size(); }),
+                     selection_.end());
     invalidate();
 }
 
@@ -1008,6 +1041,17 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         leftMoved_ = false;
         lastX_ = GET_X_LPARAM(lParam);
         lastY_ = GET_Y_LPARAM(lParam);
+        // Shift+left-drag is the marquee: rubber-band box select instead of a
+        // camera pan, so dense galaxies can be swept in one gesture.
+        marqueeActive_ = false;
+        if ((wParam & MK_SHIFT) != 0) {
+            marqueeActive_ = true;
+            marqueeX0_ = marqueeX1_ = lastX_;
+            marqueeY0_ = marqueeY1_ = lastY_;
+            marqueeAdditive_ = (wParam & (MK_SHIFT | MK_CONTROL)) != 0;
+            invalidate();
+            return 0;
+        }
         // The gizmo claims the gesture when the click lands on one of its
         // handles; a miss falls through to the plain camera pan.
         draggingGizmo_ = false;
@@ -1053,6 +1097,26 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         if (draggingLeft_) {
             ReleaseCapture();
             draggingLeft_ = false;
+            // A marquee drag selects everything in the rubber band.
+            if (marqueeActive_) {
+                marqueeActive_ = false;
+                const int dx = std::abs(marqueeX1_ - marqueeX0_);
+                const int dy = std::abs(marqueeY1_ - marqueeY0_);
+                if (dx < 4 && dy < 4) {
+                    // Treated as a plain click: fall through to the click-pick
+                    // path below with the release point.
+                    leftMoved_ = false;
+                    lastX_ = GET_X_LPARAM(lParam);
+                    lastY_ = GET_Y_LPARAM(lParam);
+                } else {
+                    auto hits = pickRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_);
+                    if (onSelectRect_) {
+                        onSelectRect_(std::move(hits), marqueeAdditive_);
+                    }
+                    invalidate();
+                    return 0;
+                }
+            }
             // A click (no drag) picks: rail point cubes claim the click first
             // (they are small, deliberate targets), otherwise the plain object
             // flow runs -- plain click replaces the selection, Ctrl/Shift-click
@@ -1145,11 +1209,18 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
             }
             invalidate();
         } else if (draggingLeft_ && (wParam & MK_LBUTTON) != 0) {
-            if (dx != 0 || dy != 0) {
+            if (marqueeActive_) {
+                marqueeX1_ = x;
+                marqueeY1_ = y;
                 leftMoved_ = true;
+                invalidate();
+            } else {
+                if (dx != 0 || dy != 0) {
+                    leftMoved_ = true;
+                }
+                camera_.pan(static_cast<float>(dx), static_cast<float>(dy));
+                invalidate();
             }
-            camera_.pan(static_cast<float>(dx), static_cast<float>(dy));
-            invalidate();
         } else if (draggingRight_ && (wParam & MK_RBUTTON) != 0) {
             const float invert = orbitInverted_ ? -1.0F : 1.0F;
             camera_.orbit(static_cast<float>(dx) * 0.008F * invert,
@@ -1360,6 +1431,9 @@ void ViewportWindow::drawFrame() {
         }
         // Legend + name labels INSIDE the frame: one swap = one atomic image.
         drawLabels();
+        if (marqueeActive_) {
+            drawMarquee();
+        }
         SwapBuffers(device_);
         wglMakeCurrent(nullptr, nullptr);
     }
@@ -1853,7 +1927,19 @@ std::optional<std::size_t> ViewportWindow::pickAt(int x, int y) {
     GetClientRect(window_, &rect);
     const float width = static_cast<float>(rect.right - rect.left);
     const float height = static_cast<float>(rect.bottom - rect.top);
-    return scene_.pick(camera_, static_cast<float>(x), static_cast<float>(y), width, height, pickDistance());
+    // Forgiving click: exact ray hit first, then the nearest projected centre
+    // within ~10 px so tiny/distant objects stay clickable.
+    return scene_.pickForgiving(camera_, static_cast<float>(x), static_cast<float>(y), width, height,
+                                pickDistance(), 10.0F);
+}
+
+std::vector<std::size_t> ViewportWindow::pickRect(int x0, int y0, int x1, int y1) {
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    const float width = static_cast<float>(rect.right - rect.left);
+    const float height = static_cast<float>(rect.bottom - rect.top);
+    return scene_.pickRect(camera_, static_cast<float>(x0), static_cast<float>(y0),
+                           static_cast<float>(x1), static_cast<float>(y1), width, height);
 }
 
 float ViewportWindow::pickDistance() const noexcept {
@@ -1950,6 +2036,26 @@ void drawGizmoCube(const math::Vec3f& centre, float half) {
     glEnd();
 }
 
+// One ring around an axis: the rotate affordance. 48 segments read smooth at
+// any zoom; a plain line loop needs no lighting or depth state.
+void drawGizmoRing(const math::Vec3f& centre, const math::Vec3f& axis, float radius) {
+    math::Vec3f helper{0.0F, 1.0F, 0.0F};
+    if (std::abs(math::Vec3f::dot(helper, axis)) > 0.9F) {
+        helper = {1.0F, 0.0F, 0.0F};
+    }
+    const math::Vec3f side = math::Vec3f::cross(axis, helper).normalized();
+    const math::Vec3f up = math::Vec3f::cross(side, axis).normalized();
+    glBegin(GL_LINE_LOOP);
+    constexpr int kSegments = 48;
+    for (int segment = 0; segment < kSegments; ++segment) {
+        const float angle = static_cast<float>(segment) / kSegments * 6.2831853F;
+        glVertex3f(centre.x + (side.x * std::cos(angle) + up.x * std::sin(angle)) * radius,
+                   centre.y + (side.y * std::cos(angle) + up.y * std::sin(angle)) * radius,
+                   centre.z + (side.z * std::cos(angle) + up.z * std::sin(angle)) * radius);
+    }
+    glEnd();
+}
+
 // The transform gizmo: three axis arrows from the selection centroid plus a
 // centre cube. Sized in pixels via gizmoAxisLength so it reads the same at any
 // camera distance, and drawn without depth test so it is never swallowed by
@@ -1980,6 +2086,8 @@ void ViewportWindow::drawGizmo() {
     glBegin(GL_LINES);
     for (const auto handle : {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ}) {
         const math::Vec3f direction = axisDirection(handle);
+        // Translate reads as arrows; rotate dims the shafts so the rings lead;
+        // scale draws shorter, thicker-feeling shafts (same lines, brighter ink).
         if (handle == highlighted) {
             glColor3f(1.0F, 0.9F, 0.2F);
         } else if (handle == GizmoHandle::AxisX) {
@@ -1989,14 +2097,33 @@ void ViewportWindow::drawGizmo() {
         } else {
             glColor3f(0.3F, 0.5F, 1.0F);
         }
+        const float shaftScale = gizmoMode_ == GizmoMode::Scale ? 0.72F : 1.0F;
         glVertex3f(anchor.x, anchor.y, anchor.z);
-        glVertex3f(anchor.x + direction.x * axisLength, anchor.y + direction.y * axisLength,
-                   anchor.z + direction.z * axisLength);
+        glVertex3f(anchor.x + direction.x * axisLength * shaftScale,
+                   anchor.y + direction.y * axisLength * shaftScale,
+                   anchor.z + direction.z * axisLength * shaftScale);
     }
     glEnd();
     glLineWidth(1.0F);
 
+    // Rotate mode: a ring around each axis so "grab to turn" reads instantly.
+    if (gizmoMode_ == GizmoMode::Rotate) {
+        for (const auto handle : {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ}) {
+            if (handle == highlighted) {
+                glColor3f(1.0F, 0.9F, 0.2F);
+            } else if (handle == GizmoHandle::AxisX) {
+                glColor3f(0.95F, 0.25F, 0.25F);
+            } else if (handle == GizmoHandle::AxisY) {
+                glColor3f(0.3F, 0.9F, 0.3F);
+            } else {
+                glColor3f(0.3F, 0.5F, 1.0F);
+            }
+            drawGizmoRing(anchor, axisDirection(handle), axisLength * 0.85F);
+        }
+    }
+
     // Arrowheads so the direction of each axis reads at a glance.
+    // Scale mode caps them with cubes ("grab to grow") instead of cones.
     constexpr float kConeRadius = 0.045F;
     constexpr float kConeLength = 0.14F;
     for (const auto handle : {GizmoHandle::AxisX, GizmoHandle::AxisY, GizmoHandle::AxisZ}) {
@@ -2009,6 +2136,14 @@ void ViewportWindow::drawGizmo() {
             glColor3f(0.3F, 0.9F, 0.3F);
         } else {
             glColor3f(0.3F, 0.5F, 1.0F);
+        }
+        const float shaftScale = gizmoMode_ == GizmoMode::Scale ? 0.72F : 1.0F;
+        if (gizmoMode_ == GizmoMode::Scale) {
+            drawGizmoCube({anchor.x + direction.x * axisLength * shaftScale,
+                           anchor.y + direction.y * axisLength * shaftScale,
+                           anchor.z + direction.z * axisLength * shaftScale},
+                          axisLength * 0.055F);
+            continue;
         }
         drawGizmoCone({anchor.x + direction.x * axisLength * 0.86F,
                        anchor.y + direction.y * axisLength * 0.86F,
@@ -2023,6 +2158,48 @@ void ViewportWindow::drawGizmo() {
         glColor3f(0.85F, 0.85F, 0.9F);
     }
     drawGizmoCube(anchor, axisLength * 0.055F);
+}
+
+// Rubber-band marquee: an XOR-style outline drawn over the finished frame,
+// in window pixels with the Y axis flipped to GL coordinates.
+void ViewportWindow::drawMarquee() {
+    const int x0 = std::min(marqueeX0_, marqueeX1_);
+    const int x1 = std::max(marqueeX0_, marqueeX1_);
+    const int y0 = std::min(marqueeY0_, marqueeY1_);
+    const int y1 = std::max(marqueeY0_, marqueeY1_);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, static_cast<double>(std::max(width_, 1)), 0.0,
+            static_cast<double>(std::max(height_, 1)), -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    const double top = static_cast<double>(std::max(height_, 1) - y0);
+    const double bottom = static_cast<double>(std::max(height_, 1) - y1);
+    glColor4f(0.4F, 0.7F, 1.0F, 0.15F);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_QUADS);
+    glVertex2d(x0, bottom);
+    glVertex2d(x1, bottom);
+    glVertex2d(x1, top);
+    glVertex2d(x0, top);
+    glEnd();
+    glDisable(GL_BLEND);
+    glColor3f(0.5F, 0.8F, 1.0F);
+    glBegin(GL_LINE_LOOP);
+    glVertex2d(x0, bottom);
+    glVertex2d(x1, bottom);
+    glVertex2d(x1, top);
+    glVertex2d(x0, top);
+    glEnd();
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
 }
 } // namespace whitehole::render
 #endif // _WIN32

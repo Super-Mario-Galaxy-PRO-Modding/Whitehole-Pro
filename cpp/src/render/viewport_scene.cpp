@@ -488,4 +488,53 @@ std::optional<std::size_t> ViewportScene::pick(const ViewportCamera& camera, flo
     return best;
 }
 
+std::optional<std::size_t> ViewportScene::pickForgiving(const ViewportCamera& camera, float screenX,
+                                                        float screenY, float width, float height,
+                                                        float maxDistance, float slopPx) const noexcept {
+    if (auto hit = pick(camera, screenX, screenY, width, height, maxDistance)) {
+        return hit;
+    }
+    if (boxes_.empty() || width <= 0.0F || height <= 0.0F || slopPx <= 0.0F) {
+        return std::nullopt;
+    }
+    std::optional<std::size_t> best;
+    float bestPx = slopPx;
+    for (const auto& box : boxes_) {
+        float px = 0.0F;
+        float py = 0.0F;
+        if (!camera.worldToScreen(box.center, width, height, px, py)) {
+            continue;
+        }
+        const float dist = std::hypot(px - screenX, py - screenY);
+        if (dist < bestPx) {
+            bestPx = dist;
+            best = box.objectIndex;
+        }
+    }
+    return best;
+}
+
+std::vector<std::size_t> ViewportScene::pickRect(const ViewportCamera& camera, float x0, float y0, float x1,
+                                                 float y1, float width, float height) const noexcept {
+    std::vector<std::size_t> hits;
+    if (boxes_.empty() || width <= 0.0F || height <= 0.0F) {
+        return hits;
+    }
+    const float lowX = std::min(x0, x1);
+    const float highX = std::max(x0, x1);
+    const float lowY = std::min(y0, y1);
+    const float highY = std::max(y0, y1);
+    for (const auto& box : boxes_) {
+        float px = 0.0F;
+        float py = 0.0F;
+        if (!camera.worldToScreen(box.center, width, height, px, py)) {
+            continue;
+        }
+        if (px >= lowX && px <= highX && py >= lowY && py <= highY) {
+            hits.push_back(box.objectIndex);
+        }
+    }
+    return hits;
+}
+
 } // namespace whitehole::render

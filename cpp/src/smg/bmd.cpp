@@ -659,11 +659,8 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
     const auto cullModeOffset = reader.u32(sectionStart + 0x1C);
     const auto materialColorOffset = reader.u32(sectionStart + 0x20);
     const auto colorChannelCountOffset = reader.u32(sectionStart + 0x24);
-    // Colour-channel and texture-index tables are skipped positionally below
-    // (light channels and texture indices are walked as raw record bytes), so
-    // their offsets are only read to keep the field walk explicit.
-    (void)reader.u32(sectionStart + 0x28); // ColorChannelTableOffset
-    (void)reader.u32(sectionStart + 0x48); // TextureIndexTableOffset — read positionally later
+    const auto colorChannelOffset = reader.u32(sectionStart + 0x28);
+    const auto tevOrderTableOffset = reader.u32(sectionStart + 0x4C);
     const auto ambientColorOffset = reader.u32(sectionStart + 0x2C);
     const auto texGenCountOffset = reader.u32(sectionStart + 0x34);
     const auto tevStageCountOffset = reader.u32(sectionStart + 0x58);
@@ -684,9 +681,7 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         cursor += 1;
         return reader.u8(table + static_cast<std::size_t>(index));
     };
-    // Kept for the day a short-indexed table is needed again; the colour and
-    // ambient lookups use color8Table and the texture list is positional.
-    [[maybe_unused]] const auto shortTable = [&reader](std::size_t table, std::size_t& cursor) {
+    const auto shortTable = [&reader](std::size_t table, std::size_t& cursor) {
         const auto index = reader.u16(cursor);
         cursor += 2;
         return reader.u16(table + static_cast<std::size_t>(index) * 2);
@@ -713,8 +708,7 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         const auto colorChannelCount = static_cast<int>(byteTable(sectionStart + colorChannelCountOffset, cursor));
         const auto texGenCount = static_cast<int>(byteTable(sectionStart + texGenCountOffset, cursor));
         const auto tevStageCount = static_cast<int>(byteTable(sectionStart + tevStageCountOffset, cursor));
-        (void)texGenCount;
-        (void)tevStageCount;
+        material.tevStageCount = std::clamp(tevStageCount, 0, 16);
         // zcomp loc is stored as a byte index; the value decides whether depth
         // testing happens before texturing, which the preview does not need.
         (void)byteTable(sectionStart + zCompLocOffset, cursor);
@@ -759,13 +753,27 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         cursor += 20;
         cursor += 40;
 
+        (void)texGenCount;
         for (std::size_t slot = 0; slot < material.textureIndices.size(); ++slot) {
-            // Texture indices are a raw short array inside the record; the
-            // short-table path would index the table, which this layout does not
-            // have. 0xFFFF means "unused texture map".
-            const auto textureIndex = reader.u16(cursor);
+            // Java Bmd parity: textureIndicies[x] =
+            // _mat3_readShortFromShortTable(TextureIndexTableOffset) -- the
+            // record holds a short index into the shared texture-index table
+            // and the table holds the TEX1 id. 0xFFFF at either level means
+            // "unused map". (_mat3_readShortFromShortTable reads the index
+            // with the file's endianness, exactly like reader.u16 here.)
+            const std::size_t indexPos = cursor;
             cursor += 2;
-            material.textureIndices[slot] = textureIndex == 0xFFFFU ? -1 : static_cast<std::int32_t>(textureIndex);
+            const auto tableIndex = static_cast<std::size_t>(reader.u16(indexPos));
+            if (tableIndex == 0xFFFFU) {
+                material.textureIndices[slot] = -1;
+                continue;
+            }
+            // TextureIndexTableOffset is a header offset (sectionStart+0x48).
+            const std::size_t entry =
+                sectionStart + reader.u32(sectionStart + 0x48) + tableIndex * 2;
+            const auto resolved = reader.u16(entry);
+            material.textureIndices[slot] =
+                resolved == 0xFFFFU ? -1 : static_cast<std::int32_t>(resolved);
         }
 
         // Tail of the record, walked exactly like Bmd.java: constant colours,
@@ -774,17 +782,32 @@ void readMAT3(const Reader& reader, std::size_t sectionStart, std::size_t sectio
         cursor += 8;   // four TEV constant colours (short indices)
         cursor += 16;  // per-stage constant colour ids (one byte each)
         cursor += 16;  // per-stage constant alpha ids (one byte each)
-        cursor += 32;  // TEV orders (one short per slot)
+        // TEV orders: one short per slot indexing the TEV-order table; each
+        // entry is {texcoord, texmap, colorChannel}. Java Bmd parity:
+        // tevStageCount live stages read the table, the rest skip 2 bytes.
+        // 0xFF texcoord/texmap means the stage samples no texture.
+        for (int stage = 0; stage < 16; ++stage) {
+            const auto orderId = reader.u16(cursor);
+            cursor += 2;
+            if (stage >= material.tevStageCount) { continue; }
+            if (orderId == 0xFFFFU) { continue; }
+            const std::size_t orderBase =
+                sectionStart + tevOrderTableOffset + static_cast<std::size_t>(orderId) * 4;
+            const auto coord = reader.u8(orderBase);
+            const auto map = reader.u8(orderBase + 1);
+            material.tevTexCoord[static_cast<std::size_t>(stage)] =
+                coord == 0xFFU ? -1 : static_cast<std::int32_t>(coord);
+            material.tevTexMap[static_cast<std::size_t>(stage)] =
+                map == 0xFFU ? -1 : static_cast<std::int32_t>(map);
+        }
         cursor += 8;   // four TEV register colours (short indices)
         cursor += 32;  // TEV stage table ids (one short per slot)
         // Swap modes: an absent table consumes nothing for LIVE stages but
         // still skips the dead ones; a present table is walked in full.
-        const auto stageCount =
-            std::clamp(static_cast<int>(tevStageCount), 0, 16);
         if (tevSwapModeOffset != 0) {
             cursor += 32;
         } else {
-            cursor += 2 * static_cast<std::size_t>(16 - stageCount);
+            cursor += 2 * static_cast<std::size_t>(16 - material.tevStageCount);
         }
         // Swap table: Java skips all sixteen shorts outright when the offset
         // is zero (the "No swap modes stored in the file" branch).

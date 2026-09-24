@@ -49,6 +49,7 @@ struct Bti {
     std::uint8_t paletteFormat{0};
     std::uint16_t paletteCount{0};
     bool useMipmap{false};
+    std::uint8_t maxAnisotropy{0};
     std::uint8_t minFilter{0};
     std::uint8_t magFilter{0};
     float minLod{0.0F};
@@ -60,6 +61,52 @@ struct Bti {
 
     [[nodiscard]] const BtiImage& base() const noexcept { return mipmaps.front(); }
 };
+
+// Portable GX sampler mapping, re-derived from Java ImageUtils/BmdRenderer
+// behaviour (kept header-only-adjacent here so the core stays unit-testable
+// without GL headers): wrap 0 = clamp, 2 = mirror, everything else
+// (incl. 1) = repeat; filter 0 = nearest, 2/3/4/5 = mipmapped variants,
+// else linear. Values are the GL enum integers so the viewport can pass them
+// straight to glTexParameteri without a second translation table.
+struct BtiSamplerInfo {
+    int glWrapS{0x2901};
+    int glWrapT{0x2901};
+    int glMinFilter{0x2601};
+    int glMagFilter{0x2601};
+};
+[[nodiscard]] inline BtiSamplerInfo btiSamplerInfo(const Bti& texture) noexcept {
+    BtiSamplerInfo info;
+    // Java ImageUtils.getWrapMode: 0 -> CLAMP_TO_EDGE, 2 -> MIRRORED_REPEAT,
+    // default (incl. 1) -> REPEAT.
+    constexpr int kGlRepeat = 0x2901;
+    constexpr int kGlMirroredRepeat = 0x8370;
+    constexpr int kGlClampToEdge = 0x812F;
+    const auto wrap = [](std::uint8_t mode) {
+        switch (mode) {
+            case 0: return kGlClampToEdge;
+            case 2: return kGlMirroredRepeat;
+            default: return kGlRepeat;
+        }
+    };
+    // Java ImageUtils.getFilterMode: 0 -> NEAREST, 2 -> NEAREST_MIPMAP_NEAREST,
+    // 3 -> LINEAR_MIPMAP_NEAREST, 4 -> NEAREST_MIPMAP_LINEAR,
+    // 5 -> LINEAR_MIPMAP_LINEAR, default (incl. 1) -> LINEAR.
+    const auto filter = [](std::uint8_t mode) {
+        switch (mode) {
+            case 0: return 0x2600; // NEAREST
+            case 2: return 0x2700; // NEAREST_MIPMAP_NEAREST
+            case 3: return 0x2701; // LINEAR_MIPMAP_NEAREST
+            case 4: return 0x2702; // NEAREST_MIPMAP_LINEAR
+            case 5: return 0x2703; // LINEAR_MIPMAP_LINEAR
+            default: return 0x2601; // LINEAR
+        }
+    };
+    info.glWrapS = wrap(texture.wrapS);
+    info.glWrapT = wrap(texture.wrapT);
+    info.glMinFilter = filter(texture.minFilter);
+    info.glMagFilter = filter(texture.magFilter);
+    return info;
+}
 
 // Parses a BTI entry that lives inside `tex1Data` at `entryOffset` (TEX1
 // section bytes, or a whole standalone .bti file with entryOffset 0).

@@ -264,4 +264,29 @@ math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera, 
     return {};
 }
 
+float snapValue(float value, float step) noexcept {
+    if (!(step > 0.0F) || !std::isfinite(value)) {
+        return value;
+    }
+    return std::round(value / step) * step;
+}
+
+math::Vec3f snapTranslate(math::Vec3f delta, float step) noexcept {
+    return {snapValue(delta.x, step), snapValue(delta.y, step), snapValue(delta.z, step)};
+}
+
+math::Vec3f snapRotate(math::Vec3f degrees, float step) noexcept {
+    return {snapValue(degrees.x, step), snapValue(degrees.y, step), snapValue(degrees.z, step)};
+}
+
+math::Vec3f snapScale(math::Vec3f factors, float step) noexcept {
+    if (!(step > 0.0F)) {
+        return factors;
+    }
+    // Factors compound multiplicatively, so snap the *offset from 1* instead of
+    // the factor itself: 1.0 stays exactly 1.0 at any step size.
+    return {1.0F + snapValue(factors.x - 1.0F, step), 1.0F + snapValue(factors.y - 1.0F, step),
+            1.0F + snapValue(factors.z - 1.0F, step)};
+}
+
 } // namespace whitehole::render

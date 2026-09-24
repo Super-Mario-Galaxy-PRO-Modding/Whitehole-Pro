@@ -469,6 +469,23 @@ void testGizmoMath() {
         expect(std::abs(doubled.x - 1.0F) < 0.01F && std::abs(doubled.z - 1.0F) < 0.01F,
                "a scale drag must not touch the other axes");
     }
+
+    // ---- snapping ----------------------------------------------------------
+    // Snap rounds the *cumulative* value to the step, and a zero step disables.
+    expect(std::abs(whitehole::render::snapValue(12.0F, 10.0F) - 10.0F) < 0.001F,
+           "snap must round to the step");
+    expect(std::abs(whitehole::render::snapValue(17.0F, 10.0F) - 20.0F) < 0.001F,
+           "snap must round up past halfway");
+    expect(std::abs(whitehole::render::snapValue(7.0F, 0.0F) - 7.0F) < 0.001F,
+           "a zero step must disable snapping");
+    const auto snappedMove = whitehole::render::snapTranslate({12.0F, -3.0F, 26.0F}, 10.0F);
+    expect(std::abs(snappedMove.x - 10.0F) < 0.001F && std::abs(snappedMove.z - 30.0F) < 0.001F,
+           "translate snap is off");
+    const auto snappedRot = whitehole::render::snapRotate({16.0F, 0.0F, 0.0F}, 15.0F);
+    expect(std::abs(snappedRot.x - 15.0F) < 0.001F, "rotate snap is off");
+    const auto snappedScale = whitehole::render::snapScale({1.06F, 1.0F, 1.0F}, 0.1F);
+    expect(std::abs(snappedScale.x - 1.1F) < 0.001F && std::abs(snappedScale.y - 1.0F) < 0.001F,
+           "scale snap must keep 1.0 exact");
 }
 
 void testViewportScene() {
@@ -498,6 +515,24 @@ void testViewportScene() {
     expect(hit.has_value() && *hit == 0, "viewport picking missed the centered object");
     // Far corner of the screen should miss the single centered box.
     expect(!scene.pick(camera, 799.0F, 599.0F, 800.0F, 600.0F).has_value(), "viewport picking hit empty space");
+    // Forgiving click: a near-miss within the slop still grabs the object,
+    // while a far click does not.
+    float centreX = 0.0F;
+    float centreY = 0.0F;
+    expect(camera.worldToScreen({100.0F, 0.0F, 0.0F}, 800.0F, 600.0F, centreX, centreY),
+           "object centre must project");
+    expect(scene.pickForgiving(camera, 799.0F, 599.0F, 800.0F, 600.0F, 20000.0F, 10.0F).has_value() ==
+               scene.pick(camera, 799.0F, 599.0F, 800.0F, 600.0F).has_value(),
+           "forgiving pick must not invent hits far from the object");
+    expect(scene.pickForgiving(camera, centreX + 5.0F, centreY, 800.0F, 600.0F).has_value(),
+           "forgiving pick missed a near click");
+    // Marquee: a box around the centre grabs it, an empty corner grabs nothing.
+    expect(scene.pickRect(camera, centreX - 20.0F, centreY - 20.0F, centreX + 20.0F, centreY + 20.0F,
+                          800.0F, 600.0F)
+               .size() == 1,
+           "marquee missed the framed object");
+    expect(scene.pickRect(camera, 700.0F, 500.0F, 799.0F, 599.0F, 800.0F, 600.0F).empty(),
+           "marquee hit empty space");
 }
 
 void testObjectVisual() {
@@ -1732,6 +1767,70 @@ void testBtiDecoding() {
         expect(bti.mipmaps[0].rgba[8] == 0xFF, "embedded parseBti (0,1) wrong");
         expect(bti.mipmaps[0].rgba[12] == 0x00 && bti.mipmaps[0].rgba[15] == 255, "embedded parseBti (1,1) wrong");
     }
+
+    // GX sampler mapping (Java ImageUtils parity, no GL needed):
+    // wrap 0 -> CLAMP_TO_EDGE, 2 -> MIRRORED_REPEAT, else (incl. 1) -> REPEAT;
+    // filter 0 -> NEAREST, 2..5 -> mipmapped variants, else LINEAR.
+    {
+        using whitehole::smg::btiSamplerInfo;
+        using whitehole::smg::Bti;
+        Bti tex{};
+        tex.wrapS = 0; tex.wrapT = 0;
+        auto sampler = btiSamplerInfo(tex);
+        expect(sampler.glWrapS == 0x812F && sampler.glWrapT == 0x812F, "wrap 0 must clamp to edge");
+        tex.wrapS = 1; tex.wrapT = 1;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glWrapS == 0x2901 && sampler.glWrapT == 0x2901, "wrap 1 must repeat (SMG tiling)");
+        tex.wrapS = 2; tex.wrapT = 2;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glWrapS == 0x8370 && sampler.glWrapT == 0x8370, "wrap 2 must mirror");
+        tex.wrapS = 3;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glWrapS == 0x2901, "unknown wrap modes must fall back to repeat (Java default)");
+        tex.minFilter = 0; tex.magFilter = 0;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glMinFilter == 0x2600 && sampler.glMagFilter == 0x2600, "filter 0 must be nearest");
+        tex.minFilter = 1; tex.magFilter = 1;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glMinFilter == 0x2601 && sampler.glMagFilter == 0x2601, "filter 1 must be linear");
+        tex.minFilter = 2;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glMinFilter == 0x2700, "filter 2 must be nearest-mipmap-nearest");
+        tex.minFilter = 3;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glMinFilter == 0x2701, "filter 3 must be linear-mipmap-nearest");
+        tex.minFilter = 4;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glMinFilter == 0x2702, "filter 4 must be nearest-mipmap-linear");
+        tex.minFilter = 5;
+        sampler = btiSamplerInfo(tex);
+        expect(sampler.glMinFilter == 0x2703, "filter 5 must be linear-mipmap-linear");
+    }
+}
+
+void testBmdMaterialTextureRouting() {
+    // TEV-order routing (Java Bmd parity): the primary texture is the first
+    // live stage whose texmap resolves, not blindly slot 0 -- and the UV set
+    // comes from that stage's texcoord, not always set 0.
+    using whitehole::smg::BmdMaterial;
+    BmdMaterial untextured{};
+    expect(untextured.primaryTextureSlot() == -1, "untextured material must route -1");
+    expect(untextured.primaryTexCoordSet() == 0, "untextured material must sample UV set 0");
+    BmdMaterial multi{};
+    multi.tevStageCount = 2;
+    multi.tevTexMap[0] = 1;   // stage 0 -> map 1 -> TEX1 7
+    multi.tevTexCoord[0] = 3; // stage 0 samples UV set 3
+    multi.tevTexMap[1] = 0;   // stage 1 -> map 0 -> TEX1 5
+    multi.tevTexCoord[1] = 1;
+    multi.textureIndices[0] = 5;
+    multi.textureIndices[1] = 7;
+    expect(multi.primaryTextureSlot() == 7, "primary texture must follow the first live TEV stage, not slot 0");
+    expect(multi.primaryTexCoordSet() == 3, "primary UV set must follow the first live TEV stage, not set 0");
+    BmdMaterial deadStage{};
+    deadStage.tevStageCount = 1;
+    deadStage.tevTexMap[0] = -1; // 0xFF: stage samples no texture
+    deadStage.textureIndices[0] = 5;
+    expect(deadStage.primaryTextureSlot() == 5, "dead TEV stage must fall back to the first used map");
 }
 
 
@@ -2258,6 +2357,8 @@ std::vector<std::uint8_t> makeShp1Body() {
 
 // MAT3: one material named "mat" with a brown diffuse colour. Every index in
 // the material's 0x14C record points at entry 0 of its field table.
+// Texture slots follow Java Bmd parity: record slot -> shared short
+// texture-index table -> TEX1 id (entry 0 holds TEX1 0, rest unused).
 std::vector<std::uint8_t> makeMat3Body() {
     constexpr std::size_t kSectionStart = 0x88;  // start of the init-data records
     constexpr std::size_t kRecordSize = 0x14C;
@@ -3205,6 +3306,7 @@ int main() {
         testNameTables();
         testStageAndGameModels();
         testBtiDecoding();
+        testBmdMaterialTextureRouting();
         testBmdParsing();
         testModelLibrary();
         testJsonRoundTrip();

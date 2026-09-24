@@ -1,0 +1,13 @@
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/whitehole_core.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/whitehole_imgui.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/whitehole_app.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/whitehole-runtime-data.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/whitehole-pro-console.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/whitehole_core_tests.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/test.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/edit_cache.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/rebuild_cache.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/list_install_components.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/install.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/install/local.dir
+/home/conta/OneDrive/Documents/GitHub/Whitehole-Pro/build-check/CMakeFiles/install/strip.dir

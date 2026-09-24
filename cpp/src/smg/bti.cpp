@@ -443,7 +443,7 @@ Bti parseBti(std::span<const std::uint8_t> tex1Data, std::size_t entryOffset, io
     texture.useMipmap = cursor.u8() != 0;
     cursor.u8(); // enableEdgeLod
     cursor.u8(); // clampLodBias
-    cursor.u8(); // maxAnisotropy
+    texture.maxAnisotropy = cursor.u8();
     texture.minFilter = cursor.u8();
     texture.magFilter = cursor.u8();
     texture.minLod = static_cast<float>(cursor.u8()) * 0.125F;

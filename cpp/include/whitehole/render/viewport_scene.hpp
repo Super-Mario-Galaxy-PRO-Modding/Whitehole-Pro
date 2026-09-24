@@ -107,6 +107,19 @@ public:
                                                  float width, float height,
                                                  float maxDistance = 20000.0F) const noexcept;
 
+    // Forgiving click: exact ray hit first, else the box whose screen-projected
+    // centre is closest to the cursor within `slopPx`. Keeps tiny / distant
+    // objects clickable without stealing clicks from real hits.
+    [[nodiscard]] std::optional<std::size_t> pickForgiving(const ViewportCamera& camera, float screenX,
+                                                           float screenY, float width, float height,
+                                                           float maxDistance = 20000.0F,
+                                                           float slopPx = 10.0F) const noexcept;
+
+    // Rubber-band box select: every box whose projected centre falls inside the
+    // screen rectangle (corners in any order). Used for Shift-drag marquee.
+    [[nodiscard]] std::vector<std::size_t> pickRect(const ViewportCamera& camera, float x0, float y0, float x1,
+                                                    float y1, float width, float height) const noexcept;
+
     // Frame-all helper: scene center + suggested camera distance.
     [[nodiscard]] math::Vec3f center() const noexcept { return center_; }
     [[nodiscard]] float frameDistance() const noexcept { return frameDistance_; }

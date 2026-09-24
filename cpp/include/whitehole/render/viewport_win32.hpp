@@ -81,6 +81,8 @@ public:
     // Multi-select callback: additive picks (Ctrl/Shift) arrive with
     // `additive` set, so the editor can extend rather than replace the set.
     using SelectManyCallback = std::function<void(std::optional<std::size_t>, bool additive)>;
+    // Marquee box select: every object whose projected centre fell in the rect.
+    using SelectRectCallback = std::function<void(std::vector<std::size_t>, bool additive)>;
     // A rail point picked in the 3D view (point cube or control handle).
     using SelectRailCallback = std::function<void(const RailPointRef&)>;
     // One message from a gizmo drag (Begin/Update/End), already in world units.
@@ -132,6 +134,7 @@ public:
 
     void setOnSelect(SelectCallback callback) { onSelect_ = std::move(callback); }
     void setOnSelectMany(SelectManyCallback callback) { onSelectMany_ = std::move(callback); }
+    void setOnSelectRect(SelectRectCallback callback) { onSelectRect_ = std::move(callback); }
     void setOnSelectRail(SelectRailCallback callback) { onSelectRail_ = std::move(callback); }
     // Highlights one rail (pathIndex only) or one of its points (full ref);
     // nullopt clears. The draw pass thickens the matching batches and rings
@@ -216,6 +219,8 @@ private:
     // unclickable beyond that distance.
     [[nodiscard]] float pickDistance() const noexcept;
     std::optional<std::size_t> pickAt(int x, int y);
+    // Screen-space rectangle pick used by the Shift-drag marquee.
+    [[nodiscard]] std::vector<std::size_t> pickRect(int x0, int y0, int x1, int y1);
 
     HWND window_{nullptr};
     HDC device_{nullptr};
@@ -233,6 +238,7 @@ private:
     std::optional<std::size_t> hover_;
     SelectCallback onSelect_;
     SelectManyCallback onSelectMany_;
+    SelectRectCallback onSelectRect_;
     SelectRailCallback onSelectRail_;
     std::optional<RailPointRef> railHighlight_;
     GizmoCallback onGizmo_;
@@ -253,6 +259,15 @@ private:
     // Where the gizmo sits: the first selected object, or the centroid of the
     // whole selection when several are active.
     [[nodiscard]] math::Vec3f gizmoAnchor() const noexcept;
+    // Shift-drag marquee state. While armed, left-drag draws a rubber band
+    // instead of panning the camera.
+    bool marqueeActive_{false};
+    int marqueeX0_{0};
+    int marqueeY0_{0};
+    int marqueeX1_{0};
+    int marqueeY1_{0};
+    bool marqueeAdditive_{false};
+    void drawMarquee();
     bool draggingLeft_{false};
     bool draggingRight_{false};
     bool draggingMiddle_{false}; // MMB drag pans, like every 3D editor

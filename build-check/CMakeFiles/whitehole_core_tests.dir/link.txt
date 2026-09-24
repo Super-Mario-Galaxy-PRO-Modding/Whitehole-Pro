@@ -1,0 +1,1 @@
+/c/msys64/ucrt64/bin/c++.exe -O3 -DNDEBUG -Wl,--enable-auto-import -static -static-libgcc -static-libstdc++ CMakeFiles/whitehole_core_tests.dir/cpp/tests/core_tests.cpp.o -o whitehole_core_tests.exe -Wl,--out-implib,libwhitehole_core_tests.dll.a -Wl,--major-image-version,0,--minor-image-version,0  libwhitehole_core.a

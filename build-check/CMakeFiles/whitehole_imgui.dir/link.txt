@@ -1,0 +1,2 @@
+/c/msys64/ucrt64/bin/ar.exe qc libwhitehole_imgui.a CMakeFiles/whitehole_imgui.dir/cpp/third_party/imgui/imgui.cpp.o CMakeFiles/whitehole_imgui.dir/cpp/third_party/imgui/imgui_draw.cpp.o CMakeFiles/whitehole_imgui.dir/cpp/third_party/imgui/imgui_tables.cpp.o CMakeFiles/whitehole_imgui.dir/cpp/third_party/imgui/imgui_widgets.cpp.o CMakeFiles/whitehole_imgui.dir/cpp/third_party/imgui/backends/imgui_impl_win32.cpp.o CMakeFiles/whitehole_imgui.dir/cpp/third_party/imgui/backends/imgui_impl_dx11.cpp.o
+/c/msys64/ucrt64/bin/ranlib.exe libwhitehole_imgui.a

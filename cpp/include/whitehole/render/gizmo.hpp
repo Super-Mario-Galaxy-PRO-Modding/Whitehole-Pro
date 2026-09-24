@@ -37,9 +37,11 @@ enum class GizmoHandle : std::uint8_t { None, AxisX, AxisY, AxisZ, Center };
 
 // Which handle the mouse is over, if any. Axes win over the centre when both
 // are in range: the centre cube is small and the axes are the common case.
+// The 12 px default keeps small/distant gizmos grabbable without stealing
+// clicks meant for neighbouring objects.
 [[nodiscard]] GizmoHandle pickGizmoHandle(const ViewportCamera& camera, const math::Vec3f& anchor,
                                           float screenX, float screenY, float width, float height,
-                                          float tolerancePx = 7.0F) noexcept;
+                                          float tolerancePx = 12.0F) noexcept;
 
 // One drag gesture. Everything screen-space is captured at Begin, so the result
 // is a pure function of the current mouse position and the anchor cannot move
@@ -71,6 +73,19 @@ struct GizmoDrag {
 [[nodiscard]] math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera,
                                          float screenX, float screenY, float width,
                                          float height) noexcept;
+
+// Transform snapping: one home for the step sizes so viewport drags,
+// nudge keys and the Properties panel all agree. 0 disables a channel.
+struct TransformSnap {
+    float translate{10.0F}; // world units
+    float rotate{15.0F};    // degrees
+    float scale{0.1F};      // factor step (applied as round(f/s)*s)
+};
+
+[[nodiscard]] float snapValue(float value, float step) noexcept;
+[[nodiscard]] math::Vec3f snapTranslate(math::Vec3f delta, float step) noexcept;
+[[nodiscard]] math::Vec3f snapRotate(math::Vec3f degrees, float step) noexcept;
+[[nodiscard]] math::Vec3f snapScale(math::Vec3f factors, float step) noexcept;
 
 enum class GizmoPhase : std::uint8_t { Begin, Update, End };
 

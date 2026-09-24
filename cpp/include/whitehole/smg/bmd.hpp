@@ -113,6 +113,44 @@ struct BmdMaterial {
     std::array<float, 4> ambientColor{1.0F, 1.0F, 1.0F, 1.0F};
     // TEV texture map -> TEX1 index; -1 means the map is unused.
     std::array<std::int32_t, 8> textureIndices{-1, -1, -1, -1, -1, -1, -1, -1};
+    // Per TEV stage plumbing (MAT3 TEV-order table, Java Bmd parity):
+    // tevTexMap[stage] is the GX texture map id (0..7, -1 = none/0xFF) and
+    // tevTexCoord[stage] the GX texcoord id (0..7, -1 = none/0xFF).
+    std::array<std::int32_t, 16> tevTexCoord{-1, -1, -1, -1, -1, -1, -1, -1,
+                                             -1, -1, -1, -1, -1, -1, -1, -1};
+    std::array<std::int32_t, 16> tevTexMap{-1, -1, -1, -1, -1, -1, -1, -1,
+                                           -1, -1, -1, -1, -1, -1, -1, -1};
+    int tevStageCount{0};
+    // First TEV stage (in order) whose texture map resolves to a real TEX1
+    // entry, or the first used map when no stage resolves (untextured -> -1).
+    // Java binds every stage's texture; the fixed-function preview draws one,
+    // so it must be the colour stage's texture, not blindly slot 0.
+    [[nodiscard]] std::int32_t primaryTextureSlot() const noexcept {
+        for (int stage = 0; stage < tevStageCount && stage < 16; ++stage) {
+            const auto map = tevTexMap[static_cast<std::size_t>(stage)];
+            if (map >= 0 && map < 8) {
+                const auto slot = textureIndices[static_cast<std::size_t>(map)];
+                if (slot >= 0) { return slot; }
+            }
+        }
+        for (const auto slot : textureIndices) {
+            if (slot >= 0) { return slot; }
+        }
+        return -1;
+    }
+    // Texcoord set the primary stage samples (0..7, defaults to 0 when the
+    // stage has none or the mesh does not carry it).
+    [[nodiscard]] int primaryTexCoordSet() const noexcept {
+        for (int stage = 0; stage < tevStageCount && stage < 16; ++stage) {
+            const auto map = tevTexMap[static_cast<std::size_t>(stage)];
+            if (map >= 0 && map < 8 &&
+                textureIndices[static_cast<std::size_t>(map)] >= 0) {
+                const auto coord = tevTexCoord[static_cast<std::size_t>(stage)];
+                return (coord >= 0 && coord < 8) ? coord : 0;
+            }
+        }
+        return 0;
+    }
     // GX blend mode (0 = none/logic, 1 = blend, 3 = subtract) plus its source
     // and destination factors, as stored in the MAT3 blend-info table.
     std::uint8_t blendMode{0};

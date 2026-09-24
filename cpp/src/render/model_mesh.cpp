@@ -100,6 +100,13 @@ void transformPrimitive(ModelMesh& mesh, const smg::BmdModel& model, const smg::
     using smg::BmdPrimitiveType;
     const auto primitiveType = static_cast<BmdPrimitiveType>(primitive.type);
     const std::size_t count = primitive.positionIndices.size();
+    // UV set sampled by this material's primary TEV stage (Java Bmd parity:
+    // TEV order picks texcoord/texmap per stage). Falls back to set 0 when
+    // the material is missing or its stage samples no texcoord.
+    int uvSet = 0;
+    if (materialIndex >= 0 && static_cast<std::size_t>(materialIndex) < model.materials.size()) {
+        uvSet = model.materials[static_cast<std::size_t>(materialIndex)].primaryTexCoordSet();
+    }
     if (primitiveType == BmdPrimitiveType::Triangles ||
         primitiveType == BmdPrimitiveType::TriangleStrip ||
         primitiveType == BmdPrimitiveType::TriangleFan ||
@@ -144,10 +151,11 @@ void transformPrimitive(ModelMesh& mesh, const smg::BmdModel& model, const smg::
                     }
                 }
             }
-            if (i < primitive.texcoordIndices[0].size()) {
-                const auto tIdx = static_cast<std::size_t>(primitive.texcoordIndices[0][i]);
-                if (tIdx < model.texcoords[0].size()) {
-                    const auto& uv = model.texcoords[0][tIdx];
+            const auto uvTable = (uvSet >= 0 && uvSet < 8) ? static_cast<std::size_t>(uvSet) : 0U;
+            if (i < primitive.texcoordIndices[uvTable].size()) {
+                const auto tIdx = static_cast<std::size_t>(primitive.texcoordIndices[uvTable][i]);
+                if (tIdx < model.texcoords[uvTable].size()) {
+                    const auto& uv = model.texcoords[uvTable][tIdx];
                     tv[i]    .texCoord = std::array<float, 2>{uv.x, uv.y};
                 }
             }

@@ -1089,19 +1089,9 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
         leftMoved_ = false;
         lastX_ = GET_X_LPARAM(lParam);
         lastY_ = GET_Y_LPARAM(lParam);
-        // Shift+left-drag is the marquee: rubber-band box select instead of a
-        // camera pan, so dense galaxies can be swept in one gesture.
-        marqueeActive_ = false;
-        if ((wParam & MK_SHIFT) != 0) {
-            marqueeActive_ = true;
-            marqueeX0_ = marqueeX1_ = lastX_;
-            marqueeY0_ = marqueeY1_ = lastY_;
-            marqueeAdditive_ = (wParam & (MK_SHIFT | MK_CONTROL)) != 0;
-            invalidate();
-            return 0;
-        }
         // The gizmo claims the gesture when the click lands on one of its
-        // handles; a miss falls through to the plain camera pan.
+        // handles. Shift remains a precision modifier for that gesture; only a
+        // click that misses the gizmo becomes the Shift marquee.
         draggingGizmo_ = false;
         if (gizmoEnabled_ && !selection_.empty()) {
             const auto anchor = gizmoAnchor();
@@ -1121,6 +1111,14 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 gizmoGrabY_ = lastY_;
             }
         }
+        if (!draggingGizmo_ && (wParam & MK_SHIFT) != 0) {
+            marqueeActive_ = true;
+            marqueeX0_ = marqueeX1_ = lastX_;
+            marqueeY0_ = marqueeY1_ = lastY_;
+            marqueeAdditive_ = (wParam & (MK_SHIFT | MK_CONTROL)) != 0;
+            invalidate();
+            return 0;
+        }
         return 0;
     }
     case WM_LBUTTONUP:
@@ -1137,7 +1135,8 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 edit.mode = gizmoDrag_.mode;
                 edit.handle = gizmoDrag_.handle;
                 edit.value = gizmoDragValue(gizmoDrag_, camera_, static_cast<float>(lastX_),
-                                            static_cast<float>(lastY_), width, height);
+                                            static_cast<float>(lastY_), width, height,
+                                            (wParam & MK_SHIFT) != 0);
                 onGizmo_(edit);
             }
             return 0;
@@ -1283,7 +1282,8 @@ LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam
                 edit.mode = gizmoDrag_.mode;
                 edit.handle = gizmoDrag_.handle;
                 edit.value = gizmoDragValue(gizmoDrag_, camera_, static_cast<float>(x),
-                                            static_cast<float>(y), width, height);
+                                            static_cast<float>(y), width, height,
+                                            (wParam & MK_SHIFT) != 0);
                 onGizmo_(edit);
             }
             invalidate();

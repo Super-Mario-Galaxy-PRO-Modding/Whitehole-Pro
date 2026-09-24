@@ -51,7 +51,8 @@ struct GizmoDrag {
     GizmoMode mode{GizmoMode::Translate};
     math::Vec3f anchor{};
     math::Vec3f axis{};          // unit world axis (Axis* handles)
-    math::Vec3f viewNormal{};    // camera forward at Begin (Center handle plane)
+    math::Vec3f viewNormal{};    // center-handle plane normal
+    math::Vec3f axisPlaneNormal{}; // axis-handle plane normal, perpendicular to axis
     math::Vec2f anchorScreen{};  // projected anchor, px
     math::Vec2f axisDir{};       // projected axis direction (unit, px)
     float worldPerPixel{0.0F};   // axis world length / its projected length
@@ -72,7 +73,7 @@ struct GizmoDrag {
 //  - Scale:     per-axis factor, 1 = unchanged (Center: uniform, radial drag)
 [[nodiscard]] math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera,
                                          float screenX, float screenY, float width,
-                                         float height) noexcept;
+                                         float height, bool precision = false) noexcept;
 
 // Transform snapping: one home for the step sizes so viewport drags,
 // nudge keys and the Properties panel all agree. 0 disables a channel.

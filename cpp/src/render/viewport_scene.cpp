@@ -428,7 +428,7 @@ std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4&
         const auto t = intersectTriangle(local, triangles[index], triangles[index + 1], triangles[index + 2], bound);
         if (t.has_value()) {
             bound = *t; // every later triangle only has to beat the best so far
-            best = t * local.worldPerLocalT;
+            best = *t * local.worldPerLocalT;
         }
     }
     return best;
@@ -448,7 +448,7 @@ std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4&
         const auto t = intersectTriangle(local, triangle.a.position, triangle.b.position, triangle.c.position, bound);
         if (t.has_value()) {
             bound = *t;
-            best = t * local.worldPerLocalT;
+            best = *t * local.worldPerLocalT;
         }
     }
     return best;

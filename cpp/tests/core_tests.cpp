@@ -561,18 +561,18 @@ void testViewportScene() {
     expect(triangleHit.has_value() && std::abs(*triangleHit - 5.0F) < 0.001F,
            "transformed triangle picking returned the wrong distance");
     const whitehole::render::Ray originTriangleRay{{0.0F, 0.0F, 5.0F}, {0.0F, 0.0F, -1.0F}};
+    const whitehole::math::Matrix4 identity{};
     std::vector<whitehole::math::Vec3f> reversedTriangles{
         triangles[2], triangles[1], triangles[0]};
     expect(whitehole::render::rayIntersectsTriangles(
-               originTriangleRay, whitehole::math::Matrix4::identity(), reversedTriangles, 100.0F).has_value(),
+               originTriangleRay, identity, reversedTriangles, 100.0F).has_value(),
            "triangle picking must be two-sided");
     expect(!whitehole::render::rayIntersectsTriangles(
-               {{2.0F, 0.0F, 5.0F}, {0.0F, 0.0F, -1.0F}}, whitehole::math::Matrix4::identity(),
-               triangles, 100.0F)
+               {{2.0F, 0.0F, 5.0F}, {0.0F, 0.0F, -1.0F}}, identity, triangles, 100.0F)
                 .has_value(),
            "a ray beside a triangle must miss");
     expect(!whitehole::render::rayIntersectsTriangles(
-               originTriangleRay, whitehole::math::Matrix4::identity(), triangles, 4.0F)
+               originTriangleRay, identity, triangles, 4.0F)
                 .has_value(),
            "a triangle beyond the distance bound must be ignored");
 
@@ -581,8 +581,7 @@ void testViewportScene() {
     modelTriangle.b.position = triangles[1];
     modelTriangle.c.position = triangles[2];
     expect(whitehole::render::rayIntersectsTriangles(
-               originTriangleRay, whitehole::math::Matrix4::identity(), std::vector<whitehole::render::ModelTriangle>{modelTriangle},
-               100.0F)
+               originTriangleRay, identity, std::vector<whitehole::render::ModelTriangle>{modelTriangle}, 100.0F)
                 .has_value(),
            "model triangle picking missed visible geometry");
 

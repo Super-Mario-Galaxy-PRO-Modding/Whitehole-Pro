@@ -755,11 +755,8 @@ void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit) {
         state.dragSelection = live;
         state.draggingTransform = true;
     }
-    // Shift = fine drag (snap off). With settings.snapRequiresCtrl the snap only
-    // engages while Ctrl is held, the Unreal/Unity/Blender convention; otherwise
-    // the Viewport panel toggle owns it. The viewport reports cumulative values
-    // from Begin, so snap the value itself — never the per-frame delta, which
-    // would quantise into stairs.
+    // The viewport already reduced Shift+gizmo motion to 10%; keep snapping
+    // disabled for that gesture so it remains a continuous precision drag.
     const bool fine = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool snap = state.snapEnabled && !fine && (!state.settings.snapRequiresCtrl || ctrl);

@@ -171,13 +171,18 @@ bool beginGizmoDrag(GizmoDrag& drag, const ViewportCamera& camera, const math::V
     fresh.anchor = anchor;
     fresh.mouseStart = {screenX, screenY};
     fresh.anchorScreen = centre;
+    fresh.viewNormal = camera.forward();
     if (handle == GizmoHandle::Center) {
-        fresh.viewNormal = camera.forward();
+        fresh.axisPlaneNormal = {};
     } else {
         fresh.axis = axisDirection(handle);
+        fresh.axisPlaneNormal = math::Vec3f::cross(fresh.axis, camera.forward());
+        if (fresh.axisPlaneNormal.length() < 0.000001F) {
+            return false;
+        }
+        fresh.axisPlaneNormal = fresh.axisPlaneNormal.normalized();
         const float axisLength = gizmoAxisLength(camera, anchor, height);
         fresh.axisWorldLength = axisLength;
-        fresh.viewNormal = camera.forward();
         const math::Vec3f tip{anchor.x + fresh.axis.x * axisLength,
                               anchor.y + fresh.axis.y * axisLength,
                               anchor.z + fresh.axis.z * axisLength};
@@ -198,16 +203,19 @@ bool beginGizmoDrag(GizmoDrag& drag, const ViewportCamera& camera, const math::V
 }
 
 math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera, float screenX,
-                           float screenY, float width, float height) noexcept {
-    const float deltaX = screenX - drag.mouseStart.x;
-    const float deltaY = screenY - drag.mouseStart.y;
+                           float screenY, float width, float height, bool precision) noexcept {
+    const float sensitivity = precision ? 0.1F : 1.0F;
+    const float inputX = drag.mouseStart.x + (screenX - drag.mouseStart.x) * sensitivity;
+    const float inputY = drag.mouseStart.y + (screenY - drag.mouseStart.y) * sensitivity;
+    const float deltaX = inputX - drag.mouseStart.x;
+    const float deltaY = inputY - drag.mouseStart.y;
 
     // Drag projected onto the handle's screen direction, in world units along it.
     const float alongAxisWorld = (deltaX * drag.axisDir.x + deltaY * drag.axisDir.y)
                                  * drag.worldPerPixel;
 
     switch (drag.mode) {
-    case GizmoMode::Translate:
+    case GizmoMode::Translate: {
         if (drag.handle == GizmoHandle::Center) {
             // Move in the plane through the anchor that faces the camera, so the
             // grabbed point tracks the cursor whatever the angle.
@@ -215,15 +223,25 @@ math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera, 
             math::Vec3f currentHit{};
             if (!rayPlaneHit(camera, drag.mouseStart.x, drag.mouseStart.y, width, height,
                              drag.anchor, drag.viewNormal, startHit) ||
-                !rayPlaneHit(camera, screenX, screenY, width, height, drag.anchor,
+                !rayPlaneHit(camera, inputX, inputY, width, height, drag.anchor,
                              drag.viewNormal, currentHit)) {
                 return {};
             }
             return {currentHit.x - startHit.x, currentHit.y - startHit.y,
                     currentHit.z - startHit.z};
         }
-        return {drag.axis.x * alongAxisWorld, drag.axis.y * alongAxisWorld,
-                drag.axis.z * alongAxisWorld};
+        math::Vec3f startHit{};
+        math::Vec3f currentHit{};
+        if (!rayPlaneHit(camera, drag.mouseStart.x, drag.mouseStart.y, width, height,
+                         drag.anchor, drag.axisPlaneNormal, startHit) ||
+            !rayPlaneHit(camera, inputX, inputY, width, height, drag.anchor,
+                         drag.axisPlaneNormal, currentHit)) {
+            return {};
+        }
+        const math::Vec3f planeDelta = currentHit - startHit;
+        const float distance = math::Vec3f::dot(planeDelta, drag.axis);
+        return drag.axis * distance;
+    }
 
     case GizmoMode::Rotate:
         if (drag.handle == GizmoHandle::Center) {
@@ -246,8 +264,8 @@ math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera, 
         if (drag.handle == GizmoHandle::Center) {
             const math::Vec2f startOffset{drag.mouseStart.x - drag.anchorScreen.x,
                                           drag.mouseStart.y - drag.anchorScreen.y};
-            const math::Vec2f currentOffset{screenX - drag.anchorScreen.x,
-                                            screenY - drag.anchorScreen.y};
+            const math::Vec2f currentOffset{inputX - drag.anchorScreen.x,
+                                            inputY - drag.anchorScreen.y};
             const float startDistance = std::max(startOffset.length(), 4.0F);
             const float factor = std::clamp(currentOffset.length() / startDistance, 0.01F, 1000.0F);
             return {factor, factor, factor};

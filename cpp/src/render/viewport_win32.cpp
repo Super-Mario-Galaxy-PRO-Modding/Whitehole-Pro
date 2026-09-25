@@ -1450,7 +1450,13 @@ bool ViewportWindow::initGL() {
     PIXELFORMATDESCRIPTOR format{};
     format.nSize = sizeof(format);
     format.nVersion = 1;
-    format.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    // PFD_SUPPORT_COMPOSITION tells the DWM this pixel format is safe to
+    // composite directly: without it, some drivers/OS versions fall back to
+    // sampling a cached bitmap of the window instead of the live GL surface,
+    // which is the other well-documented cause of "flickers with stale
+    // content" bug reports for GL child windows (distinct from -- and on top
+    // of -- the WM_PAINT issue fixed in paint() above).
+    format.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_SUPPORT_COMPOSITION;
     format.iPixelType = PFD_TYPE_RGBA;
     format.cColorBits = 32;
     format.cDepthBits = 24;
@@ -1467,47 +1473,18 @@ bool ViewportWindow::initGL() {
         device_ = nullptr;
         return false;
     }
-    // Swap interval 0 (WGL_EXT_swap_control): the shell's D3D Present(1, 0)
-    // already paces the app at the monitor refresh, and it rewrites the whole
-    // window surface -- including this child's region -- every frame, so the
-    // child MUST re-patch its pixels immediately afterwards to make it into
-    // the same compositor sample. The driver default (interval 1) made
-    // SwapBuffers wait for the NEXT vblank, leaving the present's blank state
-    // on screen for a whole refresh and drawing the scene again for the next:
-    // the alternating blink, worst with slow (large-galaxy) frames. With the
-    // interval at 0 the swap returns as soon as the patch is queued, so the
-    // compositor always samples shell + viewport as one complete image. An
-    // extension-less driver just keeps the old blocking behaviour.
+    // Vsync stays at the driver default (interval 1, i.e. ON). An earlier
+    // version forced interval 0 here to "race" the shell's Present, on the
+    // theory that the shell rewrites this child's pixels every frame and the
+    // child had to re-patch itself immediately to land in the same
+    // compositor sample. That theory doesn't hold: a sibling window's
+    // Present() only ever touches its own swapchain, never another HWND's
+    // pixels, so there was nothing to race. What was actually happening is
+    // covered now by PFD_SUPPORT_COMPOSITION above and by paint() drawing a
+    // real frame on every WM_PAINT below -- so forcing vsync off no longer
+    // buys anything and only reintroduces plain screen tearing as a new
+    // artifact, which is why it has been removed.
     if (wglMakeCurrent(device_, glContext_) == TRUE) {
-        // PROC -> function-pointer reinterpret_cast trips -Wcast-function-type
-        // on GCC (PROC is int(*)()); route through intptr_t like
-        // blendEquationProc() below, and honour the WGL sentinel values.
-        using SwapIntervalFn = BOOL(WINAPI*)(int);
-        const auto procAddress =
-            reinterpret_cast<std::intptr_t>(wglGetProcAddress("wglSwapIntervalEXT"));
-        SwapIntervalFn swapInterval = nullptr;
-        if (procAddress != 0 && procAddress != 1 && procAddress != 2 && procAddress != 3 &&
-            procAddress != -1) {
-            swapInterval = reinterpret_cast<SwapIntervalFn>(procAddress);
-        }
-        if (swapInterval != nullptr) {
-            // 0 = present the child's patch immediately, do NOT wait for the
-            // next vblank. The shell's D3D Present(1, 0) already paces the app
-            // at the monitor refresh, and it rewrites the whole window surface --
-            // including this child's region -- every frame, so the child MUST
-            // re-patch its pixels straight afterwards to land in the same
-            // compositor sample.
-            //
-            // Passing 1 here (interval == vsync ON, the driver default) makes
-            // SwapBuffers block until the NEXT refresh, so the present's blank
-            // state stays on screen for a whole vblank and the scene is then
-            // drawn again for the one after it. That is precisely the
-            // alternating blink this comment describes, and it is worst with
-            // slow (large-galaxy) frames because the two halves drift in and
-            // out of phase. An extension-less driver keeps the blocking
-            // behaviour, so this is a mitigation rather than a guarantee.
-            swapInterval(0);
-        }
         // Double buffering only defines WHICH buffer we draw into, not that
         // drawing to the back buffer is the driver's choice. Some drivers pick
         // the front buffer, which lets the compositor sample half-drawn
@@ -1553,12 +1530,12 @@ void ViewportWindow::shutdownGL() noexcept {
     }
 }
 
-// The GL body of one frame. Independent of paint() (which only validates the
-// WM_PAINT update region): the editor's loop calls this via renderIfVisible()
-// AFTER the shell's Present -- the only moment a child draw survives, since
-// the present erases anything drawn before it. The window class is CS_OWNDC,
-// so device_ is the window's own persistent DC and this runs straight from
-// the render loop with no DC juggling.
+// The GL body of one frame, shared by both paint() (a floor: guarantees any
+// OS-requested repaint is satisfied on the spot) and the editor loop's
+// renderIfVisible()/renderIfDirty() (continuous redraw while the app is
+// idle-pumping messages). The window class is CS_OWNDC, so device_ is the
+// window's own persistent DC and this runs straight through with no DC
+// juggling regardless of which caller invoked it.
 void ViewportWindow::drawFrame(bool pollInputFrame) {
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
@@ -1641,14 +1618,28 @@ void ViewportWindow::drawFrame(bool pollInputFrame) {
 void ViewportWindow::paint() {
     PAINTSTRUCT paintInfo{};
     BeginPaint(window_, &paintInfo);
-    // WM_PAINT validates the update region and NOTHING else. Every frame is
-    // drawn by the editor loop's renderIfVisible() AFTER the shell's D3D
-    // Present, because the present rewrites the whole window surface
-    // (including this child's region) and would erase anything drawn before
-    // it -- so a paint-time draw was pure waste: a second full scene draw and
-    // swap per invalidated frame, racing the compositor on top of the real
-    // one. dirty_ deliberately stays set until the loop draws, and EndPaint
-    // validates so no WM_PAINT storm follows.
+    // WM_PAINT must actually present a frame here, not just validate the
+    // update region. The previous version skipped drawing on the assumption
+    // that the shell's Present() always rewrites this child's pixels a
+    // moment later, so anything drawn here would supposedly be thrown away.
+    // That assumption does not hold for a real WS_CHILD window: a sibling's
+    // Present() only ever touches its own swapchain/redirection surface, it
+    // never repaints another HWND's pixels. Meanwhile Windows delivers
+    // WM_PAINT synchronously in situations the external "editor loop" never
+    // gets a chance to run in: the nested modal loop that owns the message
+    // pump while a floating/dockable panel is being moved or resized
+    // (WM_ENTERSIZEMOVE), restoring from minimized, or DWM needing to
+    // refill its redirection surface after this window was occluded. In all
+    // of those cases the old code left EndPaint validating a region that was
+    // never actually redrawn, so the compositor kept showing whatever stale
+    // or blank backing-store content it had -- the exact flicker/garbage
+    // symptom this window was reported to have. Drawing for real here, with
+    // the same GL path the render loop uses, makes every OS-requested
+    // repaint self-sufficient; the external loop's continuous redraw on top
+    // of this is just extra frames; it is a strict "at least this" floor.
+    if (glContext_ != nullptr && device_ != nullptr) {
+        drawFrame(false);
+    }
     EndPaint(window_, &paintInfo);
 }
 
@@ -2604,4 +2595,3 @@ void ViewportWindow::drawMarquee() {
 }
 } // namespace whitehole::render
 #endif // _WIN32
-

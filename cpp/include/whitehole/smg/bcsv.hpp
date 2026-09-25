@@ -87,6 +87,13 @@ public:
     void setBool(BcsvRow& row, std::string_view name, bool value);
     void setBoolById(BcsvRow& row, std::uint32_t hash, bool value);
 
+    // Hash-addressed setters, the write-side counterpart of get*ById. A table
+    // grid knows the column by its field hash (that is the only stable identity
+    // a BCSV field has), not by a name it may not be able to resolve, so these
+    // are what a generic editor writes through. No-ops when the hash is unknown.
+    void setStringById(BcsvRow& row, std::uint32_t hash, std::string value);
+    void setFloatById(BcsvRow& row, std::uint32_t hash, float value);
+
     // ---- structural mutation --------------------------------------------
     // Appends a row initialised with type-appropriate defaults (0 / 0.0f / "").
     // Returns the new row index. Throws when the table has no fields, because
@@ -102,6 +109,24 @@ public:
     // previously written data stays byte-identical.
     [[nodiscard]] std::size_t ensureField(std::string_view name, BcsvType type);
 
+    // ---- column (field) editing ----------------------------------------
+    // Renames a field. Only the hash changes: offsets, masks and every stored
+    // value stay where they are, so the table's byte layout is untouched.
+    // Throws std::out_of_range for a bad index and std::runtime_error when the
+    // name is empty or already used by another field.
+    void renameField(std::size_t index, std::string_view newName);
+    // Removes a field and its value slot from every row. The row stride and the
+    // remaining offsets are deliberately left alone: the bytes the field
+    // occupied become padding, which keeps every other field byte-identical
+    // (recomputing offsets could break fields that share one word with masks).
+    // Returns false when `index` is out of range.
+    bool removeField(std::size_t index);
+    // Changes a field's declared type and re-coerces every stored value. The
+    // field keeps its offset; a wider type is only accepted when it does not
+    // run into the next field's storage. Throws std::runtime_error when the
+    // resize would overlap another field (that table would corrupt on save).
+    void setFieldType(std::size_t index, BcsvType type);
+
     // Replaces one row's values. Values are coerced to the field's declared
     // type, missing entries fall back to defaults and extras are dropped.
     // Throws std::out_of_range when `index` is not a valid row.
@@ -114,6 +139,8 @@ public:
 
 private:
     void parse(const std::vector<std::uint8_t>& data);
+    // Rebuilds the hash index after a structural field edit.
+    void rebuildFieldLookup();
 
     io::Endian endian_{io::Endian::big};
     std::uint32_t entrySize_{0};

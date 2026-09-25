@@ -384,7 +384,18 @@ constexpr std::array<int, 16> kLogicOps{GL_CLEAR,      GL_AND,         GL_AND_RE
                                         GL_COPY_INVERTED, GL_OR_INVERTED, GL_NAND,      GL_SET};
 constexpr std::array<int, 8> kCompareFuncs{GL_NEVER,  GL_LESS,    GL_EQUAL,   GL_LEQUAL,
                                            GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
-// GX compare enums line up with the GL ones for both alpha test and depth.
+// GX compare enums line up with the GL ones for the alpha test: an alpha
+// comparison is never affected by the reversed-Z projection (alpha is a
+// colour value, not a depth), so this table stays the identity mapping.
+//
+// DEPTH is different, and must go through BmdMaterial::depthFunctionReversedZ
+// instead: the viewport projects reversed-Z (near maps to 1, far to 0, buffer
+// cleared to 0, frame default GEQUAL) for 24-bit precision at galaxy zoom.
+// Under that mapping "nearer" is a LARGER value, so passing a material's raw
+// compare straight through (Java parity, valid on its conventional depth
+// buffer) made GL_LESS/GL_LEQUAL reject every visible fragment against a
+// 0-cleared buffer -- textured models vanished outright, while the flat path
+// (which never sets a depth func) kept drawing.
 constexpr std::array<int, 8> kAlphaFuncs = kCompareFuncs;
 constexpr std::array<int, 8> kDepthFuncs = kCompareFuncs;
 constexpr std::array<int, 3> kCullModes{GL_FRONT, GL_BACK, GL_FRONT_AND_BACK};
@@ -773,7 +784,12 @@ void ViewportWindow::drawTexturedModel(const std::shared_ptr<const ModelMesh>& m
             glDisable(GL_DEPTH_TEST);
         } else {
             glEnable(GL_DEPTH_TEST);
-            glDepthFunc(tableAt(kDepthFuncs, material != nullptr ? material->depthFunction : 6, GL_GEQUAL));
+            // Reversed-Z, so the compare has to be restated: see the note on
+            // kDepthFuncs and BmdMaterial::depthFunctionReversedZ.
+            const int gxCompare = material != nullptr
+                                      ? static_cast<int>(material->depthFunctionReversedZ())
+                                      : 6; // GEQUAL == the frame default
+            glDepthFunc(tableAt(kDepthFuncs, gxCompare, GL_GEQUAL));
         }
         GLboolean depthMask = material != nullptr && !material->depthWrite ? GL_FALSE : GL_TRUE;
         if (split && wantTranslucent) {
@@ -1475,8 +1491,29 @@ bool ViewportWindow::initGL() {
             swapInterval = reinterpret_cast<SwapIntervalFn>(procAddress);
         }
         if (swapInterval != nullptr) {
-            swapInterval(1);
+            // 0 = present the child's patch immediately, do NOT wait for the
+            // next vblank. The shell's D3D Present(1, 0) already paces the app
+            // at the monitor refresh, and it rewrites the whole window surface --
+            // including this child's region -- every frame, so the child MUST
+            // re-patch its pixels straight afterwards to land in the same
+            // compositor sample.
+            //
+            // Passing 1 here (interval == vsync ON, the driver default) makes
+            // SwapBuffers block until the NEXT refresh, so the present's blank
+            // state stays on screen for a whole vblank and the scene is then
+            // drawn again for the one after it. That is precisely the
+            // alternating blink this comment describes, and it is worst with
+            // slow (large-galaxy) frames because the two halves drift in and
+            // out of phase. An extension-less driver keeps the blocking
+            // behaviour, so this is a mitigation rather than a guarantee.
+            swapInterval(0);
         }
+        // Double buffering only defines WHICH buffer we draw into, not that
+        // drawing to the back buffer is the driver's choice. Some drivers pick
+        // the front buffer, which lets the compositor sample half-drawn
+        // geometry; naming it explicitly removes that class of flicker.
+        glDrawBuffer(GL_BACK);
+        glReadBuffer(GL_BACK);
         glClearDepth(0.0F);
         wglMakeCurrent(nullptr, nullptr);
     }

@@ -55,6 +55,7 @@ add_library(whitehole_core
     cpp/src/db/name_table.cpp
     cpp/src/db/object_db.cpp
         cpp/src/db/data_holder.cpp
+    cpp/src/db/custom_obj_db.cpp
     cpp/src/db/hints.cpp
     cpp/src/db/areamanagerlimits.cpp
     cpp/src/db/shortcuts.cpp

@@ -176,7 +176,7 @@ ValidationReport Document::validate() const {
     if (stage_ == nullptr || database_ == nullptr) {
         return {};
     }
-    return validateStage(*stage_, *database_, gameType_);
+    return validateStage(*stage_, *database_, gameType_, customObjects_);
 }
 
 } // namespace whitehole::edit

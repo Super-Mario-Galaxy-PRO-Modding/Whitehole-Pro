@@ -1,6 +1,8 @@
 #include "whitehole/render/model_library.hpp"
 
+#include "whitehole/db/custom_obj_db.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
+#include "whitehole/io/binary_file.hpp"
 #include "whitehole/io/directory_filesystem.hpp"
 #include "whitehole/io/rarc.hpp"
 #include "whitehole/smg/bmd.hpp"
@@ -17,6 +19,29 @@ namespace {
 // this many cached meshes the oldest entries are evicted. Meshes still held by
 // the viewport scene survive eviction through their shared_ptr.
 constexpr std::size_t kMaxCachedMeshes = 256;
+
+// A custom object's model path may point at a loose file the modder exported
+// from Blender (.bmd/.bdl, sometimes .bld), or at a standalone archive. Only
+// the archive case needs unpacking; every other file goes straight to the J3D
+// reader, which identifies BMD vs BDL by its magic.
+bool isArchiveModelPath(std::string_view path) {
+    if (path.size() < 4) {
+        return false;
+    }
+    const auto tail = path.substr(path.size() - 4);
+    return whitehole::util::equalIgnoreCase(tail, ".arc") ||
+           whitehole::util::equalIgnoreCase(tail, ".szs");
+}
+
+// File stem of a path, used to look up "<Stem>/<Stem>.bmd" inside an archive.
+std::string modelPathStem(std::string_view path) {
+    const auto slash = path.find_last_of("/\\");
+    std::string file(slash == std::string_view::npos ? path : path.substr(slash + 1));
+    if (file.size() >= 4) {
+        file.resize(file.size() - 4);
+    }
+    return file;
+}
 
 } // namespace
 
@@ -43,6 +68,50 @@ void ModelLibrary::clear() noexcept {
     archiveNames_.clear();
     listingReady_ = false;
     listingFailed_ = false;
+}
+
+void ModelLibrary::setCustomObjects(const db::CustomObjDatabase* customObjects) noexcept {
+    customObjects_ = customObjects;
+    // Entries gain and lose model paths while the user edits, and a cached
+    // "missing" result is just as stale as a cached mesh.
+    clear();
+}
+
+std::shared_ptr<const ModelMesh> ModelLibrary::loadCustomModel(std::string_view objectName) const {
+    if (customObjects_ == nullptr || objectName.empty()) {
+        return nullptr;
+    }
+    const auto* entry = customObjects_->find(objectName);
+    if (entry == nullptr || entry->modelPath.empty()) {
+        return nullptr;
+    }
+    try {
+        // A path starting with '/' is workspace-relative (the modder dropped the
+        // file into their own game dump); anything else is a plain OS path to
+        // the file their Blender exporter produced.
+        const std::vector<std::uint8_t> bytes =
+            (!entry->modelPath.empty() && entry->modelPath.front() == '/')
+                ? (filesystem_ != nullptr ? filesystem_->read(entry->modelPath) : std::vector<std::uint8_t>{})
+                : io::readFile(entry->modelPath);
+        if (bytes.empty()) {
+            return nullptr;
+        }
+        if (isArchiveModelPath(entry->modelPath)) {
+            io::RarcArchive archive(bytes);
+            const auto* modelEntry = findModelEntry(archive, modelPathStem(entry->modelPath));
+            if (modelEntry == nullptr) {
+                return nullptr;
+            }
+            auto mesh = std::make_shared<ModelMesh>(buildModelMesh(smg::parseBmd(archive.read(*modelEntry))));
+            return mesh->empty() ? nullptr : mesh;
+        }
+        auto mesh = std::make_shared<ModelMesh>(buildModelMesh(smg::parseBmd(bytes)));
+        return mesh->empty() ? nullptr : mesh;
+    } catch (...) {
+        // An unreadable or malformed export must degrade to the placeholder
+        // mesh, exactly like a broken game archive does.
+        return nullptr;
+    }
 }
 
 void ModelLibrary::resetCounters() noexcept {
@@ -216,7 +285,7 @@ std::vector<std::string> ModelLibrary::variantArchivesFor(std::string_view objec
 }
 
 std::shared_ptr<const ModelMesh> ModelLibrary::model(std::string_view objectName) {
-    if (filesystem_ == nullptr) {
+    if (filesystem_ == nullptr && customObjects_ == nullptr) {
         return nullptr;
     }
     const std::string key(objectName);
@@ -303,6 +372,15 @@ const io::RarcEntry* findModelEntry(const io::RarcArchive& archive, std::string_
 }
 
 std::shared_ptr<const ModelMesh> ModelLibrary::loadModel(std::string_view objectName) {
+    // A custom object with an assigned model file wins over the ObjectData
+    // lookup: the modder picked that file on purpose, so even an official name
+    // must show the model the BCSV editor is pointing at.
+    if (auto custom = loadCustomModel(objectName)) {
+        return custom;
+    }
+    if (filesystem_ == nullptr) {
+        return nullptr;
+    }
     // One archive -> one mesh. Empty when the archive holds no usable single
     // BMD/BDL entry; a broken part is skipped instead of failing the object.
     const auto meshFromArchive = [this](const std::string& archiveName) {
@@ -365,6 +443,59 @@ std::shared_ptr<const ModelMesh> ModelLibrary::loadModel(std::string_view object
 ModelProbe ModelLibrary::probe(std::string_view objectName) const {
     ModelProbe report;
     report.objectName = std::string(objectName);
+    // A custom entry is reported first and alone: there is no ObjectData
+    // archive behind it, and the file the modder chose is the whole answer.
+    if (customObjects_ != nullptr) {
+        if (const auto* custom = customObjects_->find(objectName)) {
+            if (!custom->modelPath.empty()) {
+                report.modelPath = custom->modelPath;
+                report.custom = true;
+                try {
+                    const std::vector<std::uint8_t> bytes =
+                        (!custom->modelPath.empty() && custom->modelPath.front() == '/')
+                            ? (filesystem_ != nullptr ? filesystem_->read(custom->modelPath)
+                                                      : std::vector<std::uint8_t>{})
+                            : io::readFile(custom->modelPath);
+                    report.modelFound = !bytes.empty();
+                    if (bytes.empty()) {
+                        report.error = "custom model file could not be read";
+                        return report;
+                    }
+                    std::vector<std::uint8_t> modelBytes = bytes;
+                    if (isArchiveModelPath(custom->modelPath)) {
+                        io::RarcArchive archive(bytes);
+                        const auto* entry = findModelEntry(archive, modelPathStem(custom->modelPath));
+                        if (entry == nullptr) {
+                            report.error = "custom archive holds no usable BMD/BDL";
+                            return report;
+                        }
+                        modelBytes = archive.read(*entry);
+                    }
+                    report.modelBytes = modelBytes.size();
+                    const auto parsed = smg::parseBmd(modelBytes);
+                    report.parsed = true;
+                    report.sceneNodes = parsed.sceneGraph.size();
+                    report.batches = parsed.batches.size();
+                    for (const auto& batch : parsed.batches) {
+                        report.packets += batch.packets.size();
+                    }
+                    auto mesh = buildModelMesh(parsed);
+                    report.triangles = mesh.triangles.size();
+                    report.skippedPrimitives = mesh.skippedPrimitives;
+                    report.droppedEmptyMatrixTable = mesh.droppedEmptyMatrixTable;
+                    report.droppedBadMatrixIndex = mesh.droppedBadMatrixIndex;
+                    if (!report.usable()) {
+                        report.error = "parsed but produced 0 triangles";
+                    }
+                } catch (const std::exception& error) {
+                    report.error = error.what();
+                } catch (...) {
+                    report.error = "unknown failure";
+                }
+                return report;
+            }
+        }
+    }
     try {
         report.archiveName = archiveNameFor(objectName);
         report.archiveFound = !report.archiveName.empty();

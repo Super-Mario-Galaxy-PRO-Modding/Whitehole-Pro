@@ -187,6 +187,21 @@ struct BmdMaterial {
     [[nodiscard]] bool alphaTestEnabled() const noexcept {
         return !(alphaOp == 1 && (alphaFunc0 == 7 || alphaFunc1 == 7));
     }
+    // `depthFunction` restated for a reversed-Z depth buffer, where nearer
+    // fragments hold a LARGER value. Under the conventional buffer the game's
+    // materials were authored against, LESS(1)/LEQUAL(3) mean "in front", so
+    // they become GREATER(4)/GEQUAL(6) here, and the two reversed pairs swap
+    // back. EQUAL/NOTEQUAL/NEVER/ALWAYS compare for equality, never for order,
+    // and are unchanged.
+    [[nodiscard]] std::uint8_t depthFunctionReversedZ() const noexcept {
+        switch (depthFunction) {
+            case 1: return 4; // LESS    -> GREATER
+            case 3: return 6; // LEQUAL  -> GEQUAL
+            case 4: return 1; // GREATER -> LESS
+            case 6: return 3; // GEQUAL  -> LEQUAL
+            default: return depthFunction;
+        }
+    }
 };
 
 struct BmdModel {

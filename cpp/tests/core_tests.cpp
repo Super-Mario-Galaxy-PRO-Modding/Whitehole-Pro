@@ -345,6 +345,149 @@ void testViewportCamera() {
     }
 }
 
+void testReversedZDepthBuffer() {
+    using whitehole::math::Matrix4;
+    using whitehole::render::reversedZProjectionMatrix;
+    using whitehole::render::ViewportCamera;
+
+    // The viewport projects reversed-Z: the near plane lands on NDC depth +1 and
+    // the far plane on 0, the depth buffer is cleared to 0 and the frame default
+    // is GL_GEQUAL. "Nearer" is therefore the LARGER value -- that invariant is
+    // what decides which surface owns a pixel, so the matrix has to deliver it
+    // exactly. It did not: the hand-written depth row was negated, the near
+    // plane mapped to -1, and the FURTHEST fragment kept the largest depth. Every
+    // closed model then showed the inside of its far wall -- an inside-out,
+    // "backface-culled room" render -- while nearer geometry could neither pass
+    // the test nor overwrite it.
+    constexpr float kNear = 10.0F;
+    constexpr float kFar = 20000.0F;
+    constexpr float kAspect = 4.0F / 3.0F;
+    const Matrix4 projection = reversedZProjectionMatrix(kAspect, kNear, kFar);
+
+    // Column-major (values[4 * column + row]), exactly what glLoadMatrixf reads.
+    expect(projection.values[3] == 0.0F && projection.values[7] == 0.0F,
+           "the projection must not feed x/y into w");
+    expect(projection.values[11] == -1.0F, "the projection's w row must be -z");
+    expect(projection.values[15] == 0.0F, "the projection must leave w as -z");
+
+    // x/y must stay the same centric frustum the old glFrustum call built. A
+    // mirrored axis here would reverse every triangle's screen winding and take
+    // the GL_CW front-face culling (and the per-material cull modes) with it, so
+    // both terms stay positive.
+    const float f = 1.0F / std::tan(ViewportCamera::kFieldOfView * 0.5F);
+    expect(std::abs(projection.values[0] - f / kAspect) < 1e-4F,
+           "projection x scale must match the frustum's 1/tan(fov/2)/aspect");
+    expect(std::abs(projection.values[5] - f) < 1e-4F,
+           "projection y scale must match the frustum's 1/tan(fov/2)");
+
+    struct Clip {
+        float x;
+        float y;
+        float z;
+        float w;
+    };
+    const auto clip = [&projection](float x, float y, float z) {
+        const auto& v = projection.values;
+        return Clip{x * v[0] + y * v[4] + z * v[8] + v[12],
+                    x * v[1] + y * v[5] + z * v[9] + v[13],
+                    x * v[2] + y * v[6] + z * v[10] + v[14],
+                    x * v[3] + y * v[7] + z * v[11] + v[15]};
+    };
+    // A point straight ahead `distance` units away (view space z = -distance).
+    const auto ndcDepth = [&clip](float distance) {
+        const Clip c = clip(0.0F, 0.0F, -distance);
+        return c.z / c.w;
+    };
+    // The value that actually lands in the depth buffer.
+    const auto bufferDepth = [&ndcDepth](float distance) {
+        return (ndcDepth(distance) + 1.0F) * 0.5F;
+    };
+
+    expect(std::abs(ndcDepth(kNear) - 1.0F) < 1e-3F,
+           "the near plane must map to NDC +1 under reversed-Z");
+    expect(std::abs(ndcDepth(kFar)) < 1e-3F, "the far plane must map to NDC 0 under reversed-Z");
+    expect(std::abs(bufferDepth(kNear) - 1.0F) < 1e-3F,
+           "the near plane must own the top of the depth buffer");
+
+    // Nearer geometry holds the larger buffer value at every distance.
+    float previous = 2.0F;
+    for (const float distance : {kNear, 12.0F, 100.0F, 1000.0F, 10000.0F, kFar}) {
+        const float depth = bufferDepth(distance);
+        expect(depth >= 0.0F && depth <= 1.0F, "a buffer depth left the [0, 1] range");
+        expect(depth < previous, "a nearer surface did not get a larger depth value");
+        previous = depth;
+    }
+
+    // The test itself (cleared to 0, GL_GEQUAL, depth writes on) has to keep the
+    // nearer surface in BOTH draw orders; that is the whole difference between
+    // correct occlusion and seeing straight through a model's near wall.
+    const auto nearestSurfaceSurvives = [&bufferDepth](bool farFirst) {
+        float buffer = 0.0F; // glClearDepth(0)
+        const float nearValue = bufferDepth(100.0F);
+        const float farValue = bufferDepth(1000.0F);
+        const auto draw = [&buffer](float value) {
+            if (value >= buffer) { // GL_GEQUAL
+                buffer = value;    // depth write
+            }
+        };
+        if (farFirst) {
+            draw(farValue);
+            draw(nearValue);
+        } else {
+            draw(nearValue);
+            draw(farValue);
+        }
+        return std::abs(buffer - nearValue) < 1e-6F;
+    };
+    expect(nearestSurfaceSurvives(false) && nearestSurfaceSurvives(true),
+           "an occluded far surface must never win a pixel under the reversed-Z depth test");
+
+    // Winding must be independent of the depth convention: one triangle wound
+    // counter-clockwise in view space keeps the sign of its screen-space area
+    // against a conventional (forward-Z) frustum of the same shape. A sign flip
+    // here would invert every front face and draw the inside of every model.
+    Matrix4 reference;
+    reference.values.fill(0.0F);
+    reference.values[0] = f / kAspect;
+    reference.values[5] = f;
+    reference.values[10] = (kFar + kNear) / (kNear - kFar);
+    reference.values[11] = -1.0F;
+    reference.values[14] = (2.0F * kFar * kNear) / (kNear - kFar);
+
+    struct Screen {
+        float x;
+        float y;
+    };
+    const auto signedArea = [](const Matrix4& matrix) {
+        const auto& v = matrix.values;
+        const auto project = [&v](float x, float y, float z) {
+            const float w = x * v[3] + y * v[7] + z * v[11] + v[15];
+            return Screen{(x * v[0] + y * v[4] + z * v[8] + v[12]) / w,
+                          (x * v[1] + y * v[5] + z * v[9] + v[13]) / w};
+        };
+        const Screen a = project(0.0F, 0.0F, -100.0F);
+        const Screen b = project(50.0F, 0.0F, -120.0F);
+        const Screen c = project(0.0F, 50.0F, -120.0F);
+        return (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    };
+    expect(std::abs(signedArea(projection)) > 0.0001F,
+           "the winding probe collapsed to a degenerate triangle");
+    expect(signedArea(projection) * signedArea(reference) > 0.0F,
+           "the reversed-Z projection must not flip triangle winding");
+
+    // The CPU-side camera projection has to stay the renderer's one instead of a
+    // second, forward-Z copy that silently disagrees about depth direction.
+    ViewportCamera camera;
+    camera.distance = 1000.0F;
+    const Matrix4 cpuProjection = camera.projectionMatrix(kAspect);
+    expect(cpuProjection.values[11] == -1.0F && cpuProjection.values[10] > 0.0F,
+           "ViewportCamera::projectionMatrix must project the renderer's reversed-Z");
+    expect(cpuProjection.values[10] ==
+               reversedZProjectionMatrix(kAspect, camera.nearPlane(), camera.farPlane(10000.0F))
+                   .values[10],
+           "the CPU projection drifted from the renderer's depth mapping");
+}
+
 void testGizmoMath() {
     using whitehole::render::axisDirection;
     using whitehole::render::beginGizmoDrag;
@@ -3771,6 +3914,7 @@ int main() {
         testYaz0();
         testMath();
         testViewportCamera();
+        testReversedZDepthBuffer();
         testViewportScene();
         testObjectVisual();
         testHashes();

@@ -99,6 +99,24 @@ public:
                                      float& outY) const noexcept;
 };
 
+// Reversed-Z perspective projection, laid out column-major
+// (values[4 * column + row]) so it can be handed straight to glLoadMatrixf.
+// The near plane maps to NDC depth +1 and the far plane to 0, which is the
+// whole contract the GL viewport's depth buffer runs on: it clears depth to 0
+// and keeps GL_GEQUAL as the frame default, so "nearer" is the LARGER value and
+// the nearest surface owns every pixel. Negating the depth row (near -> -1)
+// leaves the FURTHEST fragment holding the largest value instead, so the far
+// side of a closed mesh wins every pixel and models render inside-out, exactly
+// like standing inside a backface-culled room.
+//
+// The x/y terms are the same centric frustum the old glFrustum call produced
+// (`m00 = f / aspect`, `m11 = f`, `f = 1 / tan(fov / 2)`, w = -z), so switching
+// depth conventions can never mirror the image or reverse a triangle's screen
+// winding -- which the GL_CW front face plus the per-material cull modes depend
+// on. Owned here (not inline in the renderer) so the CPU side and the unit
+// tests share one definition.
+[[nodiscard]] math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane) noexcept;
+
 // Viewport grid sizing for one camera distance: the patch must cover the
 // whole visible ground (2x orbit distance spans any aspect ratio), snapped to
 // a 1/2/5x10^n step so divisions read cleanly. Shared by the renderer and

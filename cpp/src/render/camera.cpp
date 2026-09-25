@@ -63,22 +63,36 @@ math::Matrix4 ViewportCamera::viewMatrix() const noexcept {
     return view;
 }
 
-math::Matrix4 ViewportCamera::projectionMatrix(float aspect) const noexcept {
+math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane) noexcept {
     const float safeAspect = aspect > 0.000001F ? aspect : 1.0F;
-    const float half = kFieldOfView * 0.5F;
-    const float f = 1.0F / std::tan(half);
-    // Track the same dynamic planes the GL renderer uses, so anything that
-    // projects through this matrix agrees with what is on screen.
-    const float nearPlane = this->nearPlane();
-    const float farPlane = this->farPlane(10000.0F);
+    // The clip planes come from the camera's dynamic band, so they are already
+    // positive and ordered; these guards only stop a degenerate caller from
+    // dividing by zero (or leaking a NaN into the depth buffer).
+    const float nearValue = nearPlane > 0.000001F ? nearPlane : 0.000001F;
+    const float farValue = farPlane > nearValue ? farPlane : nearValue * 2.0F;
+    const float depthRange = farValue - nearValue;
+    const float f = 1.0F / std::tan(ViewportCamera::kFieldOfView * 0.5F);
     math::Matrix4 projection;
     projection.values.fill(0.0F);
     projection.values[0] = f / safeAspect;
     projection.values[5] = f;
-    projection.values[10] = (farPlane + nearPlane) / (nearPlane - farPlane);
+    // Depth row: z_clip = (near / range) * z + (near * far) / range with
+    // w_clip = -z, which maps the near plane to +1 and the far plane to 0.
+    // Both terms share one sign; flipping it (or the two independently) is what
+    // inverts the buffer and makes the far side of every model win.
+    projection.values[10] = nearValue / depthRange;
     projection.values[11] = -1.0F;
-    projection.values[14] = (2.0F * farPlane * nearPlane) / (nearPlane - farPlane);
+    projection.values[14] = (nearValue * farValue) / depthRange;
+    projection.values[15] = 0.0F;
     return projection;
+}
+
+math::Matrix4 ViewportCamera::projectionMatrix(float aspect) const noexcept {
+    // Deliberately the same reversed-Z matrix the GL viewport loads, so nothing
+    // projecting through this can disagree with the rendered image about which
+    // way depth runs (the scene radius here only feeds the far plane, which the
+    // renderer supplies itself).
+    return reversedZProjectionMatrix(aspect, nearPlane(), farPlane(10000.0F));
 }
 
 Ray ViewportCamera::screenToRay(float screenX, float screenY, float width, float height) const noexcept {

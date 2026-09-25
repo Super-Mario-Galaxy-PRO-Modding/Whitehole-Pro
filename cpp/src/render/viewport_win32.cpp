@@ -1695,23 +1695,23 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     glClearDepth(0.0F);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    const float half = ViewportCamera::kFieldOfView * 0.5F;
     // Dynamic clip planes: near tracks the orbit distance, far tracks distance
     // + scene radius, so 24-bit depth stays precise at every zoom instead of
     // z-fighting rails/overlays from a fixed 1..60000 frustum at galaxy range.
     const float nearPlane = camera_.nearPlane();
     const float farPlane = camera_.farPlane(scene_.frameDistance());
-    const float depthRange = farPlane - nearPlane;
-    // Reversed-Z column-major matrix: near maps to 1, far maps to 0.
-    const float f = 1.0F / static_cast<float>(std::tan(static_cast<double>(half)));
-    const GLfloat projection[16]{
-        f / static_cast<float>(aspect), 0.0F, 0.0F, 0.0F,
-        0.0F, f, 0.0F, 0.0F,
-        0.0F, 0.0F, -nearPlane / depthRange, -1.0F,
-        0.0F, 0.0F, -(nearPlane * farPlane) / depthRange, 0.0F};
-    glLoadMatrixf(projection);
+    // Reversed-Z: near maps to 1, far to 0, buffer cleared to 0 and GEQUAL as
+    // the frame default, so "nearer" is the LARGER value and the nearest surface
+    // keeps every pixel. The matrix is shared with the CPU projection in
+    // camera.cpp and pinned by the reversed-Z depth-buffer test in core_tests.
+    // The hand-written literal that used to live here had its depth row negated
+    // (near mapped to -1), which left the FURTHEST fragment holding the largest
+    // value: every closed model then showed the inside of its far wall -- an
+    // inside-out, "backface-culled room" render -- and nearer geometry could
+    // neither pass the test nor overwrite it.
+    glLoadMatrixf(reversedZProjectionMatrix(aspect, nearPlane, farPlane).values.data());
     glMatrixMode(GL_MODELVIEW);
-    // Matrix4 keeps element (row, column) at values[4 * row + column], which is
+    // Matrix4 stores element (row, column) at values[4 * column + row], which is
     // exactly the column-major layout glLoadMatrixf expects, so the rendered
     // view is literally the CPU camera: screen picks can never drift from what
     // is drawn (the previous hand-built look matrix was a second copy of this

@@ -487,6 +487,11 @@ unsigned int ModelTextureCache::textureFor(const std::shared_ptr<const ModelMesh
     }
 
     GLuint name = 0;
+    // Uploads must target the same unit used by the fixed-function draw path.
+    // A caller or another renderer section may leave a multi-texture unit
+    // active; without this, the texture is created on the wrong unit and the
+    // later draw binds an empty GL_TEXTURE0.
+    selectDefaultTextureUnit();
     glGenTextures(1, &name);
     if (name == 0) {
         return 0;
@@ -582,6 +587,7 @@ unsigned int ModelTextureCache::missingTexture() {
     };
     GLint oldAlignment = 4;
     GLint oldBinding = 0;
+    selectDefaultTextureUnit();
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldAlignment);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldBinding);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -598,6 +604,9 @@ unsigned int ModelTextureCache::missingTexture() {
 }
 
 void ModelTextureCache::clear() noexcept {
+    // Deletion applies to the active texture unit too; normalize it so every
+    // cached GL name is removed from the same unit on which it was uploaded.
+    selectDefaultTextureUnit();
     for (auto& entry : entries_) {
         for (const auto name : entry.names) {
             if (name != 0) {

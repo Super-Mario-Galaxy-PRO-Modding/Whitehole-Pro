@@ -175,6 +175,33 @@ public:
     // which is what every 3D editor does; a hidden child is skipped outright,
     // so an occluded or closed viewport costs nothing at all.
     bool renderIfVisible();
+    // Two-phase variant of renderIfVisible(), for the editor loop that has to
+    // render around the shell's own Present():
+    //
+    //  * prepareFrame() draws this frame's GL image into the child's back
+    //    buffer. It touches nothing the compositor can see.
+    //  * presentFrame() pushes that image onto the screen (SwapBuffers). It is
+    //    a no-op unless prepareFrame() drew something.
+    //
+    // The shell's D3D11 bit-blit Present rewrites the whole window surface --
+    // the GL child's region included -- and the child's pixels only come back
+    // when it patches them itself. Drawing and patching in one call (as the
+    // loop used to) therefore left the shell's background on screen for the
+    // entire duration of the GL draw: a ~4 ms blank window every frame, which
+    // is the viewport flicker. Rendering BEFORE the shell presents and patching
+    // IMMEDIATELY after narrows that window to the SwapBuffers call itself.
+    bool prepareFrame();
+    void presentFrame();
+    // Copies this child's finished image -- the frame its last SwapBuffers put
+    // on screen -- into an arbitrary GDI destination at (x, y).
+    //
+    // The shell calls this with the DXGI back buffer's GDI DC. See the call site
+    // in gui_win32.cpp: a bit-blit Present copies the whole back buffer over the
+    // window surface, the GL child's region included, and the compositor can
+    // sample that before the child's own patch lands. Putting the same pixels in
+    // the back buffer makes the two agree, so the viewport cannot blink.
+    // False when the child has no window or nothing was drawn yet.
+    bool blitClientAreaInto(HDC destination, int x, int y) const;
     // Legacy entry point kept for callers that only want an explicit repaint
     // (tests, one-shot draws): draws only when something invalidated the scene.
     bool renderIfDirty();
@@ -225,11 +252,16 @@ private:
     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     bool initGL();
     void shutdownGL() noexcept;
-    // The GL body of one frame, drawn ONLY from the editor's own loop (via
-    // renderIfVisible/renderIfDirty, after the shell's Present) -- WM_PAINT
-    // never draws, because anything composited before the present is erased
-    // by it.
+    // The GL body of one frame: renders the scene into the child's back buffer
+    // and then swaps it on screen, in one call. WM_PAINT uses this because a
+    // paint has to be self-sufficient from BeginPaint to EndPaint; the editor
+    // loop uses prepareFrame()/presentFrame() around the shell's Present
+    // instead, so its pixels are never off screen for longer than a SwapBuffers.
     void drawFrame(bool pollInputFrame = true);
+    // drawFrame() without the SwapBuffers: leaves the rendered image in the back
+    // buffer and reports whether it drew. presentFrame() completes a frame left
+    // pending by this call.
+    bool drawFrameContent(bool pollInputFrame);
     void paint();
     void updateSize(int width, int height);
     void applyCameraToGL(int width, int height);
@@ -291,6 +323,10 @@ private:
     // the child being hidden, so revealing it again draws a fresh image instead
     // of the undefined contents a hidden GL surface comes back with.
     bool dirty_{true};
+    // A frame drawn by prepareFrame() whose image is still only in the back
+    // buffer: presentFrame() owns swapping it. Without it, a WM_PAINT (or a
+    // second prepareFrame) would push a stale image to the screen.
+    bool framePending_{false};
     ViewportCamera camera_{};
     ViewportScene scene_{};
     std::optional<std::size_t> selected_;

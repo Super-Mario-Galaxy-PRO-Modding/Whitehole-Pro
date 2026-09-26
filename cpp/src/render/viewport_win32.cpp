@@ -1530,13 +1530,22 @@ void ViewportWindow::shutdownGL() noexcept {
     }
 }
 
-// The GL body of one frame, shared by both paint() (a floor: guarantees any
+// The GL body of one frame, shared by paint() (a floor: guarantees any
 // OS-requested repaint is satisfied on the spot) and the editor loop's
-// renderIfVisible()/renderIfDirty() (continuous redraw while the app is
+// prepareFrame()/presentFrame() pair (continuous redraw while the app is
 // idle-pumping messages). The window class is CS_OWNDC, so device_ is the
 // window's own persistent DC and this runs straight through with no DC
 // juggling regardless of which caller invoked it.
 void ViewportWindow::drawFrame(bool pollInputFrame) {
+    if (drawFrameContent(pollInputFrame)) {
+        SwapBuffers(device_);
+        wglMakeCurrent(nullptr, nullptr);
+    }
+    framePending_ = false;
+}
+
+bool ViewportWindow::drawFrameContent(bool pollInputFrame) {
+    bool drew = false;
     if (glContext_ != nullptr && device_ != nullptr) {
         wglMakeCurrent(device_, glContext_);
         if (pollInputFrame) {
@@ -1608,11 +1617,16 @@ void ViewportWindow::drawFrame(bool pollInputFrame) {
         if (marqueeActive_) {
             drawMarquee();
         }
-        SwapBuffers(device_);
-        wglMakeCurrent(nullptr, nullptr);
+        // The finished image now sits in the child's back buffer, with the GL
+        // context still current; swapping it on screen is the caller's decision
+        // (drawFrame() does it here, presentFrame() does it right after the
+        // shell's Present()). SwapBuffers is not valid once the context has been
+        // released from the DC, so the release has to happen after the swap.
+        drew = true;
     }
     // A finished frame -- whichever path drew it -- leaves nothing outstanding.
     dirty_ = false;
+    return drew;
 }
 
 void ViewportWindow::paint() {
@@ -1643,7 +1657,7 @@ void ViewportWindow::paint() {
     EndPaint(window_, &paintInfo);
 }
 
-bool ViewportWindow::renderIfVisible() {
+bool ViewportWindow::prepareFrame() {
     if (window_ == nullptr || glContext_ == nullptr || device_ == nullptr) {
         return false;
     }
@@ -1654,18 +1668,63 @@ bool ViewportWindow::renderIfVisible() {
         dirty_ = true;
         return false;
     }
+    // A pending frame from an earlier prepareFrame() would be replaced by this
+    // draw, which is fine -- but it must not also be swapped twice.
+    framePending_ = false;
 
     // A visible GL child is rendered every host tick. `dirty_` is retained
     // only as an invalidation hint for callers; it must not gate the viewport
     // pass or static scenes can appear frozen between compositor updates.
     pollInput();
-    drawFrame(false);
+    if (!drawFrameContent(false)) {
+        return false;
+    }
     // Cancel the WM_PAINT invalidate() queued, so this redraw is not repeated
     // the next time the message queue drains.
     ValidateRect(window_, nullptr);
+    framePending_ = true;
     return true;
 }
 
+void ViewportWindow::presentFrame() {
+    if (!framePending_ || device_ == nullptr) {
+        return;
+    }
+    framePending_ = false;
+    // drawFrameContent() left the frame in the back buffer with the GL context
+    // still current on the child's own DC (CS_OWNDC), which is exactly what
+    // SwapBuffers needs.
+    SwapBuffers(device_);
+    wglMakeCurrent(nullptr, nullptr);
+}
+
+bool ViewportWindow::blitClientAreaInto(HDC destination, int x, int y) const {
+    if (destination == nullptr || window_ == nullptr || width_ <= 0 || height_ <= 0) {
+        return false;
+    }
+    // The class is CS_OWNDC, so this is the child's own DC: for a double-buffered
+    // GL window it holds the frame the last SwapBuffers put on screen.
+    HDC source = GetDC(window_);
+    if (source == nullptr) {
+        return false;
+    }
+    // Any batched GDI/GDI-side GL work must be in the surface before it is read,
+    // and GdiFlush also settles the thread's GDI batch so the BitBlt below sees
+    // the pixels the compositor would.
+    GdiFlush();
+    const BOOL copied = BitBlt(destination, x, y, static_cast<int>(width_),
+                               static_cast<int>(height_), source, 0, 0, SRCCOPY);
+    ReleaseDC(window_, source);
+    return copied != FALSE;
+}
+
+bool ViewportWindow::renderIfVisible() {
+    if (!prepareFrame()) {
+        return false;
+    }
+    presentFrame();
+    return true;
+}
 bool ViewportWindow::renderIfDirty() {
     if (!dirty_ || window_ == nullptr || glContext_ == nullptr || device_ == nullptr) {
         return false;

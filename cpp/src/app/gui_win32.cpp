@@ -57,6 +57,7 @@
 #include <future>      // object database download runs off the UI thread
 
 #include <charconv>
+#include <cstdio>   // std::snprintf: the viewport composite failure code
 #include <cstring>
 #include <fstream>     // first-boot marker file
 #include <optional>
@@ -362,6 +363,9 @@ ID3D11DeviceContext* g_context = nullptr;
 IDXGISwapChain* g_swapChain = nullptr;
 ID3D11RenderTargetView* g_renderTarget = nullptr;
 HRESULT g_lastDeviceHr = S_OK; // last D3D11CreateDeviceAndSwapChain result
+// The viewport composite failure is reported once, in the Log panel: it is a
+// machine/driver fact, not something that changes frame to frame.
+bool compositeFailureReported = false;
 
 void createRenderTarget() {
     ID3D11Texture2D* backBuffer = nullptr;
@@ -375,6 +379,58 @@ void cleanupRenderTarget() {
         g_renderTarget->Release();
         g_renderTarget = nullptr;
     }
+}
+
+// Copies the GL viewport's finished frame into the DXGI back buffer at the
+// child's client rectangle. Returns S_OK, or the reason it could not happen --
+// the caller reports the first failure in the Log panel instead of silently
+// losing the viewport.
+//
+// Why this is needed at all: the shell presents with the bit-blit model, whose
+// Present copies the ENTIRE back buffer over the window surface -- the GL
+// child's region included. The child posts its own pixels separately, and the
+// compositor can sample between the two, which is the viewport flicker every
+// previous attempt only re-timed. Writing the child's image into the back buffer
+// as well removes the race instead of narrowing it: whichever of the two the
+// compositor prefers that frame, the pixels are the same, so the viewport cannot
+// blink. It also makes the frame self-contained for screen captures, remote
+// sessions and PrintWindow, which only read the shell's surface.
+//
+// The back buffer has to be unbound from the pipeline first, because
+// IDXGISurface1::GetDC requires a surface that is not an active render target,
+// and the swap chain has to be BGRA8, because that is the only format DXGI will
+// hand a GDI DC for.
+HRESULT compositeViewportIntoBackBuffer(render::ViewportWindow& viewport, const RECT& viewportRect) {
+    if (g_swapChain == nullptr || g_context == nullptr) {
+        return E_POINTER;
+    }
+    if (viewportRect.right <= viewportRect.left || viewportRect.bottom <= viewportRect.top) {
+        return E_INVALIDARG;
+    }
+    ID3D11Texture2D* backBuffer = nullptr;
+    HRESULT hr = g_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    if (FAILED(hr) || backBuffer == nullptr) {
+        return FAILED(hr) ? hr : E_NOINTERFACE;
+    }
+    IDXGISurface1* surface = nullptr;
+    hr = backBuffer->QueryInterface(IID_PPV_ARGS(&surface));
+    if (FAILED(hr) || surface == nullptr) {
+        backBuffer->Release();
+        return FAILED(hr) ? hr : E_NOINTERFACE;
+    }
+    g_context->OMSetRenderTargets(0, nullptr, nullptr);
+    g_context->Flush();
+    HDC dc = nullptr;
+    hr = surface->GetDC(FALSE, &dc);
+    if (SUCCEEDED(hr) && dc != nullptr) {
+        if (!viewport.blitClientAreaInto(dc, viewportRect.left, viewportRect.top)) {
+            hr = E_FAIL; // the child had nothing to hand over (not shown yet)
+        }
+        surface->ReleaseDC(nullptr);
+    }
+    surface->Release();
+    backBuffer->Release();
+    return hr;
 }
 
 // Monitor scale of the main window. It can only be resolved once the HWND
@@ -445,12 +501,17 @@ bool createDeviceD3D(HWND window) {
     DXGI_SWAP_CHAIN_DESC desc{};
     desc.BufferDesc.RefreshRate.Numerator = 60;
     desc.BufferDesc.RefreshRate.Denominator = 1;
-    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
     desc.OutputWindow = window;
     desc.Windowed = TRUE;
+    // GDI-compatibility is what lets the shell's own frame fold the GL child's
+    // image into this back buffer every frame (see
+    // compositeViewportIntoBackBuffer). Without it IDXGISurface1::GetDC fails
+    // with DXGI_ERROR_INVALID_CALL and the viewport flickers again.
+    desc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
 
     // The bit-blit swap model is REQUIRED here, not a legacy leftover. The
     // editor hosts a plain Win32 child window that runs OpenGL inside this
@@ -5240,6 +5301,11 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
 
         // --- Rendering ---
         ImGui::Render();
+        // The 3D child is rendered into its own back buffer FIRST, while the
+        // shell is still assembling this frame. Swapping it on screen happens
+        // immediately after the shell's Present below -- see prepareFrame() in
+        // viewport_win32.hpp for why the two halves must straddle the Present.
+        state.viewport.prepareFrame();
         // The shell clears to the palette's window colour, not a hard-coded
         // grey. ImGui does not paint every pixel of the window (dock spacing,
         // the transparent central node behind the 3D child), so whatever the
@@ -5252,6 +5318,21 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         g_context->ClearRenderTargetView(g_renderTarget, clearColor);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
+        // Fold the viewport's finished frame into the back buffer before it is
+        // presented, so the bit-blit below carries the same pixels the GL child
+        // posts on its own. This is what closes the viewport flicker; see
+        // compositeViewportIntoBackBuffer for the race it removes.
+        if (state.viewportChildVisible && state.viewportRectValid) {
+            const HRESULT compositeHr = compositeViewportIntoBackBuffer(state.viewport, state.viewportRect);
+            if (FAILED(compositeHr) && !compositeFailureReported) {
+                compositeFailureReported = true;
+                char code[16];
+                std::snprintf(code, sizeof(code), "0x%08lX", static_cast<unsigned long>(compositeHr));
+                pushLog(state, std::string("Viewport compositing failed (") + code +
+                                   "): the 3D view may blink until this machine's driver accepts the copy.");
+            }
+        }
+
         // VSync. DXGI_STATUS_OCCLUDED is a success code, not a failure, but it
         // must NOT gate the GL child: the swap chain's visibility has nothing to
         // do with whether the child HWND is on screen. Gating on it left the
@@ -5259,13 +5340,12 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         // not something the child can recover from by itself.
         g_swapChain->Present(1, 0);
 
-        // Draw the 3D child exactly once per loop, AFTER the parent presents.
-        // With the bit-blit swap model the parent's Present rewrites the whole
-        // window surface, so anything the child drew before it is erased --
-        // hence the ordering, which is what keeps the viewport on screen. It is
-        // also the reason the shell cannot be switched to flip model: that
-        // would stop erasing the child but would then composite over it.
-        state.viewport.renderIfVisible();
+        // Patch the 3D image back in the instant after the parent presents: the
+        // bit-blit Present rewrites the whole window surface -- the GL child's
+        // region included -- so the child re-commits its pixels straight away.
+        // Between this and the composite above, no frame can show the shell's
+        // background where the viewport should be.
+        state.viewport.presentFrame();
     }
 
     // --- Cleanup ---
@@ -5293,7 +5373,8 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam
             if (g_swapChain != nullptr) {
                 cleanupRenderTarget();
                 g_swapChain->ResizeBuffers(0, static_cast<UINT>(LOWORD(lParam)), static_cast<UINT>(HIWORD(lParam)),
-                                           DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+                                           DXGI_FORMAT_B8G8R8A8_UNORM,
+                                           DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE);
                 createRenderTarget();
             }
             return 0;
@@ -5307,7 +5388,8 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam
                 const RECT* rect = reinterpret_cast<RECT*>(lParam);
                 g_swapChain->ResizeBuffers(0, static_cast<UINT>(rect->right - rect->left),
                                            static_cast<UINT>(rect->bottom - rect->top),
-                                           DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+                                           DXGI_FORMAT_B8G8R8A8_UNORM,
+                                           DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE);
                 createRenderTarget();
             }
             return 0;

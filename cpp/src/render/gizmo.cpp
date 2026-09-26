@@ -173,14 +173,16 @@ bool beginGizmoDrag(GizmoDrag& drag, const ViewportCamera& camera, const math::V
     fresh.anchorScreen = centre;
     fresh.viewNormal = camera.forward();
     if (handle == GizmoHandle::Center) {
-        fresh.axisPlaneNormal = {};
+        // The centre handle needs no axis basis: it moves/rotates in the view.
     } else {
         fresh.axis = axisDirection(handle);
-        fresh.axisPlaneNormal = math::Vec3f::cross(fresh.axis, camera.forward());
-        if (fresh.axisPlaneNormal.length() < 0.000001F) {
+        // Reject an axis that is parallel to the view direction up front: its
+        // projected handle collapses to a point, so there is no screen direction
+        // to drag along (the span check below catches near misses too).
+        const math::Vec3f planeNormal = math::Vec3f::cross(fresh.axis, camera.forward());
+        if (planeNormal.length() < 0.000001F) {
             return false;
         }
-        fresh.axisPlaneNormal = fresh.axisPlaneNormal.normalized();
         const float axisLength = gizmoAxisLength(camera, anchor, height);
         fresh.axisWorldLength = axisLength;
         const math::Vec3f tip{anchor.x + fresh.axis.x * axisLength,
@@ -230,17 +232,15 @@ math::Vec3f gizmoDragValue(const GizmoDrag& drag, const ViewportCamera& camera, 
             return {currentHit.x - startHit.x, currentHit.y - startHit.y,
                     currentHit.z - startHit.z};
         }
-        math::Vec3f startHit{};
-        math::Vec3f currentHit{};
-        if (!rayPlaneHit(camera, drag.mouseStart.x, drag.mouseStart.y, width, height,
-                         drag.anchor, drag.axisPlaneNormal, startHit) ||
-            !rayPlaneHit(camera, inputX, inputY, width, height, drag.anchor,
-                         drag.axisPlaneNormal, currentHit)) {
-            return {};
-        }
-        const math::Vec3f planeDelta = currentHit - startHit;
-        const float distance = math::Vec3f::dot(planeDelta, drag.axis);
-        return drag.axis * distance;
+        // An axis handle is linear by construction: worldPerPixel was measured
+        // along the axis at grab time, so the travel is the pixel travel the
+        // author sees, projected onto the handle's screen direction. Ray/plane
+        // intersection cannot be used here: every plane that both contains the
+        // axis and passes through the anchor also contains the eye, so a drag
+        // *along* the axis line (the whole point of the handle) is singular and
+        // the mapping explodes instead of moving the object.
+        return {drag.axis.x * alongAxisWorld, drag.axis.y * alongAxisWorld,
+                drag.axis.z * alongAxisWorld};
     }
 
     case GizmoMode::Rotate:

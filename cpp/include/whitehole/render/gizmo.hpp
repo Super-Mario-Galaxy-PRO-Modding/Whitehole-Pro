@@ -52,7 +52,6 @@ struct GizmoDrag {
     math::Vec3f anchor{};
     math::Vec3f axis{};          // unit world axis (Axis* handles)
     math::Vec3f viewNormal{};    // center-handle plane normal
-    math::Vec3f axisPlaneNormal{}; // axis-handle plane normal, perpendicular to axis
     math::Vec2f anchorScreen{};  // projected anchor, px
     math::Vec2f axisDir{};       // projected axis direction (unit, px)
     float worldPerPixel{0.0F};   // axis world length / its projected length

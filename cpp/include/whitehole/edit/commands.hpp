@@ -14,6 +14,7 @@
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -104,6 +105,30 @@ private:
     std::string label_;
 };
 
+// One camera-table edit. The whole CameraParam.bcam is snapshotted before and
+// after the change: a zone's camera table is a few hundred bytes, and a byte
+// snapshot restores engine defaults, the column set and row order exactly --
+// something a field-level diff could not do, because a sparse column vanishes
+// when its last non-default value goes away and a re-add must reproduce the
+// original offsets.
+class CameraTableCommand final : public IUndo {
+public:
+    CameraTableCommand(smg::StageArchive& stage, std::vector<std::uint8_t> before,
+                       std::vector<std::uint8_t> after, std::string label);
+
+    void undo() override { restore(before_); }
+    void redo() override { restore(after_); }
+    [[nodiscard]] std::string label() const override { return label_; }
+
+private:
+    void restore(const std::vector<std::uint8_t>& bytes);
+
+    smg::StageArchive* stage_;
+    std::vector<std::uint8_t> before_;
+    std::vector<std::uint8_t> after_;
+    std::string label_;
+};
+
 // ---- helpers: apply + record -------------------------------------------
 // Each returns false (and records nothing) when the target indices are stale.
 // The caller is responsible for setting `after` on the objects first when using
@@ -139,5 +164,13 @@ private:
                              std::size_t rowIndex,
                              const std::function<void(smg::BcsvTable&, smg::BcsvRow&)>& mutate,
                              std::string label);
+
+// Runs `mutate` against the zone's camera table and records the whole-table
+// before/after pair as one undo step. Returns false (recording nothing) when
+// the table did not actually change, so a drag that ends where it started
+// leaves the stack clean.
+[[nodiscard]] bool mutateCameras(smg::StageArchive& stage, UndoStack& stack,
+                                 const std::function<void(smg::CameraParamTable&)>& mutate,
+                                 std::string label);
 
 } // namespace whitehole::edit

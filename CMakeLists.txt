@@ -89,6 +89,7 @@ add_library(whitehole_core
     cpp/src/smg/hash.cpp
     cpp/src/smg/bti.cpp
     cpp/src/smg/bmd.cpp
+    cpp/src/smg/camera_param.cpp
     cpp/src/smg/object_model.cpp
     cpp/src/smg/path.cpp
     cpp/src/smg/stage_archive.cpp
@@ -280,5 +281,11 @@ if(WHITEHOLE_BUILD_TESTS)
     target_compile_definitions(whitehole_core_tests PRIVATE
         WHITEHOLE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
+    # The camera tests carry Japanese camera ids, so MSVC must be told the
+    # source (and execution) charset explicitly -- without it the compiler
+    # falls back to the system code page and the literals are mangled.
+    if(MSVC)
+        target_compile_options(whitehole_core_tests PRIVATE /utf-8)
+    endif()
     add_test(NAME whitehole_core_tests COMMAND whitehole_core_tests)
 endif()

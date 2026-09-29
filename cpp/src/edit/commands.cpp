@@ -170,4 +170,29 @@ bool mutateRow(smg::StageArchive& stage, UndoStack& stack, std::size_t tableInde
     return true;
 }
 
+CameraTableCommand::CameraTableCommand(smg::StageArchive& stage, std::vector<std::uint8_t> before,
+                                       std::vector<std::uint8_t> after, std::string label)
+    : stage_(&stage), before_(std::move(before)), after_(std::move(after)),
+      label_(std::move(label)) {}
+
+void CameraTableCommand::restore(const std::vector<std::uint8_t>& bytes) {
+    // Re-parse in the archive's own endianness so an SMG1 table restored from
+    // an undo snapshot is byte-identical to the file it came from.
+    stage_->setCameraParams(smg::CameraParamTable(bytes, stage_->endian(),
+                                                  stage_->cameraDefaultVersion()));
+}
+
+bool mutateCameras(smg::StageArchive& stage, UndoStack& stack,
+                   const std::function<void(smg::CameraParamTable&)>& mutate, std::string label) {
+    auto before = stage.cameraParams().serialize();
+    mutate(stage.cameraParams());
+    auto after = stage.cameraParams().serialize();
+    if (before == after) {
+        return false;
+    }
+    stack.push(std::make_unique<CameraTableCommand>(stage, std::move(before), std::move(after),
+                                                     std::move(label)));
+    return true;
+}
+
 } // namespace whitehole::edit

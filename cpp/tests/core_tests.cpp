@@ -30,6 +30,7 @@
 #include "whitehole/smg/bcsv.hpp"
 #include "whitehole/smg/bmd.hpp"
 #include "whitehole/smg/bti.hpp"
+#include "whitehole/smg/camera_param.hpp"
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/object_model.hpp"
@@ -63,6 +64,11 @@ void expect(bool condition, const std::string& message) {
 // Defined further down with the inline fallback database; declared here so the
 // custom-object tests above that definition can use it too.
 void loadObjectDatabaseForTests(whitehole::db::ObjectDatabase& database);
+
+// Defined below next to the BCSV helpers; declared here so the camera table
+// test can compare a re-parsed table against the one it was loaded from.
+void expectTablesEqual(const whitehole::smg::BcsvTable& left,
+                       const whitehole::smg::BcsvTable& right, const std::string& context);
 
 void testBinaryData() {
     whitehole::io::BinaryWriter writer(whitehole::io::Endian::big);
@@ -827,6 +833,230 @@ void testHashes() {
     expect(whitehole::smg::superFastHash("") == 0, "empty SuperFastHash changed");
     expect(whitehole::smg::superFastHash("Whitehole") == 0x680E328E, "SuperFastHash compatibility vector changed");
 }
+
+void testCameraParam() {
+    using namespace whitehole::smg;
+
+    // Field hashes must match the game; these constants are LaunchCamPlus'
+    // published BCAM hashes (and the template files parse with them).
+    expect(jmapHash("version") == 0x14F51CD8, "version hash drifted from the game");
+    expect(jmapHash("id") == 0x00000D1B, "id hash drifted from the game");
+    expect(jmapHash("camtype") == 0x20C58F89, "camtype hash drifted from the game");
+    expect(jmapHash("angleA") == 0xABC4A1CE, "angleA hash drifted from the game");
+    expect(jmapHash("woffset.Y") == 0xBEC02B35, "woffset.Y hash drifted from the game");
+    expect(jmapHash("eflag.enableErpFrame") == 0x1BCD52AA, "eflag hash drifted from the game");
+
+    // Spec table: 52 fields, LCP defaults (the wiki's angleA/dist are swapped).
+    expect(cameraFieldSpecs().size() == 52, "the spec table must describe all 52 BCAM fields");
+    expect(cameraFieldSpec("dist") != nullptr, "dist must have a spec");
+    expect(cameraFieldSpec("nope") == nullptr, "unknown fields must have no spec");
+    expect(cameraFieldSpecForHash(jmapHash("camint")) != nullptr, "hash lookup must find camint");
+    const auto* dist = cameraFieldSpec("dist");
+    expect(std::get<float>(cameraFieldDefault(*dist, kCameraVersionSmg2)) == 1200.0F,
+           "dist engine default must be 1200");
+    const auto* angleA = cameraFieldSpec("angleA");
+    expect(std::get<float>(cameraFieldDefault(*angleA, kCameraVersionSmg1)) == 0.0F,
+           "angleA engine default must be 0");
+    const auto* num1 = cameraFieldSpec("num1");
+    expect(std::get<std::int32_t>(cameraFieldDefault(*num1, kCameraVersionSmg1)) == 0 &&
+               std::get<std::int32_t>(cameraFieldDefault(*num1, kCameraVersionSmg2)) == 1,
+           "num1 defaults must flip per engine version");
+    const auto* woffsetY = cameraFieldSpec("woffset.Y");
+    expect(std::get<float>(cameraFieldDefault(*woffsetY, kCameraVersionSmg1)) == 100.0F &&
+               std::get<float>(cameraFieldDefault(*woffsetY, kCameraVersionSmg2)) == 0.0F,
+           "woffset.Y defaults must flip per engine version");
+    expect(cameraFieldApplies(CameraFieldScope::event, CameraContext::event) &&
+               !cameraFieldApplies(CameraFieldScope::event, CameraContext::cube),
+           "event-only fields must not apply to camera areas");
+    expect(cameraFieldApplies(CameraFieldScope::game, CameraContext::cube) &&
+               !cameraFieldApplies(CameraFieldScope::game, CameraContext::other),
+           "group flags must apply to camera areas but not o: cameras");
+
+    // Id contexts, formatting and friendly names.
+    const CameraId cube = parseCameraId("c:000f");
+    expect(cube.context == CameraContext::cube && cube.number == 15, "c: id must parse");
+    expect(formatCameraId(cube) == "c:000f", "cube id must round trip canonically");
+    expect(describeCameraId(cube) == "Camera Area 15", "cube description changed");
+    const CameraId spawn = parseCameraId("s:003c");
+    expect(spawn.context == CameraContext::spawn && spawn.number == 60, "s: id must parse");
+    expect(describeCameraId(spawn) == "Spawn Point 60", "spawn description changed");
+    const CameraId scenario = parseCameraId("e:シナリオスターター:005:01番目");
+    expect(scenario.context == CameraContext::event, "scenario starter id must parse as event");
+    expect(describeCameraId(scenario) == "Scenario Starter 005 camera 01",
+           "scenario starter description changed");
+    expect(describeCameraId(parseCameraId("e:パワースター固有005")) == "Power Star Appearance 005",
+           "concatenated event ids must translate");
+    expect(describeCameraId(parseCameraId("e:不明のイベント")) == "Event 不明のイベント",
+           "unknown events must echo their name");
+    expect(describeCameraId(parseCameraId("o:デフォルトカメラ")) == "Default Camera",
+           "default camera must translate");
+    expect(describeCameraId(parseCameraId("o:スタートアニメカメラ")) ==
+               "Galaxy Intro Camera (created by the game)",
+           "game-created cameras must be flagged");
+    expect(describeCameraId(parseCameraId("g:SomeGroup")) == "Group: SomeGroup",
+           "group description changed");
+    expect(parseCameraId("bogus").context == CameraContext::invalid, "junk ids must be invalid");
+    expect(cubeCameraIdForArg(15) == "c:000f" && spawnCameraIdFor(60) == "s:003c",
+           "area/spawn id builders changed");
+    expect(cubeCameraIdForArg(-1).empty(), "negative area args must build no id");
+
+    // In-game pose: all-zero parallel angles look along -X at the target,
+    // the shared spherical convention of the decompiled translators.
+    {
+        CameraPreviewParams parallel;
+        parallel.camtype = "CAM_TYPE_XZ_PARA";
+        parallel.angleA = 0.0F;
+        parallel.angleB = 0.0F; // the struct mirrors the engine defaults otherwise
+        PoseSupport support = PoseSupport::none;
+        const GameCameraPose pose = solveGameCameraPose(parallel, {100.0F, 50.0F, 0.0F}, &support);
+        expect(support == PoseSupport::exact, "XZ_PARA must solve exactly");
+        expect(std::abs(pose.eye.x - 1300.0F) < 0.01F && std::abs(pose.eye.y - 50.0F) < 0.01F &&
+                   std::abs(pose.at.x - 100.0F) < 0.01F,
+               "zero-angle parallel eye must sit at dist along +X");
+    }
+    {
+        // Template zone camera c:0000 (angleB 0.3, everything else default).
+        const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+        auto archive = whitehole::io::RarcArchive::open(templates / "SMG2BigGalaxyMap.arc");
+        CameraParamTable zone(archive.read(kCameraParamPath), archive.endian(),
+                              cameraVersionForGame(2));
+        PoseSupport support = PoseSupport::none;
+        const GameCameraPose pose =
+            solveGameCameraPose(cameraPreviewParams(zone, 0), {0.0F, 0.0F, 0.0F}, &support);
+        expect(support == PoseSupport::exact, "the template camera must solve exactly");
+        const float expectedX = 1200.0F * std::cos(0.3F);
+        const float expectedZ = 1200.0F * std::sin(0.3F);
+        expect(std::abs(pose.eye.x - expectedX) < 0.5F && std::abs(pose.eye.z - expectedZ) < 0.5F,
+               "template camera eye must land on the angleB/dist sphere");
+        expect(std::abs(pose.fovYRadians - 45.0F * 3.141592653589793F / 180.0F) < 0.0001F,
+               "the template camera's FoV must read as 45 degrees");
+    }
+    {
+        // POINT_FIX aims from the negated polar direction around wpoint at Mario.
+        CameraPreviewParams fix;
+        fix.camtype = "CAM_TYPE_POINT_FIX";
+        fix.wpoint = {0.0F, 0.0F, 1000.0F};
+        fix.dist = 200.0F;
+        fix.axis = {90.0F, 0.0F, 0.0F}; // degrees here
+        const GameCameraPose pose = solveGameCameraPose(fix, {0.0F, 0.0F, 0.0F});
+        // axis.x = 90deg points the direction vector at +Z; the negation puts
+        // the eye 200 units on the near side of wpoint, looking past it at Mario.
+        expect(std::abs(pose.eye.x - 0.0F) < 0.01F && std::abs(pose.eye.z - 800.0F) < 0.01F,
+               "point-fix eye must negate its direction vector");
+    }
+    {
+        // EYEPOS_FIX pins the eye to wpoint and watches the target.
+        CameraPreviewParams eyePos;
+        eyePos.camtype = "CAM_TYPE_EYEPOS_FIX";
+        eyePos.wpoint = {10.0F, 20.0F, 30.0F};
+        const GameCameraPose pose = solveGameCameraPose(eyePos, {1.0F, 2.0F, 3.0F});
+        expect(pose.eye.x == 10.0F && pose.at.x == 1.0F, "eyepos-fix must pin the eye");
+    }
+    {
+        // FOLLOW-family orbits share the parallel sphere.
+        CameraPreviewParams follow;
+        follow.camtype = "CAM_TYPE_FOLLOW";
+        follow.angleA = 0.17453294F;
+        follow.angleB = 0.34906587F;
+        follow.dist = 1200.0F;
+        const GameCameraPose pose = solveGameCameraPose(follow, {0.0F, 0.0F, 0.0F});
+        expect(pose.eye.length() > 1199.0F && pose.eye.length() < 1201.0F,
+               "follow eye must sit on the dist sphere");
+    }
+    expect(cameraPoseSupport("CAM_TYPE_XZ_PARA", kCameraVersionSmg2) == PoseSupport::exact &&
+               cameraPoseSupport("CAM_TYPE_FOLLOW", kCameraVersionSmg2) == PoseSupport::spherical &&
+               cameraPoseSupport("CAM_TYPE_TALK", kCameraVersionSmg2) == PoseSupport::none &&
+               cameraPoseSupport("CAM_TYPE_CUSTOM", kCameraVersionSmg2) == PoseSupport::none,
+           "pose support classification changed");
+    expect(cameraPoseSupport("CAM_TYPE_ICECUBE_PLANET", kCameraVersionSmg2) == PoseSupport::spherical,
+           "aliases must resolve through the pose dispatch");
+
+
+    // Camera type registry: aliases resolve only at/after their version.
+    expect(cameraTypes().size() == 53, "the registry must hold 48 classes + 5 aliases");
+    expect(cameraTypeInfo("CAM_TYPE_XZ_PARA") != nullptr, "XZ_PARA must be registered");
+    const CameraTypeInfo* alias = cameraTypeInfo("CAM_TYPE_ICECUBE_PLANET");
+    expect(alias != nullptr && alias->aliasOf == "CAM_TYPE_CUBE_PLANET", "alias entry changed");
+    expect(resolveCameraType("CAM_TYPE_ICECUBE_PLANET", kCameraVersionSmg2) == "CAM_TYPE_CUBE_PLANET",
+           "alias must resolve on SMG2");
+    expect(resolveCameraType("CAM_TYPE_ICECUBE_PLANET", 196610) == "CAM_TYPE_ICECUBE_PLANET",
+           "alias must stay unresolved below its required version");
+    expect(resolveCameraType("CAM_TYPE_CUSTOM", kCameraVersionSmg2) == "CAM_TYPE_CUSTOM",
+           "unknown camtypes must survive a round trip");
+
+    // Real template tables: parse, inspect, round trip.
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto archive = whitehole::io::RarcArchive::open(templates / "SMG2BigGalaxyMap.arc");
+    const auto bytes = archive.read(kCameraParamPath);
+    expect(!bytes.empty(), "template CameraParam.bcam is missing");
+    CameraParamTable table(bytes, archive.endian(), cameraVersionForGame(2));
+    expect(table.size() == 1, "the SMG2 template must hold one camera");
+    const auto cameras = table.cameras();
+    expect(cameras[0].id == "c:0000" && cameras[0].camtype == "CAM_TYPE_XZ_PARA",
+           "template camera identity changed");
+    expect(cameras[0].version == 196631 && cameras[0].context == CameraContext::cube,
+           "template camera version/context changed");
+    expect(table.getFloat(0, "dist") == 1200.0F && table.getFloat(0, "angleA") == 0.0F,
+           "template camera values changed");
+    expect(table.getInt(0, "camint") == 120 && table.getString(0, "id") == "c:0000",
+           "template camera reads changed");
+    // The BCSV writer pads the file to its alignment, so the original bytes
+    // must be a prefix of the re-serialised table (content unchanged), and a
+    // reparse must agree field-for-field.
+    const auto contentPreserved = [](const std::vector<std::uint8_t>& original,
+                                     const std::vector<std::uint8_t>& written) {
+        return written.size() >= original.size() &&
+               std::equal(original.begin(), original.end(), written.begin());
+    };
+    const auto serialized = table.serialize();
+    expect(contentPreserved(bytes, serialized),
+           "untouched camera table round trip changed its content");
+    CameraParamTable reparse(serialized, archive.endian(), cameraVersionForGame(2));
+    expectTablesEqual(table.table(), reparse.table(), "template camera table");
+
+    // SMG1 archives are all lowercase; lookups must still find the table.
+    auto smg1Archive = whitehole::io::RarcArchive::open(templates / "SMG1BigGalaxy.arc");
+    CameraParamTable smg1Table(smg1Archive.read(kCameraParamPath), smg1Archive.endian(),
+                               cameraVersionForGame(1));
+    expect(smg1Table.size() == 1, "the SMG1 template camera table is missing");
+
+    // Sparse fallbacks on a minimal (required-columns-only) table.
+    CameraParamTable minimal = CameraParamTable::create(kCameraVersionSmg2);
+    const std::size_t first = minimal.addCamera("c:0001", "CAM_TYPE_XZ_PARA", kCameraVersionSmg2);
+    expect(minimal.getFloat(first, "dist") == 1200.0F, "missing columns must read 1200 for dist");
+    expect(minimal.getFloat(first, "woffset.Y") == 0.0F, "SMG2 woffset.Y default changed");
+    expect(minimal.getInt(first, "num1") == 1, "SMG2 num1 default changed");
+    expect(!minimal.hasColumn("dist"), "reading a default must not create a column");
+    CameraParamTable minimalSmg1 = CameraParamTable::create(kCameraVersionSmg1);
+    const std::size_t old = minimalSmg1.addCamera("s:0001", "CAM_TYPE_FOLLOW", kCameraVersionSmg1);
+    expect(minimalSmg1.getFloat(old, "woffset.Y") == 100.0F, "SMG1 woffset.Y default changed");
+    expect(minimalSmg1.getInt(old, "num1") == 0, "SMG1 num1 default changed");
+
+    // Writing a parameter the sparse table lacked creates the column and
+    // keeps every other camera on its engine default.
+    const std::size_t second = minimal.addCamera("c:0002", "CAM_TYPE_XZ_PARA", kCameraVersionSmg2);
+    minimal.setFloat(first, "fovy", 90.0F);
+    expect(minimal.hasColumn("fovy") && minimal.getFloat(first, "fovy") == 90.0F,
+           "the written fovy must be stored");
+    expect(minimal.getFloat(second, "fovy") == 45.0F,
+           "the untouched camera must keep the engine default");
+    CameraParamTable reloaded(minimal.serialize(), whitehole::io::Endian::big, kCameraVersionSmg2);
+    expect(reloaded.size() == 2 && reloaded.getFloat(first, "fovy") == 90.0F,
+           "edits must survive a save/reload cycle");
+    expect(reloaded.cameras()[0].id == "c:0001" && reloaded.cameras()[1].id == "c:0002",
+           "camera order must survive a save/reload cycle");
+
+    // Add/remove on the real table restores the original bytes.
+    const std::size_t appended =
+        table.addCamera("e:シナリオスターター:001:00番目", "CAM_TYPE_EYEPOS_FIX", kCameraVersionSmg2);
+    expect(appended == 1 && table.size() == 2, "addCamera must append a row");
+    expect(table.removeCamera(1) && table.size() == 1, "removeCamera must drop the row again");
+    expect(!table.removeCamera(99), "removing a missing row must fail cleanly");
+    expect(contentPreserved(bytes, table.serialize()),
+           "removing an added camera must restore the original content");
+}
+
+
 
 std::vector<std::uint8_t> makeTinyBcsv(whitehole::io::Endian endian) {
     whitehole::io::BinaryWriter writer(endian);
@@ -2080,6 +2310,73 @@ void testNameTables() {
     galaxies.loadJson(std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "galaxies.json");
     expect(galaxies.displayName("EggStarGalaxy").find("Good Egg") != std::string::npos,
            "galaxy display names did not load");
+}
+
+void testStageCameras() {
+    using namespace whitehole::smg;
+    using whitehole::edit::UndoStack;
+
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto stage = StageArchive::openMapFile(templates / "SMG2BigGalaxyMap.arc");
+    expect(stage.gameType() == 2, "the SMG2 template must report its game type");
+    expect(stage.cameraParams().size() == 1, "the zone must expose its camera table");
+    expect(stage.cameraDefaultVersion() == kCameraVersionSmg2,
+           "new SMG2 cameras must be stamped with the SMG2 engine version");
+
+    // Editing through the undo stack: one camera-table change per step.
+    UndoStack stack;
+    const bool changed = whitehole::edit::mutateCameras(
+        stage, stack, [](CameraParamTable& cameras) { cameras.setFloat(0, "fovy", 88.0F); },
+        "Set camera FoV");
+    expect(changed && stage.cameraParams().getFloat(0, "fovy") == 88.0F,
+           "a camera edit must apply to the table");
+    expect(stack.canUndo() && stack.undoLabel() == "Set camera FoV",
+           "the camera edit must be one undo step");
+    expect(stack.undo() && stage.cameraParams().getFloat(0, "fovy") == 45.0F,
+           "undo must restore the engine default");
+    expect(stack.redo() && stage.cameraParams().getFloat(0, "fovy") == 88.0F,
+           "redo must re-apply the camera edit");
+    expect(!whitehole::edit::mutateCameras(stage, stack, [](CameraParamTable&) {}, "Nothing"),
+           "a no-op camera edit must not record a step");
+
+    // Adding a camera is undoable too.
+    expect(whitehole::edit::mutateCameras(
+               stage, stack,
+               [](CameraParamTable& cameras) {
+                   (void)cameras.addCamera("e:シナリオスターター:001:00番目", "CAM_TYPE_EYEPOS_FIX",
+                                           kCameraVersionSmg2);
+               },
+               "Add camera"),
+           "adding a camera must record a step");
+    expect(stage.cameraParams().size() == 2, "the camera must be in the table");
+    expect(stack.undo() && stage.cameraParams().size() == 1,
+           "undo must remove the added camera");
+    expect(stack.redo() && stage.cameraParams().size() == 2,
+           "redo must re-add the camera");
+
+    // Saving the zone carries the camera table into (and out of) the archive.
+    const auto output = std::filesystem::temp_directory_path() / "whitehole_camera_test.arc";
+    stage.saveTo(output);
+    auto reopened = StageArchive::openMapFile(output);
+    expect(reopened.cameraParams().size() == 2,
+           "the camera table must survive a zone save");
+    expect(reopened.cameraParams().cameras()[0].id == "c:0000" &&
+               reopened.cameraParams().getFloat(0, "fovy") == 88.0F,
+           "edited camera values must survive a zone save");
+    expect(reopened.cameraParams().cameras()[1].id == "e:シナリオスターター:001:00番目",
+           "added cameras must survive a zone save");
+    expect(reopened.objects().size() == stage.objects().size(),
+           "saving cameras must not disturb the placement data");
+    std::filesystem::remove(output);
+
+    // SMG1 zones (all-lowercase archive paths) load their camera table too.
+    auto smg1 = StageArchive::openMapFile(templates / "SMG1BigGalaxy.arc", 1);
+    expect(smg1.cameraParams().size() == 1, "the SMG1 zone must expose its camera table");
+    expect(smg1.cameraDefaultVersion() == kCameraVersionSmg1,
+           "new SMG1 cameras must be stamped with the SMG1 engine version");
+    expect(!smg1.cameraParams().hasColumn("up.Y") ||
+               smg1.cameraParams().getFloat(0, "up.Y") == 0.0F,
+           "SMG1 camera defaults must stay on the SMG1 set");
 }
 
 void testStageAndGameModels() {
@@ -3918,6 +4215,7 @@ int main() {
         testViewportScene();
         testObjectVisual();
         testHashes();
+testCameraParam();
         testBcsvEndianness();
         testBcsvMutation();
         testUndoStack();
@@ -3932,6 +4230,7 @@ int main() {
         testProjectArchives();
         testArchiveTableEdit();
         testNameTables();
+        testStageCameras();
         testStageAndGameModels();
         testBtiDecoding();
         testBmdMaterialTextureRouting();

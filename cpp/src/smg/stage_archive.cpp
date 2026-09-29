@@ -172,7 +172,41 @@ void StageArchive::loadFromArchive() {
     for (const auto no : pointFiles) {
         loadTable(pathPointFile(no), "pathpoint", "Common");
     }
+    // The camera table sits beside the placement data and is the one table
+    // that is not a placement list, so it loads on its own. An archive without
+    // it still gets an empty table carrying the right engine version, so the
+    // editor's first added camera lands on the correct GameCube default set.
+    cameraParams_ = CameraParamTable(std::vector<std::uint8_t>{}, archive_->endian(),
+                                     cameraVersionForGame(gameType_));
+    cameraTablePath_.clear();
+    if (const io::RarcEntry* entry = archive_->find(kCameraParamPath)) {
+        try {
+            cameraParams_ = CameraParamTable(archive_->read(*entry), archive_->endian(),
+                                             cameraVersionForGame(gameType_));
+            cameraTablePath_ = entry->path;
+        } catch (const std::exception&) {
+            // A corrupt camera table must not stop a zone from opening; the
+            // editor simply starts from an empty table.
+            cameraParams_ = CameraParamTable(std::vector<std::uint8_t>{}, archive_->endian(),
+                                             cameraVersionForGame(gameType_));
+            cameraTablePath_.clear();
+        }
+    }
     rebuildObjects();
+}
+
+void StageArchive::writeCameraParams() {
+    if (!archive_) {
+        return;
+    }
+    if (cameraTablePath_.empty() && cameraParams_.empty()) {
+        // No table in the archive and nothing to write: never create an empty
+        // CameraParam.bcam for a zone that does not use cameras.
+        return;
+    }
+    const std::string_view path =
+        cameraTablePath_.empty() ? kCameraParamPath : std::string_view(cameraTablePath_);
+    archive_->insert(path, cameraParams_.serialize());
 }
 
 StageArchive StageArchive::openMapFile(const std::filesystem::path& path, int gameType) {
@@ -256,6 +290,7 @@ void StageArchive::saveTo(const std::filesystem::path& path) {
         // was opened) and falls back to replace() for the ones already there.
         archive_->insert(table.path, std::move(bytes));
     }
+    writeCameraParams();
     io::writeFile(path, archive_->serialize(archive_->wasCompressed()));
     sourcePath_ = path;
 }
@@ -270,6 +305,7 @@ void StageArchive::save() {
             auto bytes = table.table.serialize();
             archive_->insert(table.path, std::move(bytes));
         }
+        writeCameraParams();
         filesystem_->write(filesystemPath_, archive_->serialize(archive_->wasCompressed()));
         return;
     }

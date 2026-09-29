@@ -59,6 +59,7 @@ void printUsage() {
         << "  whitehole-pro-console galaxy inspect <game-directory> <galaxy>\n"
         << "  whitehole-pro-console zone objects <game-directory> <zone>\n"
         << "  whitehole-pro-console map objects <archive.arc>\n"
+        << "  whitehole-pro-console map cameras <archive.arc>\n"
         << "  whitehole-pro-console archive list <archive.arc>\n"
         << "  whitehole-pro-console archive extract <archive.arc> <directory>\n"
         << "  whitehole-pro-console archive replace <archive.arc> <entry> <input> <output.arc>\n"
@@ -242,6 +243,17 @@ int galaxyCommand(int argc, char** argv) {
     return 0;
 }
 
+void printCameras(const smg::StageArchive& stage) {
+    const auto cameras = stage.cameraParams().cameras();
+    std::cout << stage.stageName() << ": " << cameras.size() << " cameras\n";
+    for (const auto& camera : cameras) {
+        const smg::CameraId id = smg::parseCameraId(camera.id);
+        std::cout << "  [" << camera.row << "] " << camera.id << "  " << camera.camtype
+                  << "  v" << camera.version << "  " << smg::cameraContextLabel(camera.context)
+                  << "  " << smg::describeCameraId(id) << '\n';
+    }
+}
+
 void printObjects(const smg::StageArchive& stage) {
     std::cout << stage.stageName() << ": " << stage.objects().size() << " objects\n";
     for (const auto& object : stage.objects()) {
@@ -413,6 +425,13 @@ int mapCommand(int argc, char** argv) {
         printObjects(smg::StageArchive::openMapFile(argv[3]));
         return 0;
     }
+    if (operation == "cameras") {
+        if (argc != 4) {
+            throw std::runtime_error("map cameras requires an archive path");
+        }
+        printCameras(smg::StageArchive::openMapFile(argv[3]));
+        return 0;
+    }
     if (operation == "params") {
         return mapParamsCommand(argc, argv);
     }
@@ -426,7 +445,7 @@ int mapCommand(int argc, char** argv) {
         return mapRemoveCommand(argc, argv);
     }
     throw std::runtime_error("Unknown map operation '" + operation +
-                             "'. Supported: objects, params, set, add, remove.");
+                             "'. Supported: objects, cameras, params, set, add, remove.");
 }
 
 int objectDbCommand(int argc, char** argv) {

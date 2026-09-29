@@ -3,12 +3,14 @@
 #include "whitehole/io/directory_filesystem.hpp"
 #include "whitehole/io/rarc.hpp"
 #include "whitehole/smg/bcsv.hpp"
+#include "whitehole/smg/camera_param.hpp"
 #include "whitehole/smg/placement.hpp"
 
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace whitehole::smg {
@@ -33,6 +35,24 @@ public:
     [[nodiscard]] const std::vector<PlacementObject>& objects() const noexcept { return objects_; }
     [[nodiscard]] std::vector<PlacementObject>& objects() noexcept { return objects_; }
 
+    [[nodiscard]] int gameType() const noexcept { return gameType_; }
+
+    // The zone's camera table (/Stage/camera/CameraParam.bcam). Always valid:
+    // an archive without the file yields an empty table the editor can fill.
+    [[nodiscard]] const CameraParamTable& cameraParams() const noexcept { return cameraParams_; }
+    [[nodiscard]] CameraParamTable& cameraParams() noexcept { return cameraParams_; }
+    // Replaces the camera table; undo restores byte snapshots through this.
+    void setCameraParams(CameraParamTable table) noexcept { cameraParams_ = std::move(table); }
+    // Endianness of the loaded archive (retail SMG1/SMG2 are big-endian), so a
+    // camera snapshot can be re-parsed exactly as the archive stores it.
+    [[nodiscard]] io::Endian endian() const noexcept {
+        return archive_.has_value() ? archive_->endian() : io::Endian::big;
+    }
+    // Engine version the editor stamps on new camera rows for this game.
+    [[nodiscard]] std::uint32_t cameraDefaultVersion() const noexcept {
+        return cameraVersionForGame(gameType_);
+    }
+
     // Re-derives the placement list from the current tables. Undo/redo mutates
     // table rows directly, so call this afterwards to keep objects() in step.
     void rebuildObjects();
@@ -50,6 +70,9 @@ public:
 private:
     void loadFromArchive();
     void loadTable(std::string_view path, std::string kind, std::string layer);
+    // Writes the camera table back into the archive (no-op for an archive
+    // that never carried one and still has no cameras).
+    void writeCameraParams();
 
     io::DirectoryFilesystem* filesystem_{nullptr};
     std::string stageName_;
@@ -59,6 +82,8 @@ private:
     std::optional<io::RarcArchive> archive_;
     std::vector<ObjectTable> tables_;
     std::vector<PlacementObject> objects_;
+    CameraParamTable cameraParams_{};
+    std::string cameraTablePath_; // as stored in the archive (SMG1 is lowercase)
 };
 
 } // namespace whitehole::smg

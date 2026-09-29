@@ -1,0 +1,672 @@
+================================================================================
+ WHITEHOLE PRO - ENGINEERING BLUEPRINT / HANDOFF NOTES
+================================================================================
+
+ Read this first, then README.md (user-facing). This file exists so the next
+ session does not have to re-derive two weeks of context. It is written at
+ commit bfc2bd2 ("Viewport: look through a solved BCAM camera (preview mode)",
+ master, pushed, clean tree), 2026-09-29.
+
+ Line numbers below are ANCHORS as of that commit. They drift. Trust the symbol
+ names, use the numbers only as a shortcut to jump near the right code.
+
+ HOW TO USE THIS FILE
+   - Section 8 is the actual next task, written step by step.
+   - Section 9 lists open design questions that need a human decision.
+   - Section 10 lists the time sinks (tooling traps) - read it before you run
+     anything, it saves about an hour per session.
+   - If you change anything described here, update the section that describes it
+     in the same commit. A stale blueprint is worse than none.
+
+--------------------------------------------------------------------------------
+0. TL;DR - STATE OF PLAY
+--------------------------------------------------------------------------------
+
+ The BCAM camera feature is three quarters done:
+
+   [done]  CameraParam.bcam parsing, a typed defaults-aware table, the 52-field
+           spec, the CAM_TYPE_* registry with version-gated aliases, per-row
+           engine versions, sparse-column editing, byte-exact round trip, and
+           full undo/redo integration. (commit 302ec37)
+   [done]  An in-game pose solver (solveGameCameraPose) that reproduces what the
+           decompiled CamTranslator classes do with a BCAM entry + a tracked
+           target point, including fovy and roll.
+   [done]  The viewport side of the preview: ViewportCamera can now carry a
+           dynamic FOV + roll, can be parked on an arbitrary eye/at pair with
+           lookAt(), and ViewportWindow has a begin/update/endCameraPreview
+           lifecycle that freezes and restores the editor camera and swallows
+           navigation input. Unit-tested. (commit bfc2bd2)
+   [MISSING] The GUI. Nothing in gui_win32.cpp calls any of it yet. There is no
+           Cameras panel, no Preview toggle, nothing that feeds a row into the
+           solver. This is the whole remaining feature; see section 8.
+
+ ONE WARNING THAT COST A REVERT: an earlier draft of the GUI panel was written
+ against an invented API (a flat `game::CameraRecord` with eyePoint/focusPoint/
+ screenRegion fields, `solveGameCameraPose(params, target, std::string&
+ outWarning)`, `cameraPoseSupport(params, pose)`). None of that exists. It was
+ reverted before committing so the tree stays honest. Section 4 is the REAL
+ signature list, copied from the headers - use it verbatim, do not guess.
+
+--------------------------------------------------------------------------------
+1. WHAT THIS REPO IS
+--------------------------------------------------------------------------------
+
+ Two codebases in one tree:
+
+   src/whitehole/**    The ORIGINAL Java/OpenGL editor (Whitehole, the SMG level
+                       editor). It is the behavioural spec: when the C++ port
+                       needs to match the old editor, read the Java class and
+                       copy its math, do not invent new math. Note
+                       src/whitehole/smg/object/CameraObj.java and
+                       src/whitehole/math/* for Java-parity checks.
+                       It is NOT built by CMake. Do not "modernise" it.
+
+   cpp/**              The native C++20 rewrite that actually ships:
+                       whitehole-pro.exe (GUI) and whitehole-pro-console.exe.
+                       This is where nearly all work happens.
+
+   Build.bat           One-click configure + build + test for double-clickers.
+   Run-Whitehole-Pro.bat / Whitehole.bat  Launch helpers.
+   README.md           User-facing docs.
+   .github/workflows/build.yml  CI: windows-latest + MSYS2 mingw-w64-ucrt
+                       cmake, `cmake -S . -B build -G "Unix Makefiles"
+                       -DCMAKE_BUILD_TYPE=Release -DWHITEHOLE_STATIC_RUNTIME=ON`,
+                       `cmake --build build -j`, `ctest --test-dir build
+                       --output-on-failure`. Whatever you do locally must also
+                       survive THAT (GCC/MinGW, not just MSVC).
+
+--------------------------------------------------------------------------------
+2. BUILD / TEST / RUN (exact commands)
+--------------------------------------------------------------------------------
+
+ CMake options (CMakeLists.txt top): WHITEHOLE_BUILD_TESTS=ON,
+ WHITEHOLE_BUILD_GUI=ON, WHITEHOLE_STATIC_RUNTIME=ON, WHITEHOLE_ENABLE_LTO=OFF.
+ C++20, CXX_EXTENSIONS OFF.
+
+ Targets:
+   whitehole_core         static lib, PUBLIC include dir cpp/include.
+   whitehole_win32        INTERFACE lib: UNICODE/_UNICODE/NOMINMAX/
+                          WIN32_LEAN_AND_MEAN + comctl32 ole32 uuid shell32
+                          comdlg32 opengl32 gdi32 winhttp d3d11 dxgi dwmapi
+                          d3dcompiler.
+   whitehole_imgui        vendored Dear ImGui (cpp/third_party/imgui, pinned -
+                          see cpp/third_party/imgui/WHITEHOLE_PIN.txt), built /W1
+                          so third-party noise stays quiet.
+   whitehole_app          object lib: gui_win32.cpp gui_theme.cpp
+                          viewport_win32.cpp + app sources.
+   whitehole-pro-console  console exe (main.cpp + cli.cpp).
+   whitehole-pro          WIN32 GUI exe (winmain.cpp) - the editor.
+   whitehole_core_tests   cpp/tests/core_tests.cpp, registered as a single CTest
+                          test named `whitehole_core_tests`.
+
+ Commands that work on this machine (PowerShell - see section 10 first):
+
+   cmake -S . -B build-check -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+   cmake --build build-check -j
+   .\build-check\whitehole_core_tests.exe
+   ctest --test-dir build-check --output-on-failure
+
+ Warnings are strict and that is load-bearing: MSVC gets /W4 /permissive- /utf-8,
+ GCC/Clang get -Wall -Wextra -Wpedantic -Wconversion on whitehole_core.
+ -Wconversion WILL bite you on float/double and int/size_t mixing in the camera
+ panel. Build with MinGW as well as MSVC before pushing; CI uses MinGW.
+
+ REPO WART: build output (build-check/, build/) is TRACKED in git - it shows up
+ in `git ls-files`. NEVER use `git add -A` or `git commit -a` here. Stage the
+ files you touched by explicit path and check `git status --short` first, or you
+ will commit .o files and a CMakeCache.txt.
+
+--------------------------------------------------------------------------------
+3. CODE CONVENTIONS (enforced by review, not by a linter)
+--------------------------------------------------------------------------------
+
+ - C++20, no compiler extensions. `[[nodiscard]]` on anything that returns a
+   value the caller must not drop; `noexcept` where it genuinely cannot throw
+   (the camera math is all noexcept).
+ - Comments are the deliverable, not filler. Every non-obvious decision gets a
+   comment that says WHY, in plain English, usually 2-5 lines above the code.
+   The camera code is commented at essay length because it is all reverse
+   engineered; keep that tone.
+ - ASCII only in sources: use "--" and "==" instead of em/en dashes. The header
+   jpName strings are the one exception (they are game data).
+ - Namespace layout mirrors the folder: whitehole::math / io / smg / render /
+   edit / db / app.
+ - Style of a feature here: small typed value struct + free functions over a
+   table class (see CameraParamTable + cameraPreviewParams + solveGameCameraPose)
+   rather than a god-object. Do not add virtual inheritance.
+ - Never break byte-exact round trips: a table that was not edited must save
+   back identical (BCSV writer may only append alignment padding). Same rule for
+   RARC. If your change makes an untouched file differ, that is a bug.
+ - The GUI is immediate-mode ImGui inside a Win32 shell; state lives in
+   `struct EditorState` (gui_win32.cpp:131), panels are free functions taking
+   `EditorState&` (e.g. drawObjectsPanel at gui_win32.cpp:2077). The editor lives
+   in runGui(executable, initialFile) (gui_win32.cpp:4835) - its `EditorState
+   state;` is at :4947 and the per-frame work (layout pass at :5121) follows.
+   Mutations go through markDirty() (gui_win32.cpp:1263) + refreshViewport()
+   (gui_win32.cpp:715) + the UndoStack.
+   User-visible errors go through pushToast(state, text, error)
+   (gui_win32.cpp:590). Viewport child window placement: syncViewportChild
+   (gui_win32.cpp:3300). Fonts/theme apply once at boot right after
+   ImGui_ImplWin32_GetDpiScaleForHwnd, with a guard that clamps implausible DPI
+   readings to 1.0 - do not load fonts before that.
+
+
+--------------------------------------------------------------------------------
+4. THE BCAM SUBSYSTEM - REAL API (cpp/include/whitehole/smg/camera_param.hpp)
+--------------------------------------------------------------------------------
+
+ Everything below is copied from that header. It is the contract: write the GUI
+ against exactly these names. Section 8.0 lists the fictions that got reverted.
+
+ Constants / enums
+   kCameraVersionSmg1 = 196630, kCameraVersionSmg2 = 196631 (row `version`)
+   kCameraParamPath = "/Stage/camera/CameraParam.bcam" - RarcArchive lookups are
+       case-insensitive, which is how SMG1's all-lowercase path still resolves.
+       StageArchive keeps the path as stored (cameraTablePath_) to write back.
+   cameraVersionForGame(int gameType) -> gameType == 1 ? SMG1 : SMG2
+   enum class CameraContext : invalid, cube, spawn, event, group, other (c: s: e: g: o:)
+   enum class CameraFieldScope : general, game, event
+       general = every camera; game = gflag.* (c:/g:/s: only); event =
+       eflag./evfrm/evpriority/camendint (e: only).
+       NOTE: there is NO kAll / kZoneOnly / kStageOnly / kBossOnly - the reverted
+       draft invented those. "Does this field apply to this camera" is
+       cameraFieldApplies(scope, context).
+   enum class CameraFieldGroup : identity, framing, behavior, flags
+   enum class PoseSupport : std::uint8_t { exact, spherical, none }
+
+ Camera id
+   struct CameraId { CameraContext context; int32_t number{-1}; std::string name;
+                     std::string raw; }
+   parseCameraId(sv) never fails (unrecognised prefix -> invalid).
+   formatCameraId() canonicalises (c:/s: go through "%04x", lowercase padded).
+   describeCameraId() -> friendly English label; unknown ids echo the raw text so
+   a UI label is never empty.
+   cubeCameraIdForArg(objArg0) / spawnCameraIdFor(cameraSetId) reproduce the
+   game's printf: Obj_arg0 15 -> "c:000f", CameraSetId 60 -> "s:003c".
+   cameraContextLabel(context) -> "Camera area", "Spawn point", ...
+
+ Field spec (52 known BCAM fields, in the game's preferred column order)
+   struct CameraFieldSpec { name, type, baseDefault, smg2Default, scope, group,
+                            label, tooltip }
+   cameraFieldSpecs() -> const std::vector<CameraFieldSpec>&
+   cameraFieldSpec(name) / cameraFieldSpecForHash(jmapHash) -> const*, or nullptr
+   cameraFieldDefault(spec, engineVersion) -> base default unless SMG2 overrides
+   cameraFieldApplies(scope, context) -> bool, for UI filtering
+
+ Camtype registry (every CAM_TYPE_* the two games know + 5 aliases)
+   struct CameraTypeInfo { id, jpName, label, description, aliasOf,
+                           aliasMinVersion, smg1, smg2 }
+   cameraTypes() -> all entries (aliases are their own entries)
+   cameraTypeInfo(camtype) -> exact lookup, nullptr when unknown
+   resolveCameraType(camtype, engineVersion) -> resolves an alias only at/after
+   aliasMinVersion (the game gates them by version); unknown ids come back
+   verbatim so a modder's custom camtype survives a round trip.
+
+ The table: class CameraParamTable
+   CameraParamTable()                       // empty: required columns only
+   CameraParamTable(std::vector<std::uint8_t> bytes, io::Endian,
+                    std::uint32_t defaultVersion)   // parses a sparse .bcam
+   static CameraParamTable create(std::uint32_t defaultVersion)
+   struct Camera { std::size_t row; std::string id, camtype; std::uint32_t
+                   version; CameraContext context; }
+   std::vector<Camera> cameras() const   // identity + context per row
+   std::size_t size() const;  bool empty() const
+   std::uint32_t engineVersion(std::size_t row) const  // row `version`, else default
+   float getFloat(row, field);  std::int32_t getInt(row, field);
+   std::string getString(row, field)
+       A column the file does not carry falls back to that ROW's engine default;
+       an unknown field name falls back to zero/empty.
+   bool hasColumn(field) const
+       True only when the value really came from the file. THIS is how the UI
+       says "engine default" vs "authored value" - never guess by comparing the
+       value against the default.
+   std::optional<BcsvValue> storedValue(row, field)   // nullopt = no column
+   void setFloat/setInt/setString(row, field, value)
+       Writing a parameter the sparse file lacked CREATES the column (typed from
+       the spec) and fills every OTHER row with its engine default first, so no
+       existing camera changes meaning. That is the whole point of the sparse
+       model: never "normalise" a file by materialising all 52 columns.
+   std::size_t addCamera(id, camtype, version)  // existing columns get engine defaults
+   bool removeCamera(row)
+   std::uint32_t defaultVersion() const;  BcsvTable& table()  // file-order escape
+   std::vector<std::uint8_t> serialize() const
+
+ Pose solving (what the preview drives)
+   struct GameCameraPose { math::Vec3f eye, at, up; float fovYRadians;
+                           float rollRadians; }   // defaults 45 deg, no roll
+   struct CameraPreviewParams {           // one row, flattened, defaults resolved
+     std::string id;
+     std::string camtype;                 // unresolved, exactly as stored
+     math::Vec3f wpoint, axis, up, woffset;
+     float angleA{0.0F}; float angleB{0.3F}; float dist{1200.0F}; float roll{0.0F};
+     float fovy{45.0F}; float loffset{0.0F}; float loffsetv{0.0F};
+     std::uint32_t version{kCameraVersionSmg2};
+   }
+   CameraPreviewParams cameraPreviewParams(const CameraParamTable&, std::size_t row)
+   PoseSupport cameraPoseSupport(std::string_view camtype,
+                                 std::uint32_t engineVersion) noexcept
+   GameCameraPose solveGameCameraPose(const CameraPreviewParams&,
+                                      const math::Vec3f& target,
+                                      PoseSupport* support = nullptr) noexcept
+       THREE args plus an optional out-pointer. There is no warning-string
+       overload: read the PoseSupport out-param (or call cameraPoseSupport) to
+       decide what to tell the user. Never fails; degenerate input still returns
+       a harmless pose.
+
+ Angle units are NOT uniform (this trips people up):
+   fovy   : DEGREES in the file (default 45) - solver multiplies by pi/180.
+   roll   : RADIANS (passed through).
+   angleA : RADIANS.  angleB: RADIANS.
+   CAM_TYPE_POINT_FIX: axis.x/axis.y are DEGREES (the LCP panel edits them as
+   degrees) - converted inside that branch only.
+
+ PoseSupport coverage (supportForType, camera_param.cpp:1180) - keep in sync:
+   exact     : XZ_PARA, POINT_FIX, EYEPOS_FIX
+   spherical : FOLLOW, OBJ_PARALLEL, MTXREG_PARALLEL, CUBE_PLANET, WONDER_PLANET,
+               TOWER, TOWER_POS, WATER_FOLLOW, WATER_PLANET, TRUNDLE, 2D_SLIDE,
+               MEDIAN_PLANET, MEDIAN_TOWER, RACE_FOLLOW, RAIL_WATCH,
+               FRONT_AND_BACK, GROUND, FOO_FIGHTER, FOO_FIGHTER_PLANET,
+               CHARMED_FIX, CHARMED_VECREG, CHARMED_VECREG_TOWER,
+               TRIPOD_PLANET, TWISTED_PASSAGE
+   none      : everything else (ANIM, RAIL_DEMO, RAIL_FOLLOW, DEAD, DPD, FREEZE,
+               BLACK_HOLE, BOSS_DONKETSU, INNER_CYLINDER, INWARD_SPHERE,
+               INWARD_TOWER, and any unknown/modded camtype).
+   Meaning: `exact` mirrors the decompiled translator; `spherical` puts the eye
+   on the same angleA/angleB/dist sphere the game uses but aims at the documented
+   fixed/task point; `none` just uses whatever eye the entry declares, so the
+   preview is honest-but-not-game-accurate. THE UI MUST SAY WHICH ONE IT IS
+   (see 8.4). Adding a camtype to supportForType without implementing its branch
+   in solveGameCameraPose is a lie - keep the two lists together.
+
+ Storage + undo
+   StageArchive (stage_archive.hpp): cameraParams() / setCameraParams(),
+   cameraDefaultVersion() (from gameType), writeCameraParams() on save,
+   tables()/objects() for placement rows, rebuildObjects(), save()/saveTo().
+   Undo: edit::mutateCameras(stage, stack, mutate, label)  (commands.hpp:172)
+   runs a lambda over the whole CameraParamTable and records a WHOLE-TABLE BYTE
+   SNAPSHOT before/after as one CameraTableCommand. Returns false and records
+   nothing if nothing changed. Whole-table snapshot is deliberate: a sparse
+   column vanishes when its last non-default value goes away, and a field-level
+   diff could not restore the original column offsets. Camera tables are a few
+   hundred bytes, so this is cheap. ALWAYS edit camera fields through
+   mutateCameras, never by poking stage.cameraParams() directly, or Ctrl+Z will
+   not cover the edit.
+
+
+--------------------------------------------------------------------------------
+5. THE VIEWPORT CAMERA (cpp/include/whitehole/render/camera.hpp)
+--------------------------------------------------------------------------------
+
+ ViewportCamera is an ORBIT RIG, not a free camera: {target, yawRadians,
+ pitchRadians, distance} plus the newer {fieldOfViewRadians, rollRadians}.
+ eye() = target - forward*distance. Everything (view matrix, picking ray, pan,
+ worldToScreen, the GL renderer) derives its basis from forward()/up()/right(),
+ so one bug in that basis breaks picking, gizmo drags and overlays at once.
+
+ Public surface the feature work touches:
+   static constexpr float kFieldOfView = 1.2217305F (70 deg), kNearPlane 10,
+   kFarPlane 60000 (legacy fallback), kMinDistance 5, kMaxDistance 150000,
+   kMaxDynamicNear 100, kMaxDynamicFar 500000, kMaxPitch 1.55F.
+   eye(), viewMatrix(), projectionMatrix(aspect), forward(), up(), right(),
+   screenToRay(x,y,w,h), orbit/pan/dolly/dollyTowardCursor, frameTarget,
+   lookAt(eye, at, fovRadians=-1, rollRadians=-1), pose(), setPose(pose),
+   fly(...), nearPlane(), farPlane(sceneRadius), worldToScreen(...).
+   fovRadians/rollRadians < 0 in lookAt() means "leave as is".
+
+ Forward-convention to keep straight (camera.cpp):
+   eye() = target + dist * (cos(pitch)*cos(yaw), sin(pitch), cos(pitch)*sin(yaw))
+   forward() = normalised (target - eye())
+   up()  = (0,+1,0) when cos(pitch) >= 0 else (0,-1,0) - the Java-parity flip;
+           pitch is clamped to +/- kMaxPitch (1.55 rad, ~1.2 deg short of
+           straight up/down) so that test never fires in normal navigation.
+ lookAt() (camera.cpp:180) is the exact inverse, no iteration needed:
+   target = at; d = normalise(eye - at); distance = clamp(|eye-at|, kMin, kMax);
+   pitch = clamp(asin(d.y), -kMaxPitch, kMaxPitch); yaw = atan2(d.z, d.x).
+   A zero-length shot keeps the current angles and just moves the pivot.
+   eye() therefore reproduces `eye` exactly EXCEPT within ~1.2 deg of straight
+   up/down, where the pitch clamp bites and the eye rides a few units along the
+   arc - acceptable for a preview, and worth a tooltip if a tower camera that
+   stares at the floor ever matters. fov/roll < 0 means "leave as is".
+
+ THE ORTHOGONAL-ROLL FIX (up(), camera.cpp:25) - do not regress this.
+   The no-roll path returns the Java-parity level vector verbatim, so an ordinary
+   editor frame is byte-identical to every previous build. Keep it that way:
+   `if (rollRadians == 0.0F) return level;` is a deliberate early-out.
+   The FIRST roll implementation rotated world Y about the view axis (Rodrigues).
+   Wrong: world Y is perpendicular to the view axis only when looking
+   horizontally, so at steep pitch the rotated vector is neither unit length nor
+   orthogonal to forward, and viewMatrix / screenToRay / worldToScreen stop
+   agreeing with each other. The scene renders sheared and clicks land on
+   whatever the projection of the broken basis says, not what you see.
+   What the code does instead (and what any rewrite must do):
+     level   = +/-Y (Java parity)
+     along   = dot(level, forward)
+     base    = normalise(level - forward * along)   // projected INTO the image plane
+     sideways= normalise(cross(forward, base))
+     up      = base * cos(roll) + sideways * sin(roll)
+   with a degenerate guard (|base| < 1e-6 -> return level: looking exactly along
+   the up axis leaves nothing to roll about). base/sideways are orthonormal by
+   construction, so up() stays unit and perpendicular to forward for any roll.
+   Consequence the next person must respect: roll lives in the BASIS, so every
+   consumer must go through up()/right(). Never rebuild a basis from world Y by
+   hand at a call site, or rolled previews will pick the wrong object.
+   right() = normalise(cross(forward, up())) with its own degenerate fallback
+   (cross against +Z, then the hard fallback {1,0,0}).
+
+
+--------------------------------------------------------------------------------
+6. THE CAMERA PREVIEW LIFECYCLE (cpp/src/render/viewport_win32.cpp)
+--------------------------------------------------------------------------------
+
+ Declared in viewport_win32.hpp:221-245.
+
+   struct ViewportWindow::CameraPreviewPose {
+       math::Vec3f eye{};
+       math::Vec3f at{};
+       float fovRadians{ViewportCamera::kFieldOfView};
+       float rollRadians{0.0F};
+   };                                    // NOTE: no `up` field. Up is derived.
+   void beginCameraPreview(const CameraPreviewPose&);
+   void updateCameraPreview(const CameraPreviewPose&);   // per-tweak
+   void endCameraPreview() noexcept;
+   bool cameraPreviewActive() const noexcept;
+   void setOnCameraPreviewExit(std::function<void()>);
+
+ Implementation facts (viewport_win32.cpp:1139-1170):
+   begin: on the FIRST call only, saves camera_.pose() and
+          camera_.fieldOfViewRadians. Roll is not saved - navigation never sets
+          it, so 0 is always the editing value. Cancels tween_ (a running
+          smooth-focus tween would fight the pose and then dump the camera
+          somewhere random when the preview ended).
+   update: camera_.lookAt(eye, at, fov, roll) + invalidate().
+   end: restores the saved pose + FOV, forces roll 0, cancels the tween.
+   Input swallow (handleMessage, viewport_win32.cpp:1193): while a preview is
+   active, ANY of WM_LBUTTONDOWN / WM_LBUTTONDBLCLK / WM_MBUTTONDOWN /
+   WM_RBUTTONDOWN / WM_MOUSEWHEEL / WM_MOUSEHWHEEL / WM_KEYDOWN / WM_SYSKEYDOWN /
+   WM_CHAR ends the preview, fires onCameraPreviewExit_, and returns 0 - the
+   gesture is swallowed so one click does not both exit and orbit/select.
+   WM_PAINT / WM_SIZE / WM_ERASEBKGND / focus still run, so the previewed frame
+   keeps redrawing while the shell moves. pollInput (fly keys, viewport_win32.cpp
+   :2271) is guarded the same way; flycam drag is not a way out.
+   Consequence for the GUI: the "Previewing" checkbox MUST be driven by
+   setOnCameraPreviewExit (the viewport tells you when it self-exits), not by
+   trusting your own toggle. That hook is ALREADY wired at gui_win32.cpp:3122,
+   where it only pushes the toast "Camera preview ended: editor navigation is
+   back." - the panel's job is to extend that same lambda to clear its
+   cameraPreviewOpen flag too. Do not register a second callback: the setter
+   stores ONE std::function, so a second call silently replaces the toast.
+
+ Design intent, in case someone is tempted to "improve" it: the preview reuses
+ the ONE editor camera rather than introducing a second camera or a second
+ frustum, so every downstream consumer (labels, gizmo, overlays, picking, the
+ reversed-Z projection) keeps working with zero changes. A second camera would
+ have needed the same roll fix in five call sites.
+
+--------------------------------------------------------------------------------
+7. TESTS (cpp/tests/core_tests.cpp, one giant file, ~50 test fns, plain asserts)
+--------------------------------------------------------------------------------
+
+ Registered as a single CTest test. Run the exe directly for faster output:
+   .\build-check\whitehole_core_tests.exe
+ Test functions are plain `void testFoo()` + a main() that calls them in order;
+ add yours to that list or it silently never runs.
+
+ Camera-relevant coverage already present:
+   testViewportCamera()        :273       orbit rig, basis, screenToRay parity.
+   testViewportCameraPreview() :354       NEW in bfc2bd2 - this IS the
+                                          preview-math spec. It asserts:
+                                          lookAt reproduces the requested eye to
+                                          0.01 and keeps `at` as the pivot;
+                                          forward() faces `at`; a straight-down
+                                          shot (a Tower at angleA = 90 deg) stays
+                                          finite and keeps the eye height within
+                                          1.0 despite the pitch clamp; a 0.6 rad
+                                          roll keeps up/right unit AND mutually
+                                          orthogonal AND actually rotated; the
+                                          ROLLED CENTRE RAY still lands on `at`
+                                          (this is the "clicks land where the
+                                          image says" guarantee, i.e. the proof
+                                          the orthogonal-roll fix works); corner
+                                          rays spread more at 90 deg fovy than at
+                                          30; projectionMatrix m11 equals
+                                          1/tan(fov/2) (the projection honours the
+                                          dynamic FOV); and a zero fovy does NOT
+                                          degenerate the frustum. Touch camera
+                                          math, run this first.
+   testReversedZDepthBuffer()  :434       near->+1 / far->0 contract.
+   testGizmoMath()             :577
+   testCameraParam()           :917       THE SPEC for section 4: field specs,
+                                          defaults per version, alias gating,
+                                          sparse column creation, round trips.
+   testStageCameras()          :2395      load/write of CameraParam.bcam in a
+                                          stage, SMG1 lowercase path.
+   testStageEditCommands()     :1742      includes mutateCameras undo/redo.
+
+ What section 8 still needs: a test that a row -> cameraPreviewParams ->
+ solveGameCameraPose -> CameraPreviewPose chain produces a finite pose for every
+ camtype class (exact/spherical/none) and that `none` rows never NaN. Do that in
+ core_tests, NOT by hand-clicking the GUI.
+
+
+--------------------------------------------------------------------------------
+8. NEXT TASK: THE CAMERAS PANEL (step by step, with the traps)
+--------------------------------------------------------------------------------
+
+ 8.0 THE FICTION THAT WAS REVERTED - do not repeat it. The draft assumed:
+       game::CameraRecord with eyePoint/focusPoint/focusOffset/rotX/rotY/rotZ/
+         nearPlane/farPlane/range/distance/priority/unknownIntA/screenL/R/T/B
+       cameraPreviewParams(table, row) -> that struct
+       solveGameCameraPose(params, target, std::string& outWarning)
+       cameraPoseSupport(params, pose)
+       flat row iteration like a BcsvTable of plain rows
+     ALL WRONG. The real names are in section 4. The real struct has
+     wpoint/axis/up/woffset/angleA/angleB/dist/roll/fovy/loffset/loffsetv.
+     There are no near/far/priority/screen-region fields in CameraPreviewParams
+     (they exist as BCAM columns - read them with getInt/getFloat if the panel
+     wants to show them, but the solver does not use them).
+
+ 8.1 WHERE THE DATA LIVES
+     auto& table = state.stage->cameraParams();          // StageArchive
+     for (const auto& cam : table.cameras()) { ... }     // row + id + camtype + version
+     state.stage is a std::optional<smg::StageArchive>   (gui_win32.cpp:157) and
+     the undo stack is `edit::UndoStack undoStack;`      (gui_win32.cpp:267), both
+     plain members of EditorState. Everything camera-ish must early-out on
+     !state.stage, and dirty-flag via markDirty(state) which recomputes
+     state.unsaved from undoStack.cursor() vs savedUndoCursor (:1264).
+
+ 8.2 THE CHAIN (this is the entire feature, honestly)
+     `state.viewport` is a VALUE MEMBER of EditorState
+     (`render::ViewportWindow viewport;`, gui_win32.cpp:166) - it is NOT a
+     pointer/unique_ptr, so use `state.viewport.foo()`, never `->`. It is only
+     usable once `state.viewportReady` is true (see the guard at :716).
+
+     smg::CameraPreviewParams p = smg::cameraPreviewParams(table, cam.row);
+     const math::Vec3f target = <section 9, the one open decision>;
+     smg::PoseSupport support = smg::PoseSupport::none;
+     const smg::GameCameraPose pose = smg::solveGameCameraPose(p, target, &support);
+     render::ViewportWindow::CameraPreviewPose vp;
+     vp.eye         = pose.eye;
+     vp.at          = pose.at;
+     vp.fovRadians  = pose.fovYRadians;
+     vp.rollRadians = pose.rollRadians;
+     state.viewport.beginCameraPreview(vp);   // or updateCameraPreview while live
+     pose.up is intentionally ignored: the viewport derives the basis from
+     eye/at plus roll (section 5). Do not add an `up` to CameraPreviewPose; if
+     you think you need it, the roll projection in up() is what you should fix.
+
+ 8.3 STATE TO ADD (keep it in EditorState, near the other viewport state)
+     bool     cameraPreviewOpen{false};     // the "Previewing" toggle
+     std::optional<std::size_t> cameraPreviewRow;   // which row owns the preview
+     math::Vec3f cameraPreviewTarget{};     // see 9 - cache it, show it, allow edits
+     Rules:
+       - Selecting a different row while previewing = updateCameraPreview, never
+         begin/end, so the shot does not flicker back to the editor camera.
+       - Unchecking Preview = endCameraPreview + clear cameraPreviewRow.
+       - ViewportWindow::setOnCameraPreviewExit must set
+         state.cameraPreviewOpen = false (the viewport self-exits on any
+         navigation gesture; see section 6).
+       - Closing/reloading a stage or switching zone MUST endCameraPreview first:
+         cameraPreviewRow indexes a table that is about to be replaced. Same
+         class of bug as the stale row indices applyRowEdit defends against.
+       - Row removal shifts indices: re-validate cameraPreviewRow against
+         table.size() every frame you use it, exactly like gui_win32.cpp:769
+         does for viewportSelected/selectedObject.
+
+ 8.4 WHAT THE PANEL SHOULD SHOW (match LaunchCamPlus' mental model, our UX)
+     - List of cameras: describeCameraId(parseCameraId(cam.id)) as the label,
+       camtype resolved via cameraTypeInfo/resolveCameraType for display, plus
+       the context from cameraContextLabel. Keep raw id visible too - modders
+       grep for it.
+     - Per field: cameraFieldSpecs() in order, filtered by
+       cameraFieldApplies(spec.scope, cam.context), grouped by spec.group, using
+       spec.label + spec.tooltip. Flag rows where !table.hasColumn(field) as
+       "(engine default)" - that distinction is the single most useful thing in
+       a BCAM editor, because a value the file omits can differ per version.
+     - A support badge: exact / spherical / approximate / unsupported from the
+       PoseSupport the solver reported. "none" is NOT an error - it means the
+       type is dynamic-only in game. Say "not reproducible outside the game",
+       not "failed".
+     - Editing any camera field goes through edit::mutateCameras (section 4) and
+       then updateCameraPreview with the freshly solved pose. Label the undo
+       entry with the field name ("Set fovy"), and do not push one entry per
+       slider frame: mutateCameras already no-ops when nothing changed, but a
+       dragged ImGui slider fires constantly - commit on release, or debounce by
+       comparing against the last applied value.
+
+ 8.5 BUILD + PROOF
+     Build both toolchains, run the tests, then the manual pass:
+       1. Open a SMG2 map with a camera table (a mission stage). An empty table is
+          NORMAL for many stages: loadFromArchive (stage_archive.cpp:175) always
+          builds an empty table stamped with the right engine version, and it
+          SILENTLY swallows a corrupt CameraParam.bcam via try/catch back to that
+          empty table. So "0 cameras" in the panel can mean no file, an empty
+          file, or a corrupt one - do not show an error, show "no cameras".
+       2. Preview an EYEPOS_FIX row: the image should not move when you change
+          dist (the eye is pinned) and should swing when you change wpoint.
+       3. Preview a FOLLOW row, change fovy 45 -> 90: the framing must widen and
+          clicks must still land on the object under the cursor (proves the
+          dynamic FOV reached projectionMatrix AND screenToRay, not just one).
+       4. Set roll != 0 on an XZ_PARA: horizon tilts, picking still aligns, and
+          the scene is not sheared (proves the orthogonal-roll projection).
+       5. Click in the viewport: preview must exit, camera must be EXACTLY where
+          it was (compare the target/distance readout before and after).
+     If 3 or 4 fails, the bug is in camera.cpp, not the panel.
+
+
+--------------------------------------------------------------------------------
+9. THE ONE OPEN DESIGN QUESTION: WHAT IS `target`?
+--------------------------------------------------------------------------------
+
+ solveGameCameraPose takes `target` = "the point the game tracks (Mario's
+ position for c:/s:/g:/o: cameras)". The editor has no running Mario, so the
+ panel must supply something. The solver is honest about it: pivot = target +
+ woffset, and point-fix style types aim AT target. Whatever you pick moves every
+ spherical/exact preview, so it must be visible and user-changeable, never
+ hidden magic.
+
+ Options, best first:
+   a) Selected object's position, else the nearest StartObj/PlayerStart, else the
+      origin - PLUS an explicit "Target" XYZ triplet in the panel the user can
+      override. Recommend THIS: honest, one field, and it makes the preview
+      genuinely useful for framing a shot of a specific prop.
+   b) StartObj/PlayerStart only (PlacementObject rows named like a start).
+      Closest to the game, but most stages will resolve to the origin anyway.
+   c) Origin always. Simplest, least useful; fine as option (a)'s fallback.
+ Whatever you choose, SHOW the resolved target next to the PoseSupport badge. A
+ preview that silently frames nothing looks exactly like a broken solver, and
+ this feature will get "the preview is wrong" reports that are really "the target
+ is the origin" reports.
+
+ PlacementObject comes from state.stage->objects() (iterating example at
+ gui_win32.cpp:645; refreshViewport rebuilds ViewportScene from it at :736).
+ Resolve names through db/name_table + db/object_db before string matching.
+
+ Still open (do not "fix" these without asking):
+   - Per-zone tables: StageArchive loads ONE CameraParam.bcam per open map file,
+     so "zone" is currently "the map file you opened". A per-zone picker implies a
+     StageArchive change first.
+   - Screen-region columns exist in the BCAM spec but are NOT modelled in
+     CameraPreviewParams, so the preview does not crop to the game's screen
+     rectangle. Deliberate: the decompiled translators apply it after the pose.
+     If someone adds it, it belongs in the projection, not in eye/at.
+   - SMG1 rows default several fields differently; hasColumn() is the only
+     trustworthy answer. Never render a defaulted 0 as if it were authored.
+   - CAM_TYPE_ANIM / RAIL_DEMO / cutscene types are keyframed over time and the
+     solver reports none. Grey them out with the badge; do not hide them. A time
+     slider + key sampling is its own feature.
+   - `roll` is passed straight through as radians. Whether the game treats it as
+     camera-local or screen-space was inferred from the translators, not verified
+     on hardware. If a runtime capture ever disagrees, the fix is one line in the
+     solver plus one test, not a rework.
+
+
+--------------------------------------------------------------------------------
+10. TOOLING TRAPS THAT COST REAL TIME (read before typing a command)
+--------------------------------------------------------------------------------
+
+ - This shell is Windows PowerShell. `&&` is NOT a statement separator - use ';'
+   or separate calls. Quote paths that contain spaces. Do not wrap a command in
+   another powershell.exe -Command.
+ - git is NOT on PATH here. Call it as:
+       & 'C:\Program Files\Git\cmd\git.exe' --no-pager <args>
+   Always --no-pager, or the call hangs on a pager.
+ - Build directories are tracked in this repo (section 2): stage files by
+   explicit path, and read `git status --short` before committing.
+ - Do not rewrite source files with PowerShell Set-Content/Out-File - it can
+   change encoding and line endings. Use the editor tool.
+ - The edit tool is chunk-limited (~6k chars per call). For a long document,
+   several inserts at known line numbers beat one big write - and re-check the
+   line count between inserts, because every insert shifts all later numbers.
+ - The file on disk is UTF-8 (the /utf-8 compile flag is there for a reason), but
+   PowerShell prints the Japanese camtype jpNames as mojibake. That is a console
+   rendering artefact, NOT corruption - verify with the editor tool before
+   "fixing" it. This exact false alarm already happened once here.
+ - A carried-over context summary is a SUMMARY, not ground truth. When it
+   disagrees with the header, the header wins, and that is why section 4 exists.
+   Re-read a signature before you call it; guessing an API is how the reverted
+   draft happened.
+
+--------------------------------------------------------------------------------
+11. RECENT COMMIT LADDER (oldest -> newest, all on origin/master)
+--------------------------------------------------------------------------------
+
+ 796c158  Add a BCSV editor with automatic custom-object registration
+ 2593860  Fix viewport flickering and make textured models visible again
+ 359266c  Revert the flip-model swap chain: it hides the viewport entirely
+ 6d93fe4  Fix viewport flickering: swap interval contradicted its own comment
+ db93a51  Update viewport_win32.cpp (merge-era touch-up)
+ dfcf520  Fix inside-out model rendering: the reversed-Z projection was inverted
+ 1872379  fix(gizmo): make axis translate drags linear instead of singular
+ dc2c5fd  fix(viewport): composite the GL child into the shell's back buffer
+ 302ec37  feat(cameras): read, edit and solve CameraParam.bcam
+ bfc2bd2  Viewport: look through a solved BCAM camera (preview mode)   <- HEAD
+
+ Two of those commits are the camera feature; the ones before them are the
+ viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
+ (reversed-Z: near->+1, far->0, clear to 0, GL_GEQUAL, and the x/y terms must
+ stay centric so GL_CW winding keeps working - see the comment at
+ camera.hpp:119) or 1872379 (gizmo drag singularity) without re-running the
+ matching test. Commit subjects here are terse imperative - sometimes Conventional
+ ("feat(cameras): ..."), sometimes plain prose. Either is fine; the WHY belongs in
+ the body, as a paragraph, never as a restatement of the diff.
+
+--------------------------------------------------------------------------------
+12. DEFINITION OF DONE FOR THE NEXT SESSION
+--------------------------------------------------------------------------------
+
+ 1) A Cameras panel that lists rows, shows every applicable field with its
+    default/authored provenance, edits through edit::mutateCameras, and survives
+    Ctrl+Z/Ctrl+Y with the sparse columns intact.
+ 2) A Preview toggle that drives begin/update/endCameraPreview, reports
+    PoseSupport honestly, exposes the target point, and un-checks itself when the
+    viewport self-exits.
+ 3) core_tests coverage for the row -> params -> solve -> pose chain across all
+    three PoseSupport classes, with no NaN for degenerate rows.
+ 4) Builds clean with /W4 AND -Wall -Wextra -Wpedantic -Wconversion; ctest green;
+    the five manual checks in 8.5 pass.
+ 5) This file updated in the same commit as the code it describes.
+
+================================================================================
+ END OF BLUEPRINT - keep it true, or delete it.
+================================================================================
+

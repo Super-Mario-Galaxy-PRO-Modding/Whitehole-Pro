@@ -177,6 +177,30 @@ struct EditorState {
     // edit and undo step).
     bool modelFailureLogged{false};
 
+    // --- in-game camera preview (CameraParam.bcam) ---------------------------
+    // Driven by the Cameras panel. Three separate ideas live here on purpose:
+    //   cameraSelectedRow  = the row whose fields the panel is showing,
+    //   cameraPreviewOpen  = the "Previewing" toggle,
+    //   cameraPreviewRow   = the row the LIVE preview is looking through.
+    // They differ the moment you click another row while previewing (the shot
+    // must follow without flickering back to the editor camera), and the last
+    // one is meaningless without the first two.
+    std::optional<std::size_t> cameraSelectedRow;
+    bool cameraPreviewOpen{false};
+    std::optional<std::size_t> cameraPreviewRow;
+    // The point the last solve was aimed at, cached so the panel can show it
+    // back. The game tracks Mario; the editor has no running Mario, so the
+    // panel resolves one (see cameraTargetChoice) and lets the author override
+    // it -- a preview that silently frames the origin looks exactly like a
+    // broken solver.
+    math::Vec3f cameraPreviewTarget{};
+    bool cameraTargetManual{false};
+    math::Vec3f cameraTargetOverride{};
+    // "Add camera" popover buffers, kept here because an ImGui popup reopens
+    // across frames while the user types.
+    char cameraNewId[64]{};
+    int cameraNewType{0};
+
     // Layout + visibility for the hosted WGL child window. The child is a real
     // HWND, so it always paints above the ImGui framebuffer: `placeViewportChild`
     // records where it should go, and `syncViewportChild` applies position and
@@ -302,6 +326,9 @@ struct EditorState {
     bool showProject{true};
     bool showObjects{true};
     bool showProperties{true};
+    // The BCAM camera table editor. Distinct from settings.showCameras, which
+    // toggles the in-viewport camera marker overlay; this one is a panel.
+    bool showCamerasPanel{false};
     bool showViewport{true};
     bool showLog{false}; // bottom drawer, hidden until needed
     bool showProblems{false}; // validation findings, docked beside the log
@@ -826,6 +853,15 @@ void syncTransformBuffers(EditorState& state) {
 bool markDirty(EditorState& state);
 void commitDragAsUndo(EditorState& state, const char* label);
 void handleGizmoEdit(EditorState& state, const render::GizmoEdit& edit);
+// Camera preview, defined beside the Cameras panel further down. Declared here
+// because every stage-replacing path (open map, open game, switch zone) has to
+// drop the preview BEFORE the camera table it indexes is replaced -- a preview
+// left pointing into a dead table is the same class of bug the stale row
+// indices in refreshViewport() defend against.
+void endCameraPreview(EditorState& state);
+// Re-solves the live preview row and hands the pose to the viewport. No-op
+// (and returns false) when nothing is being previewed.
+[[nodiscard]] bool applyCameraPreview(EditorState& state);
 
 // Applies one gizmo message to the whole selection. Begin snapshots every
 // member, Update paints live (snapped unless Shift is held), End commits one
@@ -1309,6 +1345,10 @@ void performUndo(EditorState& state) {
         if (state.selectedRail) {
             refreshRailBuffers(state); // the undo may have moved the row being edited
         }
+        // A camera edit is a whole-table byte snapshot, so undo can replace the
+        // camera table and its rows: re-solve the live preview against the
+        // restored data (this closes the preview if its row went away).
+        (void)applyCameraPreview(state);
         pushToast(state, "Undid " + state.undoStack.redoLabel() + ".");
     }
 }
@@ -1326,6 +1366,7 @@ void performRedo(EditorState& state) {
         if (state.selectedRail) {
             refreshRailBuffers(state); // the redo may have moved the row being edited
         }
+        (void)applyCameraPreview(state);
         pushToast(state, "Redid " + state.undoStack.undoLabel() + ".");
     }
 }
@@ -1885,6 +1926,9 @@ void refreshZoneCollision(EditorState& state) {
 }
 
 void openMapImpl(EditorState& state, const std::filesystem::path& path) {
+    // The camera preview indexes the table that is about to be replaced, so it
+    // ends first, before the old stage goes away.
+    endCameraPreview(state);
     state.stage = smg::StageArchive::openMapFile(path);
     state.zones = {state.stage->stageName()};
     state.selectedZone = 0;
@@ -1904,6 +1948,8 @@ void openMapImpl(EditorState& state, const std::filesystem::path& path) {
 }
 
 void openGameImpl(EditorState& state, const std::filesystem::path& path, bool quiet = false) {
+    // Ends any live camera preview first: this drops the stage further down.
+    endCameraPreview(state);
     state.game.emplace(path);
     if (state.game->gameType() == 0) {
         state.game.reset();
@@ -1963,6 +2009,8 @@ void selectZone(EditorState& state, int index) {
     if (index < 0 || static_cast<std::size_t>(index) >= state.zones.size()) {
         return;
     }
+    // Same reason as openMapImpl: the camera table is swapped below.
+    endCameraPreview(state);
     state.selectedZone = index;
     const auto& zone = state.zones[static_cast<std::size_t>(index)];
     if (state.game) {
@@ -3004,6 +3052,700 @@ void drawPropertiesPanel(EditorState& state) {
     ImGui::End();
 }
 
+// ---- in-game cameras (CameraParam.bcam) ------------------------------------
+//
+// The last piece of the camera feature. Reading, editing and solving the zone's
+// camera table landed in 302ec37 and the viewport learned to look through a
+// solved pose in bfc2bd2, but nothing in the GUI connected the two. This panel
+// is the connection: it lists the rows, shows every applicable column with its
+// authored/engine-default provenance, edits them through edit::mutateCameras
+// (one undo step per commit) and can hand one row's solved pose to the viewport
+// as a live preview while the parameters are tweaked.
+
+// The column the parameter grid lines its widgets up on. Fixed rather than
+// content-sized, so a long field name cannot shove the widget off the edge.
+constexpr float kCameraFieldLabelWidth = 150.0F;
+
+const char* cameraGroupLabel(smg::CameraFieldGroup group) {
+    switch (group) {
+    case smg::CameraFieldGroup::identity: return "Identity";
+    case smg::CameraFieldGroup::framing: return "Framing";
+    case smg::CameraFieldGroup::behavior: return "Behavior";
+    case smg::CameraFieldGroup::flags: return "Flags";
+    }
+    return "Parameters";
+}
+
+const char* cameraEngineName(std::uint32_t version) {
+    return version == smg::kCameraVersionSmg1 ? "SMG1" : "SMG2";
+}
+
+// The badge shown next to a camera. "none" is NOT an error: those camtypes are
+// solved by the game from live state (event, demo, animation, boss cameras), so
+// the preview can only show the eye the entry declares. Saying that out loud is
+// the difference between an author trusting the preview and filing a bug.
+const char* cameraSupportLabel(smg::PoseSupport support) {
+    switch (support) {
+    case smg::PoseSupport::exact: return "exact";
+    case smg::PoseSupport::spherical: return "approximate";
+    case smg::PoseSupport::none: return "not reproducible outside the game";
+    }
+    return "unknown";
+}
+
+const char* cameraSupportTooltip(smg::PoseSupport support) {
+    switch (support) {
+    case smg::PoseSupport::exact:
+        return "The preview reproduces the decompiled translator for this camtype.";
+    case smg::PoseSupport::spherical:
+        return "The eye sits on the same angleA/angleB/dist sphere the game uses, but "
+               "the look-at point is the tracked target rather than a live game object.";
+    case smg::PoseSupport::none:
+        return "The game solves this camtype from live state (cutscene, animation, boss "
+               "logic), so the preview shows the eye the entry declares and cannot "
+               "reproduce the real shot.";
+    }
+    return "";
+}
+
+// Human-readable engine default, for the dim-label tooltip. A sparse file may
+// simply not store a column, and then its value is the engine's, per version.
+std::string cameraDefaultText(const smg::CameraFieldSpec& spec, std::uint32_t version) {
+    const smg::BcsvValue& value = smg::cameraFieldDefault(spec, version);
+    if (const auto* number = std::get_if<float>(&value)) {
+        char buffer[48]{};
+        std::snprintf(buffer, sizeof(buffer), "%.4g", static_cast<double>(*number));
+        return buffer;
+    }
+    if (const auto* integer = std::get_if<std::int32_t>(&value)) {
+        return std::to_string(*integer);
+    }
+    if (const auto* text = std::get_if<std::string>(&value)) {
+        return *text;
+    }
+    return "0";
+}
+
+// The camtypes one engine version actually has: an SMG1 zone cannot use a class
+// that only exists in SMG2's engine. Aliases stay in the list -- the file stores
+// what it stores, and resolveCameraType maps them when the game loads them.
+std::vector<const smg::CameraTypeInfo*> cameraTypesForVersion(std::uint32_t version) {
+    std::vector<const smg::CameraTypeInfo*> entries;
+    for (const auto& info : smg::cameraTypes()) {
+        if (version == smg::kCameraVersionSmg1 ? info.smg1 : info.smg2) {
+            entries.push_back(&info);
+        }
+    }
+    return entries;
+}
+
+// True when the table already holds a camera with this identity. Two cameras
+// with the same id would make the game take whichever it finds first, which is
+// never what the author meant when they typed the id.
+bool cameraIdTaken(const smg::CameraParamTable& table, std::string_view id) {
+    const smg::CameraId wanted = smg::parseCameraId(id);
+    if (wanted.context == smg::CameraContext::invalid) {
+        return false;
+    }
+    for (const auto& camera : table.cameras()) {
+        const smg::CameraId existing = smg::parseCameraId(camera.id);
+        if (existing.context == wanted.context && existing.number == wanted.number &&
+            existing.name == wanted.name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The next unused "c:%04x" camera-area id, so "Add camera" cannot silently
+// collide with a camera that is already in the zone.
+std::string nextFreeCubeCameraId(const smg::CameraParamTable& table) {
+    for (std::int32_t candidate = 0; candidate < 0x10000; ++candidate) {
+        const std::string id = smg::cubeCameraIdForArg(candidate);
+        if (!cameraIdTaken(table, id)) {
+            return id;
+        }
+    }
+    return smg::cubeCameraIdForArg(0);
+}
+
+// A placement row that stands where the game drops the player in: the Start
+// table ("start"), or an Objects row named like the player marker. This is the
+// automatic preview target below.
+bool looksLikeStartObject(const smg::PlacementObject& object) {
+    if (whitehole::util::toLower(object.kind) == "start") {
+        return true;
+    }
+    const std::string name = whitehole::util::toLower(object.name);
+    return name == "startobj" || name == "playerstart" || name == "mario";
+}
+
+// Where a preview is aimed, and why. The game tracks Mario; the editor has no
+// running Mario, so the panel resolves a target in this order:
+//   1. an explicit point the author typed (always wins),
+//   2. the selected object's position,
+//   3. the zone's start object,
+//   4. the world origin.
+// `source` is shown in the panel, because a preview that silently frames the
+// origin looks exactly like a broken solver -- and "the preview is wrong"
+// reports that are really "the target is the origin" reports cost real time.
+struct CameraTargetChoice {
+    math::Vec3f point{};
+    const char* source{"world origin"};
+};
+
+CameraTargetChoice cameraTargetChoice(const EditorState& state) {
+    if (state.cameraTargetManual) {
+        return {state.cameraTargetOverride, "manual target"};
+    }
+    if (state.stage) {
+        const auto& objects = state.stage->objects();
+        if (state.selectedObject && *state.selectedObject < objects.size()) {
+            return {objects[*state.selectedObject].position, "selected object"};
+        }
+        for (const auto& object : objects) {
+            if (looksLikeStartObject(object)) {
+                return {object.position, "start object"};
+            }
+        }
+    }
+    return {{}, "world origin"};
+}
+
+void endCameraPreview(EditorState& state) {
+    if (state.viewportReady) {
+        // A deliberate end: the viewport restores the editing camera and does
+        // NOT fire its exit hook (that one is for gestures ending a preview).
+        state.viewport.endCameraPreview();
+    }
+    state.cameraPreviewOpen = false;
+    state.cameraPreviewRow.reset();
+}
+
+bool applyCameraPreview(EditorState& state) {
+    if (!state.cameraPreviewOpen) {
+        return false;
+    }
+    if (!state.stage || !state.viewportReady || !state.cameraPreviewRow ||
+        *state.cameraPreviewRow >= state.stage->cameraParams().size()) {
+        // The row, or the whole table, went away under the shot. Leave the
+        // preview instead of solving a stale index.
+        endCameraPreview(state);
+        return false;
+    }
+    const smg::CameraParamTable& table = state.stage->cameraParams();
+    const smg::CameraPreviewParams params = smg::cameraPreviewParams(table, *state.cameraPreviewRow);
+    const CameraTargetChoice target = cameraTargetChoice(state);
+    state.cameraPreviewTarget = target.point;
+    smg::PoseSupport support = smg::PoseSupport::none;
+    const smg::GameCameraPose pose = smg::solveGameCameraPose(params, target.point, &support);
+    render::ViewportWindow::CameraPreviewPose view;
+    view.eye = pose.eye;
+    view.at = pose.at;
+    view.fovRadians = pose.fovYRadians;
+    view.rollRadians = pose.rollRadians;
+    // pose.up is deliberately dropped: the viewport derives its basis from
+    // eye/at plus roll, which is what keeps the rolled preview and picking in
+    // agreement (see the orthogonal-roll note in render/camera.cpp).
+    if (state.viewport.cameraPreviewActive()) {
+        // Every later tweak goes through update: begin() would re-save the
+        // preview's own pose as the "editing camera", and ending the preview
+        // would then leave the editor camera inside the shot.
+        state.viewport.updateCameraPreview(view);
+    } else {
+        state.viewport.beginCameraPreview(view);
+    }
+    return true;
+}
+
+// The camtype combo for one row. Switching class changes how every other column
+// is interpreted, so it goes through the same undo path as any field edit, and
+// the support badge above it updates in the same frame. A camtype this registry
+// does not know is a modder's own class: it is shown verbatim and never
+// silently rewritten.
+bool drawCameraTypeEditor(EditorState& state, std::size_t row, const std::string& stored,
+                          std::uint32_t version) {
+    const std::vector<const smg::CameraTypeInfo*> types = cameraTypesForVersion(version);
+    const smg::CameraTypeInfo* known = smg::cameraTypeInfo(stored);
+    std::string preview = stored;
+    if (known != nullptr) {
+        preview = std::string(known->id);
+        preview += "  (";
+        preview += known->label;
+        preview += ")";
+    }
+    bool wrote = false;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##camtype", preview.c_str())) {
+        for (const smg::CameraTypeInfo* info : types) {
+            std::string label(info->id);
+            label += "  ";
+            label += info->label;
+            if (!info->aliasOf.empty()) {
+                label += "  (alias of ";
+                label += info->aliasOf;
+                label += ")";
+            }
+            const bool selected = info->id == stored;
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                const std::string picked(info->id);
+                wrote = edit::mutateCameras(*state.stage, state.undoStack,
+                                            [row, picked](smg::CameraParamTable& cameras) {
+                                                cameras.setString(row, "camtype", picked);
+                                            },
+                                            "Set camtype");
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", std::string(info->description).c_str());
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return wrote;
+}
+
+void drawCamerasPanel(EditorState& state) {
+    if (!state.showCamerasPanel) {
+        return;
+    }
+    if (!ImGui::Begin("Cameras", &state.showCamerasPanel)) {
+        ImGui::End();
+        return;
+    }
+    if (!state.stage) {
+        ImGui::TextDisabled("No zone loaded.");
+        ImGui::TextWrapped("Open a map archive, or pick a zone in the Project panel, to edit "
+                           "its CameraParam.bcam camera table here.");
+        ImGui::End();
+        return;
+    }
+
+    smg::CameraParamTable& table = state.stage->cameraParams();
+    const std::size_t rowCount = table.size();
+
+    // Row indices only mean something while the table has not moved under them
+    // (undo, another zone, a removal), so both are re-validated every frame --
+    // exactly like refreshViewport re-validates the object selection.
+    if (state.cameraSelectedRow && *state.cameraSelectedRow >= rowCount) {
+        state.cameraSelectedRow.reset();
+    }
+    if (state.cameraPreviewRow && *state.cameraPreviewRow >= rowCount) {
+        endCameraPreview(state);
+    }
+
+    ImGui::TextDisabled("%d camera%s in CameraParam.bcam", static_cast<int>(rowCount),
+                        rowCount == 1 ? "" : "s");
+    // An empty table is NORMAL, not an error: many stages ship no
+    // CameraParam.bcam at all, and StageArchive swallows a corrupt one back to
+    // an empty table, so "no cameras" covers all three cases.
+    if (rowCount == 0) {
+        ImGui::TextWrapped("No cameras. That is normal for many stages -- add one below if "
+                           "this zone needs a camera of its own.");
+    }
+
+    const float halfWidth = (ImGui::GetContentRegionAvail().x - 8.0F) * 0.5F;
+    if (ImGui::Button("Add camera...", ImVec2(halfWidth, 0.0F))) {
+        std::snprintf(state.cameraNewId, sizeof(state.cameraNewId), "%s",
+                      nextFreeCubeCameraId(table).c_str());
+        state.cameraNewType = 0;
+        ImGui::OpenPopup("##addcamera");
+    }
+    ImGui::SetItemTooltip("Append a camera row and select it  (undoable)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!state.cameraSelectedRow.has_value());
+    if (ImGui::Button("Remove camera", ImVec2(halfWidth, 0.0F))) {
+        // Removing a row shifts every later index, so a live preview is ended
+        // rather than silently re-aimed at a different camera.
+        endCameraPreview(state);
+        const std::size_t victim = *state.cameraSelectedRow;
+        if (edit::mutateCameras(*state.stage, state.undoStack,
+                                [victim](smg::CameraParamTable& cameras) {
+                                    cameras.removeCamera(victim);
+                                },
+                                "Remove camera")) {
+            state.cameraSelectedRow.reset();
+            markDirty(state);
+            pushToast(state, "Removed the camera. Ctrl+Z puts it back.");
+        }
+    }
+    ImGui::SetItemTooltip("Remove the selected camera row  (undoable)");
+    ImGui::EndDisabled();
+
+    if (ImGui::BeginPopup("##addcamera")) {
+        ImGui::SeparatorText("New camera");
+        ImGui::SetNextItemWidth(260.0F);
+        ImGui::InputText("Id", state.cameraNewId, sizeof(state.cameraNewId));
+        ImGui::SetItemTooltip("c: / s: / e: / g: / o: -- the id the game looks the camera up by");
+        const std::vector<const smg::CameraTypeInfo*> types =
+            cameraTypesForVersion(table.defaultVersion());
+        if (state.cameraNewType < 0 ||
+            static_cast<std::size_t>(state.cameraNewType) >= types.size()) {
+            state.cameraNewType = 0;
+        }
+        const smg::CameraTypeInfo* chosen =
+            types.empty() ? nullptr : types[static_cast<std::size_t>(state.cameraNewType)];
+        const std::string preview = chosen != nullptr ? std::string(chosen->id)
+                                                      : std::string("(no classes for this game)");
+        ImGui::SetNextItemWidth(260.0F);
+        if (ImGui::BeginCombo("Type", preview.c_str())) {
+            for (std::size_t index = 0; index < types.size(); ++index) {
+                const smg::CameraTypeInfo* info = types[index];
+                std::string label(info->id);
+                label += "  ";
+                label += info->label;
+                if (!info->aliasOf.empty()) {
+                    label += "  (alias of ";
+                    label += info->aliasOf;
+                    label += ")";
+                }
+                const bool selected = static_cast<int>(index) == state.cameraNewType;
+                if (ImGui::Selectable(label.c_str(), selected)) {
+                    state.cameraNewType = static_cast<int>(index);
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", std::string(info->description).c_str());
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("The camera class the game instantiates for this row");
+
+        const std::string newId(state.cameraNewId);
+        const bool duplicate = cameraIdTaken(table, newId);
+        const bool knownContext =
+            smg::parseCameraId(newId).context != smg::CameraContext::invalid;
+        ImGui::BeginDisabled(newId.empty() || duplicate || chosen == nullptr);
+        if (ImGui::Button("Add", ImVec2(100.0F, 0.0F))) {
+            // The row index the new camera will get, captured before the
+            // mutation so the panel can select it immediately.
+            const std::size_t newRow = table.size();
+            const std::string camtype(chosen->id);
+            const std::uint32_t version = table.defaultVersion();
+            if (edit::mutateCameras(*state.stage, state.undoStack,
+                                    [id = newId, camtype, version](smg::CameraParamTable& cameras) {
+                                        // The row index is not needed here: the
+                                        // panel captured table.size() above.
+                                        (void)cameras.addCamera(id, camtype, version);
+                                    },
+                                    "Add camera")) {
+                state.cameraSelectedRow = newRow;
+                markDirty(state);
+                pushToast(state, "Added " + newId + " to the camera table. Ctrl+Z undoes it.");
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0F, 0.0F))) {
+            ImGui::CloseCurrentPopup();
+        }
+        const Palette& palette = themePalette(state.settings.darkMode);
+        if (duplicate) {
+            ImGui::TextColored(toImVec4(palette.error), "That id is already in the table.");
+        } else if (!knownContext && !newId.empty()) {
+            ImGui::TextColored(toImVec4(palette.unsaved),
+                               "The game only looks up c:, s:, e:, g: and o: ids.");
+        }
+        ImGui::EndPopup();
+    }
+
+    // One snapshot per frame, taken AFTER the popup so a row added this frame
+    // shows up immediately: clicking a row or editing a field mutates the table,
+    // and iterating a container while it is being edited is how an editor
+    // crashes.
+    const std::vector<smg::CameraParamTable::Camera> cameras = table.cameras();
+    const float listHeight = ImGui::GetTextLineHeight() * 8.0F;
+    if (ImGui::BeginChild("##cameralist", ImVec2(0.0F, listHeight), true)) {
+        for (const auto& camera : cameras) {
+            const smg::CameraId id = smg::parseCameraId(camera.id);
+            const smg::CameraTypeInfo* info = smg::cameraTypeInfo(camera.camtype);
+            // Friendly English first (the raw ids can carry Japanese event names
+            // the default font cannot draw), the stored camtype after it.
+            std::string label = smg::describeCameraId(id);
+            label += "  ";
+            label += info != nullptr ? std::string(info->label) : camera.camtype;
+            const bool selected = state.cameraSelectedRow == camera.row;
+            ImGui::PushID(static_cast<int>(camera.row));
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                state.cameraSelectedRow = camera.row;
+                // Selecting another row while previewing re-aims the live shot
+                // instead of dropping it, so cameras can be compared without
+                // losing the editing camera on every click.
+                if (state.cameraPreviewOpen) {
+                    state.cameraPreviewRow = camera.row;
+                    (void)applyCameraPreview(state);
+                }
+            }
+            ImGui::PopID();
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s\n%s\n%s", camera.id.c_str(),
+                                  smg::cameraContextLabel(id.context),
+                                  std::string(camera.camtype).c_str());
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (!state.cameraSelectedRow) {
+        ImGui::TextDisabled("Select a camera above to edit its parameters.");
+        ImGui::End();
+        return;
+    }
+    // Read the identity through the typed getters rather than the snapshot: the
+    // snapshot is from the top of this frame, and undo can replace the table
+    // between then and now.
+    const std::size_t row = *state.cameraSelectedRow;
+    const std::string cameraId = table.getString(row, "id");
+    const std::string cameraTypeStored = table.getString(row, "camtype");
+    const smg::CameraId identity = smg::parseCameraId(cameraId);
+    const std::uint32_t version = table.engineVersion(row);
+
+    ImGui::SeparatorText(smg::describeCameraId(identity).c_str());
+    ImGui::TextDisabled("%s  -  %s, engine %s", smg::cameraContextLabel(identity.context),
+                        smg::formatCameraId(identity).c_str(), cameraEngineName(version));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy id")) {
+        ImGui::SetClipboardText(cameraId.c_str());
+        setStatus(state, "Camera id copied to the clipboard.");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("The stored id, byte for byte:\n%s", cameraId.c_str());
+    }
+    ImGui::TextDisabled("camtype %s", cameraTypeStored.c_str());
+
+    // ---- preview -----------------------------------------------------------
+    const smg::PoseSupport support = smg::cameraPoseSupport(cameraTypeStored, version);
+    const bool previewLive = state.viewportReady && state.viewport.cameraPreviewActive();
+    bool wanted = previewLive && state.cameraPreviewRow == row;
+    ImGui::BeginDisabled(!state.viewportReady);
+    if (ImGui::Checkbox("Previewing", &wanted)) {
+        if (wanted) {
+            state.cameraPreviewOpen = true;
+            state.cameraPreviewRow = row;
+            (void)applyCameraPreview(state);
+        } else {
+            endCameraPreview(state);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(
+        state.viewportReady
+            ? "Look through this camera in the viewport. Any navigation gesture (or a click) "
+              "ends the preview and puts the editor camera back exactly where it was."
+            : "The 3D viewport is not available, so there is nothing to preview through.");
+    ImGui::SameLine();
+    const Palette& palette = themePalette(state.settings.darkMode);
+    const Rgba badge = support == smg::PoseSupport::exact       ? palette.accentFg
+                       : support == smg::PoseSupport::spherical ? palette.unsaved
+                                                                : palette.textDim;
+    ImGui::TextColored(toImVec4(badge), "Pose: %s", cameraSupportLabel(support));
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", cameraSupportTooltip(support));
+    }
+
+    // ---- tracked target ----------------------------------------------------
+    // The solver is given the point the game would be tracking (Mario). The
+    // editor has no running Mario, so a point is resolved and SHOWN here rather
+    // than hidden in the solve: a preview that silently frames the origin looks
+    // exactly like a broken solver.
+    ImGui::SeparatorText("Tracked target");
+    const CameraTargetChoice choice = cameraTargetChoice(state);
+    ImGui::TextDisabled("(%.1f, %.1f, %.1f)  from %s", static_cast<double>(choice.point.x),
+                        static_cast<double>(choice.point.y), static_cast<double>(choice.point.z),
+                        choice.source);
+    bool manual = state.cameraTargetManual;
+    if (ImGui::Checkbox("Manual target", &manual)) {
+        if (manual) {
+            // Seeded from the automatic choice, so ticking the box never jumps
+            // the shot to the origin.
+            state.cameraTargetOverride = choice.point;
+        }
+        state.cameraTargetManual = manual;
+        (void)applyCameraPreview(state);
+    }
+    ImGui::SetItemTooltip(
+        "Track a point you type instead of the selection / start object. The game itself "
+        "tracks Mario here; the preview cannot know where he would be.");
+    if (state.cameraTargetManual) {
+        float values[3] = {state.cameraTargetOverride.x, state.cameraTargetOverride.y,
+                           state.cameraTargetOverride.z};
+        static constexpr const char* kAxisNames[3] = {"X", "Y", "Z"};
+        const float axisWidth = (ImGui::GetContentRegionAvail().x - 24.0F) / 3.0F;
+        bool moved = false;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (axis != 0) {
+                ImGui::SameLine();
+            }
+            ImGui::SetNextItemWidth(axisWidth);
+            moved |= ImGui::DragFloat((std::string("##cameratarget") + kAxisNames[axis]).c_str(),
+                                      &values[axis], 5.0F, 0.0F, 0.0F, "%.1f");
+        }
+        if (moved) {
+            // Live, and deliberately not undoable: this is a preview setting,
+            // not file data.
+            state.cameraTargetOverride = {values[0], values[1], values[2]};
+            (void)applyCameraPreview(state);
+        }
+    }
+
+    // What the solve actually produces, from the same numbers the live preview
+    // was handed. A camera that aims somewhere unexpected then shows up here as
+    // data instead of as a mystery in the viewport.
+    const smg::CameraPreviewParams params = smg::cameraPreviewParams(table, row);
+    const math::Vec3f solveTarget = previewLive ? state.cameraPreviewTarget : choice.point;
+    const smg::GameCameraPose pose = smg::solveGameCameraPose(params, solveTarget);
+    ImGui::TextDisabled("eye (%.0f, %.0f, %.0f) -> at (%.0f, %.0f, %.0f)",
+                        static_cast<double>(pose.eye.x), static_cast<double>(pose.eye.y),
+                        static_cast<double>(pose.eye.z), static_cast<double>(pose.at.x),
+                        static_cast<double>(pose.at.y), static_cast<double>(pose.at.z));
+    ImGui::TextDisabled("fovy %.1f deg  roll %.4f rad  dist %.1f",
+                        static_cast<double>(params.fovy), static_cast<double>(pose.rollRadians),
+                        static_cast<double>(params.dist));
+
+    // ---- parameters --------------------------------------------------------
+    // Every column the engine can carry, filtered to the ones this camera's id
+    // context actually uses and grouped the way the community documents them.
+    // The widget always shows the value the row solves with, whether it came
+    // from the file or from the engine default: a dim name means the file does
+    // not store that column at all (hover for the exact default). The sparse
+    // model only ever creates columns, never removes them, so a defaulted value
+    // stays defaulted until it is edited -- which is also what keeps an
+    // untouched file byte-exact through a round trip.
+    ImGui::SeparatorText("Parameters");
+    ImGui::TextDisabled("Dim name = engine default, bright = stored value.");
+    bool wrote = false;
+    int lastGroup = -1;
+    const std::vector<smg::CameraFieldSpec>& specs = smg::cameraFieldSpecs();
+    for (std::size_t specIndex = 0; specIndex < specs.size(); ++specIndex) {
+        const smg::CameraFieldSpec& spec = specs[specIndex];
+        // id and version are identity, not parameters: the id decides which part
+        // of the stage activates the camera, and the version decides which
+        // defaults every other column resolves to. "Add camera" sets both, and
+        // editing them in place would silently reinterpret the whole row.
+        if (spec.name == "id" || spec.name == "version") {
+            continue;
+        }
+        if (!smg::cameraFieldApplies(spec.scope, identity.context)) {
+            continue;
+        }
+        if (lastGroup != static_cast<int>(spec.group)) {
+            lastGroup = static_cast<int>(spec.group);
+            ImGui::SeparatorText(cameraGroupLabel(spec.group));
+        }
+        ImGui::PushID(static_cast<int>(specIndex));
+        const std::string label =
+            spec.label.empty() ? std::string(spec.name) : std::string(spec.label);
+        const std::string tooltip(spec.tooltip);
+        const std::string undoLabel = "Set " + std::string(spec.name);
+        const bool authored = table.hasColumn(spec.name);
+        bool fieldWrote = false;
+
+        // ImGui draws a widget's label to the RIGHT of the widget, which would
+        // push a long field name past the panel edge, so this grid draws its own
+        // fixed label column and hands the widgets a hidden "##" label.
+        ImGui::AlignTextToFramePadding();
+        if (authored) {
+            ImGui::TextUnformatted(label.c_str());
+        } else {
+            ImGui::TextDisabled("%s", label.c_str());
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            if (authored) {
+                ImGui::SetTooltip("%s\nField: %s", tooltip.c_str(),
+                                  std::string(spec.name).c_str());
+            } else {
+                ImGui::SetTooltip("%s\nField: %s\nThe file does not store this column, so the "
+                                  "row runs on the %s engine default (%s). Editing it creates "
+                                  "the column for every camera in the table.",
+                                  tooltip.c_str(), std::string(spec.name).c_str(),
+                                  cameraEngineName(version),
+                                  cameraDefaultText(spec, version).c_str());
+            }
+        }
+        ImGui::SameLine(kCameraFieldLabelWidth);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+
+        if (spec.name == "camtype") {
+            fieldWrote = drawCameraTypeEditor(state, row, cameraTypeStored, version);
+        } else if (spec.type == smg::BcsvType::floatingPoint) {
+            float value = table.getFloat(row, spec.name);
+            ImGui::DragFloat("##value", &value, 0.1F, 0.0F, 0.0F, "%.4f");
+            if (ImGui::IsItemActive() &&
+                (spec.name == "angleA" || spec.name == "angleB" || spec.name == "roll")) {
+                // These three are file-native radians; the readout while dragging
+                // adds the degrees an author actually thinks in.
+                ImGui::SetTooltip("%s = %.4f rad (%.2f deg)", label.c_str(),
+                                  static_cast<double>(value),
+                                  static_cast<double>(value) * 57.29577951308232);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                // Committed on release, not per frame: a dragged slider fires
+                // every frame, and one undo entry per frame would bury the
+                // history (mutateCameras would also record hundreds of steps).
+                const float applied = value;
+                fieldWrote = edit::mutateCameras(
+                    *state.stage, state.undoStack,
+                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                        cameras.setFloat(row, name, applied);
+                    },
+                    undoLabel);
+            }
+        } else if (spec.type == smg::BcsvType::fixedString ||
+                   spec.type == smg::BcsvType::stringOffset) {
+            char scratch[128]{};
+            std::snprintf(scratch, sizeof(scratch), "%s", table.getString(row, spec.name).c_str());
+            ImGui::InputText("##value", scratch, sizeof(scratch));
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                const std::string applied(scratch);
+                fieldWrote = edit::mutateCameras(
+                    *state.stage, state.undoStack,
+                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                        cameras.setString(row, name, applied);
+                    },
+                    undoLabel);
+            }
+        } else {
+            // integer / integer2 / shortInteger / byte. integer2 is the packed
+            // bitfield type, so it reads and writes as hex, like the BCSV
+            // editor's bitfield cells.
+            const bool packed =
+                spec.type == smg::BcsvType::integer2 || spec.type == smg::BcsvType::byte;
+            int shown = static_cast<int>(table.getInt(row, spec.name));
+            ImGui::InputInt("##value", &shown, 1, 100,
+                            packed ? ImGuiInputTextFlags_CharsHexadecimal
+                                   : ImGuiInputTextFlags_None);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                const std::int32_t applied = static_cast<std::int32_t>(shown);
+                fieldWrote = edit::mutateCameras(
+                    *state.stage, state.undoStack,
+                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                        cameras.setInt(row, name, applied);
+                    },
+                    undoLabel);
+            }
+        }
+        ImGui::PopID();
+        wrote = wrote || fieldWrote;
+    }
+
+    if (wrote) {
+        // Every camera edit goes through edit::mutateCameras, so Ctrl+Z covers
+        // it. The camera table does not feed the scene (the viewport's camera
+        // markers come from the Objects tables), so a live preview is the only
+        // thing that has to follow the new numbers.
+        markDirty(state);
+        (void)applyCameraPreview(state);
+    }
+    ImGui::End();
+}
+
 // Creates the hosted WGL viewport child window and routes its picking back into
 // the editor selection. Returns false when OpenGL cannot be initialised, in
 // which case the Viewport panel explains why instead of showing a blank hole.
@@ -3118,8 +3860,12 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
     state.viewport.setOnGizmo([&state](const render::GizmoEdit& edit) { handleGizmoEdit(state, edit); });
     // An in-game camera preview ends the moment the author navigates, so the
     // editor hears about it instead of sitting on a "previewing" state with a
-    // viewport that has quietly given its camera back.
+    // viewport that has quietly given its camera back. The Cameras panel reads
+    // the same flags this clears, which is what un-checks its Previewing box;
+    // the setter stores ONE callback, so the panel must not register a second.
     state.viewport.setOnCameraPreviewExit([&state]() {
+        state.cameraPreviewOpen = false;
+        state.cameraPreviewRow.reset();
         pushToast(state, "Camera preview ended: editor navigation is back.");
     });
     // Arrow keys nudge the selection from inside the viewport (it owns the key
@@ -3503,6 +4249,10 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::MenuItem("Project", nullptr, &state.showProject);
         ImGui::MenuItem("Objects", nullptr, &state.showObjects);
         ImGui::MenuItem("Properties", nullptr, &state.showProperties);
+        // "Cameras" already means the viewport's camera-marker overlay in this
+        // menu, so the panel and that toggle are named apart on purpose: the
+        // panel edits CameraParam.bcam, the overlay draws the markers.
+        ImGui::MenuItem("Cameras", nullptr, &state.showCamerasPanel);
         ImGui::MenuItem("Problems", nullptr, &state.showProblems);
         ImGui::MenuItem("3D Viewport", nullptr, &state.showViewport);
         ImGui::MenuItem("Log", nullptr, &state.showLog);
@@ -3539,7 +4289,7 @@ void drawMenuBar(EditorState& state, bool& done) {
             state.settings.save();
             refreshViewport(state, false);
         }
-        if (ImGui::MenuItem("Cameras", nullptr, &state.settings.showCameras)) {
+        if (ImGui::MenuItem("Camera Overlays", nullptr, &state.settings.showCameras)) {
             state.settings.save();
             refreshViewport(state, false);
         }
@@ -3922,7 +4672,7 @@ void drawPreferencesDialog(EditorState& state) {
     ImGui::SeparatorText("Overlays");
     changed |= ImGui::Checkbox("Axis", &state.settings.showAxis);
     changed |= ImGui::Checkbox("Areas", &state.settings.showAreas);
-    changed |= ImGui::Checkbox("Cameras", &state.settings.showCameras);
+    changed |= ImGui::Checkbox("Camera overlays", &state.settings.showCameras);
     changed |= ImGui::Checkbox("Gravity", &state.settings.showGravity);
     changed |= ImGui::Checkbox("Paths", &state.settings.showPaths);
     ImGui::SeparatorText("Editor controls");
@@ -4137,6 +4887,16 @@ const std::vector<TutorialTopic>& tutorialTopics() {
               TutorialAction::FrameAll, "Frame the whole zone"},
              {"Labels toggles the floating object names in the 3D view.", TutorialAction::None},
              {"Real game models appear with a game directory open; archives alone show placeholders.", TutorialAction::None},
+         }},
+        {"Preview in-game cameras", "camera bcam cameraparam preview fovy follow eyepos zoom field of view",
+         {
+             {"View > Cameras opens the panel that edits this zone's CameraParam.bcam table.",
+              TutorialAction::None},
+             {"Pick a row, then tick Previewing: the viewport looks through that camera.",
+              TutorialAction::None},
+             {"The badge says how faithful the preview is: exact, approximate, or not reproducible outside the game.", TutorialAction::None},
+             {"The tracked target is shown above the parameters; the game tracks Mario, so set a manual target to frame a specific spot.", TutorialAction::None},
+             {"Any click or drag in the viewport ends the preview and restores the editor camera exactly.", TutorialAction::None},
          }},
         {"Save your work", "save write disk ctrl+s unsaved",
          {
@@ -5134,6 +5894,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             ImGui::DockBuilderDockWindow("Objects", dockLeft);
             ImGui::DockBuilderDockWindow("Viewport", dockCenter);
             ImGui::DockBuilderDockWindow("Properties", dockRight);
+            ImGui::DockBuilderDockWindow("Cameras", dockRight);
             ImGui::DockBuilderDockWindow("Log", dockBottom);
             ImGui::DockBuilderDockWindow("Tutorials", dockBottom);
             ImGui::DockBuilderDockWindow("Problems", dockBottom);
@@ -5149,6 +5910,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         drawGalaxyZonePanel(state);
         drawObjectsPanel(state);
         drawPropertiesPanel(state);
+        drawCamerasPanel(state);
         placeViewportChild(state);
         if (state.showLog) {
             drawRealLogWindow(state);

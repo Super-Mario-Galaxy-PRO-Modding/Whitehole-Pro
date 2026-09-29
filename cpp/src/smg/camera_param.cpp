@@ -1176,6 +1176,38 @@ math::Vec3f finiteUp(math::Vec3f up) noexcept {
     return up.normalized();
 }
 
+// A number that is actually a number, or `fallback`. Solver inputs arrive from a
+// file a modder can hand-edit, and one NaN poisons every matrix the viewport
+// builds from the pose -- which looks exactly like a broken editor. The solver's
+// contract is that it never fails, so a non-finite input is pulled back to the
+// documented default instead of being passed through.
+[[nodiscard]] float finiteOr(float value, float fallback) noexcept {
+    return std::isfinite(value) ? value : fallback;
+}
+
+[[nodiscard]] math::Vec3f finiteOr(math::Vec3f value, math::Vec3f fallback) noexcept {
+    return {finiteOr(value.x, fallback.x), finiteOr(value.y, fallback.y),
+            finiteOr(value.z, fallback.z)};
+}
+
+// The fallbacks are CameraPreviewParams' own defaults (camera_param.hpp), so a
+// corrupt row previews as the same camera a missing row would.
+[[nodiscard]] CameraPreviewParams sanitisePreviewParams(const CameraPreviewParams& params) {
+    CameraPreviewParams safe = params;
+    safe.wpoint = finiteOr(safe.wpoint, math::Vec3f{});
+    safe.axis = finiteOr(safe.axis, math::Vec3f{0.0F, 1.0F, 0.0F});
+    safe.up = finiteOr(safe.up, math::Vec3f{});
+    safe.woffset = finiteOr(safe.woffset, math::Vec3f{});
+    safe.angleA = finiteOr(safe.angleA, 0.0F);
+    safe.angleB = finiteOr(safe.angleB, 0.3F);
+    safe.dist = finiteOr(safe.dist, 1200.0F);
+    safe.roll = finiteOr(safe.roll, 0.0F);
+    safe.fovy = finiteOr(safe.fovy, 45.0F);
+    safe.loffset = finiteOr(safe.loffset, 0.0F);
+    safe.loffsetv = finiteOr(safe.loffsetv, 0.0F);
+    return safe;
+}
+
 // Solver dispatch: which claim the preview makes about a camtype.
 PoseSupport supportForType(std::string_view camtype) noexcept {
     if (camtype == "CAM_TYPE_XZ_PARA" || camtype == "CAM_TYPE_POINT_FIX" ||
@@ -1228,8 +1260,13 @@ PoseSupport cameraPoseSupport(std::string_view camtype, std::uint32_t engineVers
     return supportForType(resolveCameraType(camtype, engineVersion));
 }
 
-GameCameraPose solveGameCameraPose(const CameraPreviewParams& params, const math::Vec3f& target,
+GameCameraPose solveGameCameraPose(const CameraPreviewParams& raw, const math::Vec3f& target,
                                    PoseSupport* support) noexcept {
+    // This is file data, so every number is sanitised before it is used:
+    // `params` and `tracked` below are the safe copies (see
+    // sanitisePreviewParams), and the solve itself never reports a failure.
+    const CameraPreviewParams params = sanitisePreviewParams(raw);
+    const math::Vec3f tracked = finiteOr(target, math::Vec3f{});
     const std::string_view resolved = resolveCameraType(params.camtype, params.version);
     const PoseSupport claimed = supportForType(resolved);
     if (support != nullptr) {
@@ -1242,8 +1279,8 @@ GameCameraPose solveGameCameraPose(const CameraPreviewParams& params, const math
 
     // The pivot the eye swings around: the tracked target plus the constant
     // zone-space offset (woffset).
-    const math::Vec3f pivot{target.x + params.woffset.x, target.y + params.woffset.y,
-                            target.z + params.woffset.z};
+    const math::Vec3f pivot{tracked.x + params.woffset.x, tracked.y + params.woffset.y,
+                            tracked.z + params.woffset.z};
 
     if (resolved == "CAM_TYPE_EYEPOS_FIX") {
         // FixedPoint: the eye is pinned to wpoint and the camera watches the

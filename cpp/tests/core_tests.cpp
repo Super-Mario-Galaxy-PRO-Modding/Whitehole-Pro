@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -4284,6 +4285,223 @@ void testKclParsing() {
     expect(!render::isKclPath("kcl"), "isKclPath matched a bare extensionless name");
 }
 
+// The Cameras panel is a chain of four calls -- table row -> cameraPreviewParams
+// -> solveGameCameraPose -> the eye/at/fov/roll the viewport's lookAt() is handed
+// -- and none of it is reachable from the ImGui code a test could click. So the
+// chain itself is the unit under test here: every registered camtype has to come
+// out of it finite and classified, and a degenerate row (zero distance, zero up,
+// a literal NaN a hand-edited file can carry) must never put a NaN into the
+// camera the viewport then builds its matrices from.
+void testCameraPreviewChain() {
+    using namespace whitehole::smg;
+    using whitehole::math::Vec3f;
+    using whitehole::render::ViewportCamera;
+
+    const auto finite = [](const Vec3f& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    // Deliberately far from the origin: a solver that ignored the tracked point
+    // could still look plausible against (0, 0, 0).
+    const Vec3f target{1234.5F, -678.9F, 4242.0F};
+
+    // 1) Every camtype the two games know, through a real (sparse) table row.
+    int exact = 0;
+    int spherical = 0;
+    int none = 0;
+    for (const auto& type : cameraTypes()) {
+        const std::uint32_t version = type.smg2 ? kCameraVersionSmg2 : kCameraVersionSmg1;
+        CameraParamTable table = CameraParamTable::create(version);
+        const std::size_t row = table.addCamera("c:0000", type.id, version);
+        const CameraPreviewParams params = cameraPreviewParams(table, row);
+        const std::string context = std::string("camtype ") + std::string(type.id);
+        expect(params.camtype == type.id, context + ": cameraPreviewParams lost the camtype");
+        expect(params.version == version, context + ": the row's engine version did not carry through");
+
+        PoseSupport support = PoseSupport::none;
+        const GameCameraPose pose = solveGameCameraPose(params, target, &support);
+        expect(support == cameraPoseSupport(type.id, version),
+               context + ": the solver and cameraPoseSupport disagree");
+        expect(finite(pose.eye) && finite(pose.at) && finite(pose.up),
+               context + ": the solved pose must be finite");
+        expect(std::isfinite(pose.fovYRadians) && std::isfinite(pose.rollRadians),
+               context + ": the solved fovy/roll must be finite");
+        // The panel's badge is only honest if the pose it shows came from the
+        // same classification, so the pose must be aimed at the tracked point's
+        // pivot for every class except the pinned-eye one.
+        if (support != PoseSupport::none) {
+            expect(finite(pose.at), context + ": a supported type must have a real look-at point");
+        }
+        switch (support) {
+        case PoseSupport::exact: ++exact; break;
+        case PoseSupport::spherical: ++spherical; break;
+        case PoseSupport::none: ++none; break;
+        }
+    }
+    // All three classes are exercised by the registry, so the sweep above really
+    // covered the panel's three badge cases rather than only one of them.
+    expect(exact > 0 && spherical > 0 && none > 0,
+           "the camtype registry must exercise all three pose classes");
+
+    // The same sweep at SMG1's engine version: several defaults differ per engine
+    // (num1, woffset.Y, up.Y), so the SMG1 numbers have to solve too.
+    for (const auto& type : cameraTypes()) {
+        if (!type.smg1) {
+            continue;
+        }
+        CameraParamTable table = CameraParamTable::create(kCameraVersionSmg1);
+        const std::size_t row = table.addCamera("o:default", type.id, kCameraVersionSmg1);
+        const GameCameraPose pose =
+            solveGameCameraPose(cameraPreviewParams(table, row), target);
+        expect(finite(pose.eye) && finite(pose.at) && finite(pose.up),
+               std::string("SMG1 camtype ") + std::string(type.id) + ": the solved pose must be finite");
+    }
+
+    // 2) A row with only the three required columns resolves through the ENGINE
+    //    DEFAULTS, which is exactly what the panel's dim-label badge promises.
+    {
+        CameraParamTable smg2 = CameraParamTable::create(kCameraVersionSmg2);
+        const std::size_t row = smg2.addCamera("c:0001", "CAM_TYPE_XZ_PARA", kCameraVersionSmg2);
+        const CameraPreviewParams params = cameraPreviewParams(smg2, row);
+        expect(params.dist == 1200.0F && params.fovy == 45.0F && params.angleB == 0.3F,
+               "a sparse SMG2 row must resolve to the SMG2 engine defaults");
+        const GameCameraPose pose = solveGameCameraPose(params, {0.0F, 0.0F, 0.0F});
+        expect(std::abs(pose.eye.length() - 1200.0F) < 1.0F,
+               "a sparse XZ_PARA row's eye must sit on the dist sphere");
+        expect(pose.at.x == 0.0F && pose.at.y == 0.0F && pose.at.z == 0.0F,
+               "an XZ_PARA row with no offsets must aim at the tracked point");
+    }
+    {
+        CameraParamTable smg1 = CameraParamTable::create(kCameraVersionSmg1);
+        const std::size_t row = smg1.addCamera("c:0001", "CAM_TYPE_FOLLOW", kCameraVersionSmg1);
+        const CameraPreviewParams params = cameraPreviewParams(smg1, row);
+        expect(params.woffset.y == 100.0F,
+               "SMG1's woffset.Y default (100) must reach the solver");
+    }
+
+    // 3) woffset moves the PIVOT, not the tracked point: the panel's target line
+    //    repeats this, so it has to be true.
+    {
+        CameraPreviewParams params;
+        params.camtype = "CAM_TYPE_XZ_PARA";
+        params.woffset = {10.0F, 20.0F, 30.0F};
+        params.angleA = 0.3F;
+        params.angleB = 0.35F;
+        const Vec3f tracked{100.0F, 200.0F, 300.0F};
+        const GameCameraPose pose = solveGameCameraPose(params, tracked);
+        expect(pose.at.x == 110.0F && pose.at.y == 220.0F && pose.at.z == 330.0F,
+               "the preview pivot must be target + woffset");
+    }
+
+    // 4) Degenerate but legal rows. The engine tolerates these, so the chain has
+    //    to hand the viewport something finite instead of a NaN that would poison
+    //    every later frame's matrices.
+    {
+        const auto probe = [&finite](const char* what, const CameraPreviewParams& params) {
+            const GameCameraPose pose = solveGameCameraPose(params, {1.0F, 2.0F, 3.0F});
+            expect(finite(pose.eye) && finite(pose.at) && finite(pose.up) &&
+                       std::isfinite(pose.fovYRadians) && std::isfinite(pose.rollRadians),
+                   std::string("degenerate row (") + what + ") must still solve finite");
+        };
+
+        CameraPreviewParams zeroDist;
+        zeroDist.camtype = "CAM_TYPE_XZ_PARA";
+        zeroDist.dist = 0.0F;
+        probe("dist = 0", zeroDist);
+
+        CameraPreviewParams negativeDist;
+        negativeDist.camtype = "CAM_TYPE_FOLLOW";
+        negativeDist.dist = -1200.0F;
+        probe("negative dist", negativeDist);
+
+        CameraPreviewParams vertical;
+        vertical.camtype = "CAM_TYPE_TOWER";
+        vertical.angleA = 1.5707963F; // pi/2, the pitch-clamp case in lookAt()
+        vertical.angleB = 1.5707963F;
+        probe("straight up/down angles", vertical);
+
+        CameraPreviewParams zeroUp;
+        zeroUp.camtype = "CAM_TYPE_EYEPOS_FIX";
+        zeroUp.wpoint = {5.0F, 5.0F, 5.0F};
+        zeroUp.up = {0.0F, 0.0F, 0.0F}; // the game writes this on plenty of rows
+        probe("zero up vector", zeroUp);
+
+        CameraPreviewParams oddFov;
+        oddFov.camtype = "CAM_TYPE_XZ_PARA";
+        oddFov.fovy = 0.0F;
+        oddFov.roll = 8.0F * 3.14159265F; // many turns of roll
+        probe("zero fovy, huge roll", oddFov);
+
+        CameraPreviewParams huge;
+        huge.camtype = "CAM_TYPE_POINT_FIX";
+        huge.dist = 1.0e7F;
+        huge.woffset = {1.0e7F, -1.0e7F, 1.0e7F};
+        probe("huge distance and offset", huge);
+
+        CameraPreviewParams unknown;
+        unknown.camtype = "CAM_TYPE_NOT_IN_THE_REGISTRY";
+        probe("unknown camtype", unknown);
+
+        CameraPreviewParams empty;
+        probe("empty camtype", empty);
+
+        // A hand-edited or half-corrupted file can carry a literal NaN, and one
+        // NaN in a pose is an invisible viewport. The solver sanitises its inputs
+        // for exactly this reason, so nothing non-finite may survive -- and a
+        // poisoned fovy has to fall back to the engine default, not to zero.
+        CameraPreviewParams poisoned;
+        poisoned.camtype = "CAM_TYPE_XZ_PARA";
+        poisoned.angleA = std::numeric_limits<float>::quiet_NaN();
+        poisoned.angleB = std::numeric_limits<float>::infinity();
+        poisoned.dist = std::numeric_limits<float>::quiet_NaN();
+        poisoned.fovy = std::numeric_limits<float>::quiet_NaN();
+        poisoned.roll = std::numeric_limits<float>::infinity();
+        poisoned.wpoint = {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F};
+        poisoned.woffset = {0.0F, std::numeric_limits<float>::infinity(), 0.0F};
+        probe("NaN and infinity inputs", poisoned);
+        const GameCameraPose sanitised = solveGameCameraPose(poisoned, {0.0F, 0.0F, 0.0F});
+        expect(std::abs(sanitised.fovYRadians - 45.0F * 3.141592653589793F / 180.0F) < 1e-5F,
+               "a NaN fovy must fall back to the 45 degree engine default");
+        expect(sanitised.rollRadians == 0.0F, "a non-finite roll must fall back to no roll");
+        // A NaN tracked point would be the caller's bug, but the solve still has
+        // to come back usable rather than propagating it into the viewport.
+        const GameCameraPose nanTarget =
+            solveGameCameraPose(zeroDist, {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F});
+        expect(finite(nanTarget.eye) && finite(nanTarget.at),
+               "a non-finite tracked point must not reach the viewport");
+    }
+
+    // 5) The chain ends in the very call the viewport makes
+    //    (ViewportWindow::updateCameraPreview -> ViewportCamera::lookAt), so the
+    //    solved pose has to survive that round trip and still centre on the
+    //    tracked point -- with roll, which is where a rebuilt basis would drift.
+    {
+        CameraPreviewParams params;
+        params.camtype = "CAM_TYPE_XZ_PARA";
+        params.angleA = 0.3F;
+        params.angleB = 0.35F;
+        params.dist = 1200.0F;
+        params.fovy = 60.0F;
+        params.roll = 0.6F;
+        const Vec3f tracked{0.0F, 250.0F, 0.0F};
+        const GameCameraPose pose = solveGameCameraPose(params, tracked);
+
+        ViewportCamera camera;
+        camera.lookAt(pose.eye, pose.at, pose.fovYRadians, pose.rollRadians);
+        const Vec3f eye = camera.eye();
+        expect((eye - pose.eye).length() < 0.05F,
+               "the previewed camera must sit where the solver put it");
+        expect(std::abs(camera.fieldOfViewRadians - pose.fovYRadians) < 1e-5F,
+               "the dynamic fovy must reach the viewport camera");
+        // Centre pixel through the rolled basis: if this ray missed `at`, the
+        // preview would show one camera and pick with another.
+        const auto centred = camera.screenToRay(320.0F, 240.0F, 640.0F, 480.0F);
+        const Vec3f toTarget{pose.at.x - centred.origin.x, pose.at.y - centred.origin.y,
+                             pose.at.z - centred.origin.z};
+        expect(Vec3f::dot(centred.direction, toTarget.normalized()) > 0.999F,
+               "the rolled preview's centre ray must still land on the tracked point");
+    }
+}
+
 int main() {
     try {
         testBinaryData();
@@ -4296,7 +4514,8 @@ int main() {
         testViewportScene();
         testObjectVisual();
         testHashes();
-testCameraParam();
+        testCameraParam();
+        testCameraPreviewChain();
         testBcsvEndianness();
         testBcsvMutation();
         testUndoStack();

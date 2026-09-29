@@ -3,16 +3,20 @@
 ================================================================================
 
  Read this first, then README.md (user-facing). This file exists so the next
- session does not have to re-derive two weeks of context. It is written at
- commit bfc2bd2 ("Viewport: look through a solved BCAM camera (preview mode)",
- master, pushed, clean tree), 2026-09-29.
+ session does not have to re-derive two weeks of context. It is written on top
+ of commit 8f70eb3 ("docs: add BLUEPRINT.txt, the cross-session handoff notes",
+ master, pushed, clean tree), 2026-09-29: the commit that carries this edit is
+ the Cameras panel (section 8), so the ladder in section 11 lists that one as
+ "this commit" rather than as a hash it did not have yet.
 
  Line numbers below are ANCHORS as of that commit. They drift. Trust the symbol
  names, use the numbers only as a shortcut to jump near the right code.
 
  HOW TO USE THIS FILE
-   - Section 8 is the actual next task, written step by step.
-   - Section 9 lists open design questions that need a human decision.
+   - Section 8 describes the Cameras panel as shipped, and ends with the manual
+     checks a human still has to run (8.5).
+   - Section 9 records the target decision the panel made, and the questions
+     that are still open and deliberately untouched.
    - Section 10 lists the time sinks (tooling traps) - read it before you run
      anything, it saves about an hour per session.
    - If you change anything described here, update the section that describes it
@@ -22,7 +26,7 @@
 0. TL;DR - STATE OF PLAY
 --------------------------------------------------------------------------------
 
- The BCAM camera feature is three quarters done:
+ The BCAM camera feature is COMPLETE and shipped as the Cameras panel:
 
    [done]  CameraParam.bcam parsing, a typed defaults-aware table, the 52-field
            spec, the CAM_TYPE_* registry with version-gated aliases, per-row
@@ -36,9 +40,19 @@
            lookAt(), and ViewportWindow has a begin/update/endCameraPreview
            lifecycle that freezes and restores the editor camera and swallows
            navigation input. Unit-tested. (commit bfc2bd2)
-   [MISSING] The GUI. Nothing in gui_win32.cpp calls any of it yet. There is no
-           Cameras panel, no Preview toggle, nothing that feeds a row into the
-           solver. This is the whole remaining feature; see section 8.
+   [done]  THE GUI. View > Cameras opens the panel: it lists the rows, shows every
+           applicable column with its authored / engine-default provenance, edits
+           through edit::mutateCameras, adds and removes rows, solves one shot into
+           the viewport live (begin/update/end), reports the PoseSupport class
+           honestly and shows the tracked target it solved against. Section 8 is
+ The solver also sanitises its inputs now (section 4), because a hand-edited row
+ can carry a literal NaN and one NaN in a pose is an invisible viewport.
+
+ What is NOT verified in this session: the five manual checks in section 8.5,
+ which need a person clicking a real map.
+
+
+           now a description of what shipped plus what a human still must check.
 
  ONE WARNING THAT COST A REVERT: an earlier draft of the GUI panel was written
  against an invented API (a flat `game::CameraRecord` with eyePoint/focusPoint/
@@ -99,12 +113,34 @@
    whitehole_core_tests   cpp/tests/core_tests.cpp, registered as a single CTest
                           test named `whitehole_core_tests`.
 
- Commands that work on this machine (PowerShell - see section 10 first):
+ Commands that work on this machine (PowerShell - see section 10 first). THE OLD
+ build-check RECIPE IS BROKEN as of this session: its make came from devkitPro's
+ MSYS2, which is gone, and CMake can no longer see a Visual Studio instance
+ (the VS2022 install lost vcvarsall.bat; VS2026 is complete). What works:
 
-   cmake -S . -B build-check -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
-   cmake --build build-check -j
-   .\build-check\whitehole_core_tests.exe
-   ctest --test-dir build-check --output-on-failure
+   MinGW, the toolchain CI uses (-Wconversion is the one that catches the
+   camera-panel mistakes):
+
+     $env:Path = 'C:\msys64\ucrt64\bin;C:\msys64\usr\bin;' + $env:Path
+     cmake -S . -B <out-of-tree dir> -G Ninja -DCMAKE_BUILD_TYPE=Release
+           -DCMAKE_CXX_COMPILER=C:/msys64/ucrt64/bin/g++.exe
+           -DCMAKE_MAKE_PROGRAM=C:/msys64/ucrt64/bin/ninja.exe
+           -DWHITEHOLE_STATIC_RUNTIME=ON
+     cmake --build <dir> -j
+     ctest --test-dir <dir> --output-on-failure
+
+   MSVC (/W4 /permissive- /utf-8 on whitehole_core):
+
+     call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+     cmake -S . -B <dir> -G Ninja -DCMAKE_BUILD_TYPE=Release
+           -DCMAKE_CXX_COMPILER=cl.exe
+           -DCMAKE_MAKE_PROGRAM=C:/msys64/ucrt64/bin/ninja.exe
+     cmake --build <dir> -j 8
+
+   The PATH line is mandatory in EVERY shell: g++.exe itself starts, but cc1plus
+   and the MSYS2 DLLs it needs are only reachable through the ucrt64 bin dir.
+   Keep build directories OUT of the repo (see the wart below), otherwise every
+   build dirties hundreds of tracked files.
 
  Warnings are strict and that is load-bearing: MSVC gets /W4 /permissive- /utf-8,
  GCC/Clang get -Wall -Wextra -Wpedantic -Wconversion on whitehole_core.
@@ -252,6 +288,12 @@
        overload: read the PoseSupport out-param (or call cameraPoseSupport) to
        decide what to tell the user. Never fails; degenerate input still returns
        a harmless pose.
+       NEW IN THIS SESSION: the inputs are sanitised before solving (finiteOr /
+       sanitisePreviewParams, camera_param.cpp just above supportForType). A NaN
+       or infinity anywhere in a hand-edited row falls back to that field's
+       documented default, and a non-finite `target` becomes the origin, so a
+       corrupt file cannot put a non-finite pose into the viewport. Covered by
+       testCameraPreviewChain.
 
  Angle units are NOT uniform (this trips people up):
    fovy   : DEGREES in the file (default 45) - solver multiplies by pi/180.
@@ -390,11 +432,11 @@
    :2271) is guarded the same way; flycam drag is not a way out.
    Consequence for the GUI: the "Previewing" checkbox MUST be driven by
    setOnCameraPreviewExit (the viewport tells you when it self-exits), not by
-   trusting your own toggle. That hook is ALREADY wired at gui_win32.cpp:3122,
-   where it only pushes the toast "Camera preview ended: editor navigation is
-   back." - the panel's job is to extend that same lambda to clear its
-   cameraPreviewOpen flag too. Do not register a second callback: the setter
-   stores ONE std::function, so a second call silently replaces the toast.
+   trusting your own toggle. DONE: the single hook in initViewport now clears
+   cameraPreviewOpen and cameraPreviewRow and then pushes the toast "Camera
+   preview ended: editor navigation is back." Do not register a second
+   callback: the setter stores ONE std::function, so a second call silently
+   replaces the panel's state clearing with the toast again.
 
  Design intent, in case someone is tempted to "improve" it: the preview reuses
  the ONE editor camera rather than introducing a second camera or a second
@@ -438,19 +480,53 @@
    testCameraParam()           :917       THE SPEC for section 4: field specs,
                                           defaults per version, alias gating,
                                           sparse column creation, round trips.
+   testCameraPreviewChain()    :4295      NEW - THE SPEC for the Cameras panel's
+                                          chain: every camtype -> params ->
+                                          solve -> pose, all three PoseSupport
+                                          classes covered, sparse engine-default
+                                          reads, the target+woffset pivot, and a
+                                          finite pose for degenerate and
+                                          NaN-poisoned rows.
    testStageCameras()          :2395      load/write of CameraParam.bcam in a
                                           stage, SMG1 lowercase path.
    testStageEditCommands()     :1742      includes mutateCameras undo/redo.
 
- What section 8 still needs: a test that a row -> cameraPreviewParams ->
- solveGameCameraPose -> CameraPreviewPose chain produces a finite pose for every
- camtype class (exact/spherical/none) and that `none` rows never NaN. Do that in
- core_tests, NOT by hand-clicking the GUI.
+ What the Cameras panel needs from the test suite: a test that a row ->
+ cameraPreviewParams -> solveGameCameraPose -> pose chain produces a finite pose
+ for every camtype class (exact/spherical/none) and that `none` rows never NaN.
+ That is testCameraPreviewChain (core_tests.cpp), registered right after
+ testCameraParam in main(). It also asserts the sparse-engine-default reads the
+ panel's dim labels rely on, the target+woffset pivot, and that a poisoned row
+ (literal NaN/infinity) still solves finite.
 
 
 --------------------------------------------------------------------------------
-8. NEXT TASK: THE CAMERAS PANEL (step by step, with the traps)
+8. THE CAMERAS PANEL (what shipped, and what a human still has to check)
 --------------------------------------------------------------------------------
+
+ The panel shipped in THIS commit. Where everything lives:
+
+   drawCamerasPanel(EditorState&)                    gui_win32.cpp, the whole panel
+     helpers directly above it: cameraGroupLabel, cameraSupportLabel,
+     cameraSupportTooltip, cameraDefaultText, cameraTypesForVersion,
+     cameraIdTaken, nextFreeCubeCameraId, looksLikeStartObject,
+     cameraTargetChoice, endCameraPreview, applyCameraPreview,
+     drawCameraTypeEditor.
+   EditorState members: showCamerasPanel, cameraSelectedRow, cameraPreviewOpen,
+     cameraPreviewRow, cameraPreviewTarget, cameraTargetManual,
+     cameraTargetOverride, cameraNewId, cameraNewType.
+   Wiring: View > "Cameras", DockBuilderDockWindow("Cameras", dockRight),
+     drawCamerasPanel(state) in the panel list, endCameraPreview(state) at the
+     top of openMapImpl / openGameImpl / selectZone, applyCameraPreview(state)
+     after undo/redo, and a "Preview in-game cameras" tutorial topic.
+   The viewport's own overlay toggle is a DIFFERENT thing and is now called
+     "Camera Overlays" (View menu + Preferences), so the two are not both named
+     "Cameras" in one menu.
+
+ 8.0-8.4 below are the contract the code was written against; re-read them
+ (and update them) when you touch the panel. 8.5 is the checklist that is
+ still open.
+
 
  8.0 THE FICTION THAT WAS REVERTED - do not repeat it. The draft assumed:
        game::CameraRecord with eyePoint/focusPoint/focusOffset/rotX/rotY/rotZ/
@@ -481,7 +557,7 @@
      usable once `state.viewportReady` is true (see the guard at :716).
 
      smg::CameraPreviewParams p = smg::cameraPreviewParams(table, cam.row);
-     const math::Vec3f target = <section 9, the one open decision>;
+     const math::Vec3f target = cameraTargetChoice(state).point;   // section 9, decided
      smg::PoseSupport support = smg::PoseSupport::none;
      const smg::GameCameraPose pose = smg::solveGameCameraPose(p, target, &support);
      render::ViewportWindow::CameraPreviewPose vp;
@@ -494,11 +570,13 @@
      eye/at plus roll (section 5). Do not add an `up` to CameraPreviewPose; if
      you think you need it, the roll projection in up() is what you should fix.
 
- 8.3 STATE TO ADD (keep it in EditorState, near the other viewport state)
+ 8.3 STATE (kept in EditorState, near the other viewport state)
      bool     cameraPreviewOpen{false};     // the "Previewing" toggle
      std::optional<std::size_t> cameraPreviewRow;   // which row owns the preview
-     math::Vec3f cameraPreviewTarget{};     // see 9 - cache it, show it, allow edits
-     Rules:
+     math::Vec3f cameraPreviewTarget{};     // the point the last solve was aimed at
+     ...plus cameraSelectedRow (the row being edited, which is NOT necessarily the
+     row being previewed), cameraTargetManual/cameraTargetOverride,
+     cameraNewId/cameraNewType, and showCamerasPanel. Rules:
        - Selecting a different row while previewing = updateCameraPreview, never
          begin/end, so the shot does not flicker back to the editor camera.
        - Unchecking Preview = endCameraPreview + clear cameraPreviewRow.
@@ -512,20 +590,21 @@
          table.size() every frame you use it, exactly like gui_win32.cpp:769
          does for viewportSelected/selectedObject.
 
- 8.4 WHAT THE PANEL SHOULD SHOW (match LaunchCamPlus' mental model, our UX)
+ 8.4 WHAT THE PANEL SHOWS (LaunchCamPlus' mental model, our UX)
      - List of cameras: describeCameraId(parseCameraId(cam.id)) as the label,
        camtype resolved via cameraTypeInfo/resolveCameraType for display, plus
        the context from cameraContextLabel. Keep raw id visible too - modders
        grep for it.
      - Per field: cameraFieldSpecs() in order, filtered by
        cameraFieldApplies(spec.scope, cam.context), grouped by spec.group, using
-       spec.label + spec.tooltip. Flag rows where !table.hasColumn(field) as
-       "(engine default)" - that distinction is the single most useful thing in
-       a BCAM editor, because a value the file omits can differ per version.
-     - A support badge: exact / spherical / approximate / unsupported from the
-       PoseSupport the solver reported. "none" is NOT an error - it means the
-       type is dynamic-only in game. Say "not reproducible outside the game",
-       not "failed".
+       spec.label + spec.tooltip. A column the sparse file does not store shows a
+       DIM name (nothing is hidden: the widget still shows the value the row
+       solves with), and hovering it gives the exact engine default for this
+       row's version. That distinction is the single most useful thing in a BCAM
+       editor, because a value the file omits can differ per version.
+     - A support badge, shown as "Pose: exact | approximate | not reproducible
+       outside the game", taken from the PoseSupport the solver reported. "none"
+       is NOT an error - it means the type is dynamic-only in game.
      - Editing any camera field goes through edit::mutateCameras (section 4) and
        then updateCameraPreview with the freshly solved pose. Label the undo
        entry with the field name ("Set fovy"), and do not push one entry per
@@ -534,7 +613,13 @@
        comparing against the last applied value.
 
  8.5 BUILD + PROOF
-     Build both toolchains, run the tests, then the manual pass:
+     Build both toolchains, run the tests, then the manual pass. What THIS
+     session verified, in out-of-tree builds (see section 2): MinGW Release and
+     MSVC Release (VS2026 toolset via vcvars + Ninja) both built with zero new
+     warnings, ctest passed on both, and the GUI opened the SMG2BigGalaxyMap
+     template with the panel forced open without a crash (a 20-second smoke
+     run: process stayed alive, no exception - the interaction checks below
+     still need a human with a mouse):
        1. Open a SMG2 map with a camera table (a mission stage). An empty table is
           NORMAL for many stages: loadFromArchive (stage_archive.cpp:175) always
           builds an empty table stamped with the right engine version, and it
@@ -554,7 +639,7 @@
 
 
 --------------------------------------------------------------------------------
-9. THE ONE OPEN DESIGN QUESTION: WHAT IS `target`?
+9. THE TARGET DECISION (decided), PLUS WHAT IS STILL OPEN
 --------------------------------------------------------------------------------
 
  solveGameCameraPose takes `target` = "the point the game tracks (Mario's
@@ -567,8 +652,12 @@
  Options, best first:
    a) Selected object's position, else the nearest StartObj/PlayerStart, else the
       origin - PLUS an explicit "Target" XYZ triplet in the panel the user can
-      override. Recommend THIS: honest, one field, and it makes the preview
-      genuinely useful for framing a shot of a specific prop.
+      override. Recommended. SHIPPED, as cameraTargetChoice(): the manual
+      override wins, then the selected object, then the first placement row that
+      looksLikeStartObject (kind "start", or a name like StartObj/PlayerStart/
+      Mario ignoring case), then the origin. The panel ALWAYS shows the resolved
+      point and its source, and the last solve's target is cached in
+      cameraPreviewTarget.
    b) StartObj/PlayerStart only (PlacementObject rows named like a start).
       Closest to the game, but most stages will resolve to the origin anyway.
    c) Origin always. Simplest, least useful; fine as option (a)'s fallback.
@@ -610,8 +699,25 @@
  - git is NOT on PATH here. Call it as:
        & 'C:\Program Files\Git\cmd\git.exe' --no-pager <args>
    Always --no-pager, or the call hangs on a pager.
- - Build directories are tracked in this repo (section 2): stage files by
-   explicit path, and read `git status --short` before committing.
+ - Build with out-of-tree directories and the recipe in section 2 (not the old
+   build-check recipe): devkitPro's make is gone, cmake uses Ninja instead, and the
+   in-repo build dirs would dirty hundreds of tracked files on every compile.
+ - MSVC needs the machine's vswhere on PATH before vcvars: older sessions had a
+   working VS2022, but this machine's VS2022 lost vcvarsall.bat AND the VS
+   Installer (no vswhere), so cmake reports "could not find any instance of
+   Visual Studio". What works is VS2026's vcvars64.bat plus
+   C:\Program Files (x86)\Microsoft Visual Studio\Installer on PATH.
+ - A single shell command is killed after ~30 seconds, INCLUDING its output, so
+   a first full build never finishes in one call. Run the build detached via
+   Start-Process (a .cmd that redirects to a log file) and poll the log. Do not
+   fight it by repeating foreground builds: each kill restarts ninja's in-flight
+   compiles and truncates .ninja_log ("premature end of file; recovering"),
+   which then rebuilds the same files over and over.
+ - Do not wrap a PowerShell command that needs cmd separators in another
+   powershell.exe -Command: PowerShell 5.1 has no && operator, and cmd /c with
+   embedded quotes inside a PowerShell string mangles the call. For batch
+   helpers, write a .cmd file with the editor tool (with cmd-style quoting),
+   not by assembling quoted strings in PowerShell.
  - Do not rewrite source files with PowerShell Set-Content/Out-File - it can
    change encoding and line endings. Use the editor tool.
  - The edit tool is chunk-limited (~6k chars per call). For a long document,
@@ -639,9 +745,11 @@
  1872379  fix(gizmo): make axis translate drags linear instead of singular
  dc2c5fd  fix(viewport): composite the GL child into the shell's back buffer
  302ec37  feat(cameras): read, edit and solve CameraParam.bcam
- bfc2bd2  Viewport: look through a solved BCAM camera (preview mode)   <- HEAD
+ bfc2bd2  Viewport: look through a solved BCAM camera (preview mode)
+ 8f70eb3  docs: add BLUEPRINT.txt, the cross-session handoff notes
+ this     feat(cameras): the Cameras panel (list, edit, live preview)  <- HEAD
 
- Two of those commits are the camera feature; the ones before them are the
+ Three of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
  (reversed-Z: near->+1, far->0, clear to 0, GL_GEQUAL, and the x/y terms must
  stay centric so GL_CW winding keeps working - see the comment at
@@ -651,20 +759,24 @@
  the body, as a paragraph, never as a restatement of the diff.
 
 --------------------------------------------------------------------------------
-12. DEFINITION OF DONE FOR THE NEXT SESSION
+12. DEFINITION OF DONE FOR THIS SESSION (what the Cameras commit had to meet)
 --------------------------------------------------------------------------------
 
  1) A Cameras panel that lists rows, shows every applicable field with its
     default/authored provenance, edits through edit::mutateCameras, and survives
-    Ctrl+Z/Ctrl+Y with the sparse columns intact.
+    Ctrl+Z/Ctrl+Y with the sparse columns intact. DONE, plus add/remove rows.
  2) A Preview toggle that drives begin/update/endCameraPreview, reports
     PoseSupport honestly, exposes the target point, and un-checks itself when the
-    viewport self-exits.
+    viewport self-exits. DONE, and undo/redo re-solves the live shot.
  3) core_tests coverage for the row -> params -> solve -> pose chain across all
-    three PoseSupport classes, with no NaN for degenerate rows.
+    three PoseSupport classes, with no NaN for degenerate rows. DONE as
+    testCameraPreviewChain, including NaN-poisoned rows.
  4) Builds clean with /W4 AND -Wall -Wextra -Wpedantic -Wconversion; ctest green;
-    the five manual checks in 8.5 pass.
- 5) This file updated in the same commit as the code it describes.
+    the five manual checks in 8.5 pass. DONE except 8.5: MinGW Release + MSVC
+    Release both built with zero NEW warnings (only pre-existing ones remain)
+    and ctest passed on both. 8.5 is unrunnable from a shell and still open.
+ 5) This file updated in the same commit as the code it describes. Done just
+    below this line.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

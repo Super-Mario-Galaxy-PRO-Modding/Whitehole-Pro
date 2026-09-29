@@ -3116,6 +3116,12 @@ bool initViewport(EditorState& state, HINSTANCE instance) {
         }
     });
     state.viewport.setOnGizmo([&state](const render::GizmoEdit& edit) { handleGizmoEdit(state, edit); });
+    // An in-game camera preview ends the moment the author navigates, so the
+    // editor hears about it instead of sitting on a "previewing" state with a
+    // viewport that has quietly given its camera back.
+    state.viewport.setOnCameraPreviewExit([&state]() {
+        pushToast(state, "Camera preview ended: editor navigation is back.");
+    });
     // Arrow keys nudge the selection from inside the viewport (it owns the key
     // polling), while the objects and their BCSV rows belong to the editor.
     state.viewport.setOnNudge([&state](int axis, float amount, bool duplicate) {

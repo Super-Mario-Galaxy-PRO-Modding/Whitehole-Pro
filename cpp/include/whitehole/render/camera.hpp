@@ -26,6 +26,14 @@ public:
     float pitchRadians{0.5F};
     float distance{800.0F};
 
+    // Vertical field of view and roll. Navigation never touches either, so an
+    // editor frame renders exactly as it always has (70 deg, no roll); the BCAM
+    // preview drives both, because a game camera's framing *is* its fovy and its
+    // roll. The basis (up()/right()) carries the roll, so the view matrix, the
+    // picking ray and worldToScreen all agree with what gets drawn.
+    float fieldOfViewRadians{kFieldOfView};
+    float rollRadians{0.0F};
+
     static constexpr float kFieldOfView = 1.2217305F; // 70 deg in radians
     // Floor of the dynamic near plane (see nearPlane()). The old fixed
     // 1..60000 frustum quantised depth to ~20 world units at galaxy range,
@@ -79,6 +87,15 @@ public:
                            float height) noexcept;
     void frameTarget(const math::Vec3f& point, float framedDistance = 300.0F) noexcept;
 
+    // Parks the rig at an explicit eye/look-at pair (the in-game BCAM preview).
+    // The orbit parameters are rewritten to describe that shot -- target = at,
+    // distance = |eye - at|, yaw/pitch from the eye->at direction -- so eye()
+    // reproduces `eye` exactly except where the pitch clamp bites within ~1.2
+    // degrees of straight up/down (a tower camera pointed at the floor).
+    // fovRadians/rollRadians < 0 leave the current FOV/roll alone.
+    void lookAt(const math::Vec3f& eye, const math::Vec3f& at, float fovRadians = -1.0F,
+                float rollRadians = -1.0F) noexcept;
+
     // Current pose, for the smooth-focus tween ('F').
     [[nodiscard]] CameraPose pose() const noexcept;
     // Applies a pose verbatim (used by the tween's per-frame interpolation).
@@ -115,7 +132,8 @@ public:
 // winding -- which the GL_CW front face plus the per-material cull modes depend
 // on. Owned here (not inline in the renderer) so the CPU side and the unit
 // tests share one definition.
-[[nodiscard]] math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane) noexcept;
+[[nodiscard]] math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane,
+                                                      float fovRadians = ViewportCamera::kFieldOfView) noexcept;
 
 // Viewport grid sizing for one camera distance: the patch must cover the
 // whole visible ground (2x orbit distance spans any aspect ratio), snapped to

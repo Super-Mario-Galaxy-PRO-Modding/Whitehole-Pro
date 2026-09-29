@@ -351,6 +351,86 @@ void testViewportCamera() {
     }
 }
 
+void testViewportCameraPreview() {
+    using whitehole::math::Vec3f;
+    using whitehole::render::ViewportCamera;
+
+    // lookAt is what hands the viewport a solved BCAM pose, so the orbit rig has
+    // to reproduce the requested eye exactly -- otherwise the preview would show
+    // a camera the game never had.
+    ViewportCamera camera;
+    const Vec3f eye{500.0F, 220.0F, -300.0F};
+    const Vec3f at{40.0F, 10.0F, 90.0F};
+    camera.lookAt(eye, at);
+    const auto solvedEye = camera.eye();
+    expect(std::abs(solvedEye.x - eye.x) < 0.01F && std::abs(solvedEye.y - eye.y) < 0.01F &&
+               std::abs(solvedEye.z - eye.z) < 0.01F,
+           "lookAt must reproduce the requested eye");
+    const auto solvedTarget = camera.target;
+    expect(std::abs(solvedTarget.x - at.x) < 0.001F && std::abs(solvedTarget.y - at.y) < 0.001F &&
+               std::abs(solvedTarget.z - at.z) < 0.001F,
+           "lookAt must keep the look-at point as the orbit pivot");
+    const Vec3f facing = camera.forward();
+    const Vec3f wantFacing{at.x - eye.x, at.y - eye.y, at.z - eye.z};
+    const auto want = wantFacing.normalized();
+    expect(Vec3f::dot(facing, want) > 0.9999F, "lookAt must face the look-at point");
+
+    // A straight-down shot (a Tower camera at angleA = 90deg) must stay usable:
+    // the pitch clamp stops just short of vertical, and the basis stays finite.
+    camera.lookAt({0.0F, 900.0F, 0.0F}, {0.0F, 0.0F, 0.0F});
+    expect(std::isfinite(camera.eye().x) && std::isfinite(camera.eye().z),
+           "straight-down lookAt produced a non-finite eye");
+    expect(std::abs(camera.eye().y - 900.0F) < 1.0F,
+           "straight-down lookAt lost the eye height past the pitch clamp");
+
+    // Roll rotates the basis about the view axis and must not shear it: the
+    // view matrix, the picking ray and worldToScreen all derive from this basis,
+    // so orthogonality here is what keeps a rolled preview clickable.
+    camera.lookAt(eye, at, -1.0F, 0.6F);
+    const auto rolledUp = camera.up();
+    const auto rolledRight = camera.right();
+    const auto rolledFacing = camera.forward();
+    expect(std::abs(rolledUp.length() - 1.0F) < 0.001F &&
+               std::abs(rolledRight.length() - 1.0F) < 0.001F,
+           "rolled basis is not unit length");
+    expect(std::abs(Vec3f::dot(rolledUp, rolledRight)) < 0.001F &&
+               std::abs(Vec3f::dot(rolledUp, rolledFacing)) < 0.001F,
+           "rolled basis is not orthogonal");
+    expect(std::abs(rolledUp.y - 1.0F) > 0.01F, "roll left the up vector unrotated");
+    // A rolled screen centre still ray-casts onto the look-at point, which is the
+    // guarantee that clicks land where the rolled image says they should.
+    const auto centred = camera.screenToRay(400.0F, 300.0F, 800.0F, 600.0F);
+    const Vec3f rollToTarget{at.x - centred.origin.x, at.y - centred.origin.y,
+                             at.z - centred.origin.z};
+    expect(Vec3f::dot(centred.direction, rollToTarget.normalized()) > 0.999F,
+           "rolled camera's centre ray misses its target");
+
+    // A wider fovy frames more of the scene: the corner ray of a 90 degree
+    // camera must sit further off-axis than the same corner at 30 degrees.
+    ViewportCamera wide;
+    wide.lookAt(eye, at, 1.5707963F, 0.0F);
+    ViewportCamera narrow;
+    narrow.lookAt(eye, at, 0.5235988F, 0.0F);
+    const auto wideCorner = wide.screenToRay(800.0F, 600.0F, 800.0F, 600.0F).direction;
+    const auto narrowCorner = narrow.screenToRay(800.0F, 600.0F, 800.0F, 600.0F).direction;
+    const float wideSpread = Vec3f::dot(wideCorner, wide.forward());
+    const float narrowSpread = Vec3f::dot(narrowCorner, narrow.forward());
+    expect(wideSpread < narrowSpread, "a wider fovy did not widen the corner ray");
+
+    // The projection must honour the FOV the camera carries, so nothing that
+    // projects through it can disagree with the rendered image about framing.
+    const auto projection = wide.projectionMatrix(800.0F / 600.0F);
+    expect(std::abs(projection.values[5] - 1.0F / std::tan(1.5707963F * 0.5F)) < 0.001F,
+           "projection ignored the camera's field of view");
+    // And a bogus fovy must not degenerate the frustum.
+    ViewportCamera broken;
+    broken.lookAt(eye, at, 0.0F, 0.0F);
+    broken.fieldOfViewRadians = 0.0F;
+    const auto safeProjection = broken.projectionMatrix(800.0F / 600.0F);
+    expect(std::isfinite(safeProjection.values[5]) && safeProjection.values[5] > 0.0F,
+           "a zero fovy produced a degenerate projection");
+}
+
 void testReversedZDepthBuffer() {
     using whitehole::math::Matrix4;
     using whitehole::render::reversedZProjectionMatrix;
@@ -4211,6 +4291,7 @@ int main() {
         testYaz0();
         testMath();
         testViewportCamera();
+        testViewportCameraPreview();
         testReversedZDepthBuffer();
         testViewportScene();
         testObjectVisual();

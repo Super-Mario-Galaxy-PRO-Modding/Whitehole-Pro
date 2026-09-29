@@ -101,7 +101,9 @@ float gizmoAxisLength(const ViewportCamera& camera, const math::Vec3f& anchor,
     if (viewportHeight <= 0.0F) {
         return 1.0F;
     }
-    const float half = ViewportCamera::kFieldOfView * 0.5F;
+    // The camera's own FOV, not the editor default: a BCAM preview can render at
+    // any fovy, and a gizmo sized against 70 degrees would grow or shrink with it.
+    const float half = camera.fieldOfViewRadians * 0.5F;
     const float worldPerPixel =
         2.0F * anchorDepth(camera, anchor) * std::tan(half) / viewportHeight;
     return kAxisLengthPx * worldPerPixel;

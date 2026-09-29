@@ -217,6 +217,32 @@ public:
     void setOnGizmo(GizmoCallback callback) { onGizmo_ = std::move(callback); }
     void setOnNudge(NudgeCallback callback) { onNudge_ = std::move(callback); }
     [[nodiscard]] ViewportCamera& camera() noexcept { return camera_; }
+
+    // ---- in-game camera preview ------------------------------------------------
+    // Looks through one solved BCAM camera (smg::solveGameCameraPose hands the
+    // pose over). The viewport's own navigation is frozen for the duration --
+    // drags, wheel, fly keys and the tween all stand down -- so the author can
+    // tweak a parameter and watch the shot update without losing it. Navigation
+    // input (or Escape) ends the preview and restores the editor camera exactly
+    // where it was, including its 70-degree FOV and zero roll.
+    struct CameraPreviewPose {
+        math::Vec3f eye{};
+        math::Vec3f at{};
+        float fovRadians{ViewportCamera::kFieldOfView};
+        float rollRadians{0.0F};
+    };
+
+    void beginCameraPreview(const CameraPreviewPose& pose);
+    // Re-points a running preview (parameter edits call this every tweak).
+    void updateCameraPreview(const CameraPreviewPose& pose);
+    void endCameraPreview() noexcept;
+    [[nodiscard]] bool cameraPreviewActive() const noexcept { return cameraPreviewActive_; }
+    // Tells the editor that the preview ended by itself (a navigation gesture),
+    // so its "Previewing" checkbox can uncheck.
+    using CameraPreviewExitCallback = std::function<void()>;
+    void setOnCameraPreviewExit(CameraPreviewExitCallback callback) {
+        onCameraPreviewExit_ = std::move(callback);
+    }
     // Drops every uploaded model texture (call when the GL context is about
     // to die, or after the texture setting/filter changes).
     void clearModelTextures() noexcept { textureCache_.clear(); }
@@ -391,6 +417,13 @@ private:
     float hudTimer_{0.0F};
     CameraController controller_{};
     CameraTween tween_{};
+    // In-game camera preview state. `savedPreview*` holds the editor camera as
+    // it was when the preview began, so ending one is a verbatim restore rather
+    // than a re-derivation.
+    bool cameraPreviewActive_{false};
+    CameraPose savedPreviewPose_{};
+    float savedPreviewFov_{ViewportCamera::kFieldOfView};
+    CameraPreviewExitCallback onCameraPreviewExit_{};
     // Arrow nudge: per-key held state so a press fires once, then repeats.
     bool nudgeWasDown_[6]{false, false, false, false, false, false};
     std::chrono::steady_clock::time_point nextNudgeRepeat_{};

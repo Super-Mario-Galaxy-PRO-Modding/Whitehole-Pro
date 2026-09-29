@@ -1135,6 +1135,38 @@ void ViewportWindow::invalidate() {
     }
 }
 
+void ViewportWindow::beginCameraPreview(const CameraPreviewPose& pose) {
+    if (!cameraPreviewActive_) {
+        // Remember the editing camera verbatim (orbit pose + its FOV) so ending
+        // the preview is an exact restore. Roll needs no save: navigation never
+        // sets it, so 0 is always the editing value.
+        savedPreviewPose_ = camera_.pose();
+        savedPreviewFov_ = camera_.fieldOfViewRadians;
+        cameraPreviewActive_ = true;
+    }
+    // A tween still running when the preview starts would fight the pose and
+    // then drop the camera somewhere else when the preview ends.
+    tween_.cancel();
+    updateCameraPreview(pose);
+}
+
+void ViewportWindow::updateCameraPreview(const CameraPreviewPose& pose) {
+    camera_.lookAt(pose.eye, pose.at, pose.fovRadians, pose.rollRadians);
+    invalidate();
+}
+
+void ViewportWindow::endCameraPreview() noexcept {
+    if (!cameraPreviewActive_) {
+        return;
+    }
+    cameraPreviewActive_ = false;
+    camera_.setPose(savedPreviewPose_);
+    camera_.fieldOfViewRadians = savedPreviewFov_;
+    camera_.rollRadians = 0.0F;
+    tween_.cancel();
+    invalidate();
+}
+
 LRESULT CALLBACK ViewportWindow::windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* self = reinterpret_cast<ViewportWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
@@ -1153,6 +1185,29 @@ LRESULT CALLBACK ViewportWindow::windowProc(HWND window, UINT message, WPARAM wP
 }
 
 LRESULT ViewportWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    // A preview holds the camera still, so any navigation gesture counts as
+    // "back to editing": the preview ends and that one gesture is swallowed
+    // instead of also orbiting or selecting, which would make a single click do
+    // two things at once. Paint/size/focus messages still run, so the previewed
+    // frame keeps redrawing while the shell moves around it.
+    if (cameraPreviewActive_) {
+        const bool navigationGesture = message == WM_LBUTTONDOWN ||
+                                       message == WM_LBUTTONDBLCLK ||
+                                       message == WM_MBUTTONDOWN ||
+                                       message == WM_RBUTTONDOWN ||
+                                       message == WM_MOUSEWHEEL ||
+                                       message == WM_MOUSEHWHEEL ||
+                                       message == WM_KEYDOWN ||
+                                       message == WM_SYSKEYDOWN ||
+                                       message == WM_CHAR;
+        if (navigationGesture) {
+            endCameraPreview();
+            if (onCameraPreviewExit_) {
+                onCameraPreviewExit_();
+            }
+            return 0;
+        }
+    }
     switch (message) {
     case WM_PAINT:
         paint();
@@ -1768,7 +1823,8 @@ void ViewportWindow::applyCameraToGL(int width, int height) {
     // value: every closed model then showed the inside of its far wall -- an
     // inside-out, "backface-culled room" render -- and nearer geometry could
     // neither pass the test nor overwrite it.
-    glLoadMatrixf(reversedZProjectionMatrix(aspect, nearPlane, farPlane).values.data());
+    glLoadMatrixf(reversedZProjectionMatrix(aspect, nearPlane, farPlane, camera_.fieldOfViewRadians)
+                      .values.data());
     glMatrixMode(GL_MODELVIEW);
     // Matrix4 stores element (row, column) at values[4 * column + row], which is
     // exactly the column-major layout glLoadMatrixf expects, so the rendered
@@ -2208,6 +2264,21 @@ void ViewportWindow::startFocusTween(const math::Vec3f& center, float distance) 
 }
 
 void ViewportWindow::pollInput() {
+    // A preview owns the camera: navigation stays completely out of the way. The
+    // pending deltas are dropped rather than queued, so a gesture made during the
+    // preview cannot be waiting to fling the camera the moment it ends, and the
+    // fly clock keeps ticking so the first edit after the preview starts fresh.
+    if (cameraPreviewActive_) {
+        pendingDX_ = 0.0F;
+        pendingDY_ = 0.0F;
+        pendingWheel_ = 0.0F;
+        wheelAccumulator_ = 0;
+        lastFlyTick_ = std::chrono::steady_clock::now();
+        if (flyLook_) {
+            endFlyLook();
+        }
+        return;
+    }
     const auto now = std::chrono::steady_clock::now();
     // Delta time is real elapsed time, clamped so a stall (galaxy load, a
     // debugger break) can never teleport the camera. The tick also resets

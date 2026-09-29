@@ -27,7 +27,31 @@ math::Vec3f ViewportCamera::up() const noexcept {
     // straight up/down. Clamping the pitch inside +/-kMaxPitch keeps this
     // continuous, so the view never rolls or flips near the poles the way the
     // old "|forward.y| > 0.999 -> +/-Z up" special case did.
-    return std::cos(pitchRadians) >= 0.0F ? math::Vec3f{0.0F, 1.0F, 0.0F} : math::Vec3f{0.0F, -1.0F, 0.0F};
+    const math::Vec3f level{std::cos(pitchRadians) >= 0.0F ? math::Vec3f{0.0F, 1.0F, 0.0F}
+                                                           : math::Vec3f{0.0F, -1.0F, 0.0F}};
+    if (rollRadians == 0.0F) {
+        return level;
+    }
+    // Roll about the view axis. World Y is only perpendicular to that axis when
+    // the camera looks horizontally, so the level vector is projected away from
+    // the view axis first -- rotating an un-projected up about the axis would
+    // shear it into the view direction and give a skewed (non-orthogonal) basis.
+    // right(), the view matrix, the picking ray and worldToScreen all derive from
+    // the vector returned here, so one rotation here rolls the whole view, which
+    // is what makes a previewed BCAM roll honest and still clickable.
+    const math::Vec3f facing = forward();
+    const float along = math::Vec3f::dot(level, facing);
+    math::Vec3f base{level.x - facing.x * along, level.y - facing.y * along,
+                     level.z - facing.z * along};
+    if (base.length() < 0.000001F) {
+        return level; // looking exactly along the up axis: nothing to roll about
+    }
+    base = base.normalized();
+    const math::Vec3f sideways = math::Vec3f::cross(facing, base).normalized();
+    const float cosRoll = std::cos(rollRadians);
+    const float sinRoll = std::sin(rollRadians);
+    return {base.x * cosRoll + sideways.x * sinRoll, base.y * cosRoll + sideways.y * sinRoll,
+            base.z * cosRoll + sideways.z * sinRoll};
 }
 
 math::Vec3f ViewportCamera::right() const noexcept {
@@ -63,7 +87,8 @@ math::Matrix4 ViewportCamera::viewMatrix() const noexcept {
     return view;
 }
 
-math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane) noexcept {
+math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane,
+                                        float fovRadians) noexcept {
     const float safeAspect = aspect > 0.000001F ? aspect : 1.0F;
     // The clip planes come from the camera's dynamic band, so they are already
     // positive and ordered; these guards only stop a degenerate caller from
@@ -71,7 +96,11 @@ math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float far
     const float nearValue = nearPlane > 0.000001F ? nearPlane : 0.000001F;
     const float farValue = farPlane > nearValue ? farPlane : nearValue * 2.0F;
     const float depthRange = farValue - nearValue;
-    const float f = 1.0F / std::tan(ViewportCamera::kFieldOfView * 0.5F);
+    // A previewed BCAM can ask for any fovy; keep it inside a sane band so a
+    // bogus 0 or 180 degree value cannot make the frustum degenerate.
+    const float safeFov = std::clamp(fovRadians > 0.0F ? fovRadians : ViewportCamera::kFieldOfView,
+                                     0.0349066F, 2.9670598F); // 2 deg .. 170 deg
+    const float f = 1.0F / std::tan(safeFov * 0.5F);
     math::Matrix4 projection;
     projection.values.fill(0.0F);
     projection.values[0] = f / safeAspect;
@@ -92,7 +121,7 @@ math::Matrix4 ViewportCamera::projectionMatrix(float aspect) const noexcept {
     // projecting through this can disagree with the rendered image about which
     // way depth runs (the scene radius here only feeds the far plane, which the
     // renderer supplies itself).
-    return reversedZProjectionMatrix(aspect, nearPlane(), farPlane(10000.0F));
+    return reversedZProjectionMatrix(aspect, nearPlane(), farPlane(10000.0F), fieldOfViewRadians);
 }
 
 Ray ViewportCamera::screenToRay(float screenX, float screenY, float width, float height) const noexcept {
@@ -102,7 +131,10 @@ Ray ViewportCamera::screenToRay(float screenX, float screenY, float width, float
         return ray;
     }
     const float aspect = width / height;
-    const float half = kFieldOfView * 0.5F;
+    // A caller that leaves the FOV unset (or zeroes it) must not collapse the
+    // frustum to a single ray: fall back to the editor default, matching
+    // reversedZProjectionMatrix().
+    const float half = (fieldOfViewRadians > 0.0F ? fieldOfViewRadians : kFieldOfView) * 0.5F;
     const float tanHalf = std::tan(half);
     const float ndcX = (2.0F * screenX / width - 1.0F) * aspect * tanHalf;
     const float ndcY = (1.0F - 2.0F * screenY / height) * tanHalf;
@@ -143,6 +175,31 @@ void ViewportCamera::dolly(float wheelDelta) noexcept {
 void ViewportCamera::frameTarget(const math::Vec3f& point, float framedDistance) noexcept {
     target = point;
     distance = std::clamp(framedDistance, kMinDistance, kMaxDistance);
+}
+
+void ViewportCamera::lookAt(const math::Vec3f& eye, const math::Vec3f& at, float fovRadians,
+                            float rollRadians) noexcept {
+    target = at;
+    const math::Vec3f toEye{eye.x - at.x, eye.y - at.y, eye.z - at.z};
+    const float length = toEye.length();
+    if (length < 0.000001F) {
+        // No direction to look along: keep the current angles and just move the
+        // pivot, which is what a zero-length shot would mean anyway.
+        distance = kMinDistance;
+    } else {
+        const math::Vec3f direction{toEye.x / length, toEye.y / length, toEye.z / length};
+        distance = std::clamp(length, kMinDistance, kMaxDistance);
+        // Inverse of eye() = target + dist * (cos p cos y, sin p, cos p sin y).
+        pitchRadians = std::clamp(std::asin(std::clamp(direction.y, -1.0F, 1.0F)), -kMaxPitch,
+                                  kMaxPitch);
+        yawRadians = std::atan2(direction.z, direction.x);
+    }
+    if (fovRadians >= 0.0F) {
+        fieldOfViewRadians = fovRadians;
+    }
+    if (rollRadians >= 0.0F) {
+        this->rollRadians = rollRadians;
+    }
 }
 
 void ViewportCamera::fly(float rightAmount, float upAmount, float forwardAmount) noexcept {
@@ -234,7 +291,7 @@ bool ViewportCamera::worldToScreen(const math::Vec3f& point, float width, float 
         return false;
     }
     const float aspect = width / height;
-    const float half = kFieldOfView * 0.5F;
+    const float half = fieldOfViewRadians * 0.5F;
     const float f = 1.0F / std::tan(half);
     outX = width * 0.5F * (1.0F + (viewPoint.x * f / aspect) / -viewPoint.z);
     outY = height * 0.5F * (1.0F - (viewPoint.y * f) / -viewPoint.z);

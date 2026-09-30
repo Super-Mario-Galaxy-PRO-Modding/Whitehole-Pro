@@ -67,6 +67,11 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - Friendly names + parameter descriptions download **once** from Luma's Workshop.
 - Stored in your user config folder — survives reinstalls, never committed.
 
+### 🎥 In-game cameras (CameraParam.bcam)
+- **View > Cameras** edits the zone's camera table: every row with its authored vs engine-default values, per-field tooltips, add/remove rows.
+- **Live preview** solves the selected row into the viewport (eye/at + FOV + roll), framed on the selected object / start position / manual target.
+- Every edit is undoable (`Ctrl+Z`); rows the game's cutscene system owns show as "not reproducible outside the game" instead of guessing.
+
 ### 💻 CLI — the same engine, scriptable
 - `map objects`, `map paths`, `objectdb check`, `hash`, `bcsv inspect`, and more.
 - The **exact same C++ core** as the GUI — no duplicated logic.

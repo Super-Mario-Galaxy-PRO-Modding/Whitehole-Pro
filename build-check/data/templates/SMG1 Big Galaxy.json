@@ -1,9 +1,0 @@
-{
-    "Name": "Big Galaxy",
-    "OriginalName": "HoneyBeeKingdomGalaxy",
-    "Game": 1,
-    "ForGalaxy": true,
-    "MapFile": "SMG1BigGalaxy.arc",
-    "ScenarioFile": "SMG1BigGalaxyScenario.arc",
-    "UsedLayers": ["Common", "LayerA", "LayerB", "LayerC", "LayerD", "LayerE"]
-}

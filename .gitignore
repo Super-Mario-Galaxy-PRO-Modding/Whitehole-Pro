@@ -42,9 +42,11 @@ restore_labels.diff
 /run_build*.bat
 /check_build.ps1
 
-# Stale build trees; ./build is the only canonical one.
+# Stale build trees; ./build is the only canonical one (build-msvc/build-vs18
+# are covered above). Untracked build output must never be committed: stage
+# files by explicit path, never `git add -A`.
+/build-check/
 /build_ninja/
-/build-msvc/
 
 # Scratch artifacts that were committed by accident and had to be un-tracked.
 # `_*` covers the bulk of them (diagnostics dumps and one-off PowerShell

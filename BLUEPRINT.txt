@@ -139,6 +139,7 @@
 
    The PATH line is mandatory in EVERY shell: g++.exe itself starts, but cc1plus
    and the MSYS2 DLLs it needs are only reachable through the ucrt64 bin dir.
+   build-check/ was untracked this session (it had been committed by accident).
    Keep build directories OUT of the repo (see the wart below), otherwise every
    build dirties hundreds of tracked files.
 
@@ -147,8 +148,10 @@
  -Wconversion WILL bite you on float/double and int/size_t mixing in the camera
  panel. Build with MinGW as well as MSVC before pushing; CI uses MinGW.
 
- REPO WART: build output (build-check/, build/) is TRACKED in git - it shows up
- in `git ls-files`. NEVER use `git add -A` or `git commit -a` here. Stage the
+ REPO WART (partly fixed this session): build-check/ output WAS tracked in git
+ (202 files) and is now untracked via /build-check/ in .gitignore, with a CI
+ step rejecting any tracked build tree. NEVER use `git add -A` or
+ `git commit -a` here. Stage the
  files you touched by explicit path and check `git status --short` first, or you
  will commit .o files and a CMakeCache.txt.
 
@@ -448,8 +451,8 @@
 7. TESTS (cpp/tests/core_tests.cpp, one giant file, ~50 test fns, plain asserts)
 --------------------------------------------------------------------------------
 
- Registered as a single CTest test. Run the exe directly for faster output:
-   .\build-check\whitehole_core_tests.exe
+ Registered as a single CTest test. Run the built binary directly, e.g.
+   .\build\Release\whitehole_core_tests.exe (canonical VS preset output).
  Test functions are plain `void testFoo()` + a main() that calls them in order;
  add yours to that list or it silently never runs.
 
@@ -699,9 +702,10 @@
  - git is NOT on PATH here. Call it as:
        & 'C:\Program Files\Git\cmd\git.exe' --no-pager <args>
    Always --no-pager, or the call hangs on a pager.
- - Build with out-of-tree directories and the recipe in section 2 (not the old
-   build-check recipe): devkitPro's make is gone, cmake uses Ninja instead, and the
-   in-repo build dirs would dirty hundreds of tracked files on every compile.
+ - Build with out-of-tree directories and the recipe in section 2 (never a
+   checked-in tree): devkitPro's make is gone, cmake uses Ninja instead, and a
+   stale in-repo build dir would dirty hundreds of tracked files on every
+   compile.
  - MSVC needs the machine's vswhere on PATH before vcvars: older sessions had a
    working VS2022, but this machine's VS2022 lost vcvarsall.bat AND the VS
    Installer (no vswhere), so cmake reports "could not find any instance of
@@ -747,7 +751,8 @@
  302ec37  feat(cameras): read, edit and solve CameraParam.bcam
  bfc2bd2  Viewport: look through a solved BCAM camera (preview mode)
  8f70eb3  docs: add BLUEPRINT.txt, the cross-session handoff notes
- this     feat(cameras): the Cameras panel (list, edit, live preview)  <- HEAD
+ 85ab818  feat(cameras): the Cameras panel (list, edit, live preview)
+  this     chore(repo): stop tracking build-check output, document Cameras  <- HEAD
 
  Three of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520

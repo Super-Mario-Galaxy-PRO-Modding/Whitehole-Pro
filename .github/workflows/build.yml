@@ -56,6 +56,17 @@ jobs:
             exit 1
           fi
 
+      - name: Reject tracked build output
+        # build-check/ was once committed by accident (202 files of .o/.a/CMake
+        # state). Build trees are untracked on purpose; this keeps them out.
+        run: |
+          tracked=$(git ls-files | grep -E '^(build-check|build_ninja|build-msvc|build-vs18|build-lto|build-debug)/' || true)
+          if [ -n "$tracked" ]; then
+            echo "tracked build output must not be committed:"
+            echo "$tracked"
+            exit 1
+          fi
+
       - name: Upload executables
         uses: actions/upload-artifact@v4
         with:

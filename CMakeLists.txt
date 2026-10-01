@@ -95,6 +95,7 @@ add_library(whitehole_core
     cpp/src/smg/scenario_model.cpp
     cpp/src/smg/stage_archive.cpp
     cpp/src/smg/stage_builder.cpp
+    cpp/src/smg/stage_templates.cpp
     cpp/src/util/json.cpp
 )
 

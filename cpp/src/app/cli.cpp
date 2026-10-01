@@ -1,4 +1,4 @@
-﻿#include "whitehole/app/application.hpp"
+#include "whitehole/app/application.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
 
@@ -15,6 +15,8 @@
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
+#include "whitehole/smg/stage_builder.hpp"
+#include "whitehole/smg/stage_templates.hpp"
 #include "whitehole/edit/undo.hpp"
 
 #include "whitehole/render/model_library.hpp"
@@ -59,6 +61,10 @@ void printUsage() {
         << "  whitehole-pro-console models check <game-directory> <zone>\n"
         << "  whitehole-pro-console galaxy inspect <game-directory> <galaxy>\n"
         << "  whitehole-pro-console galaxy scenarios <game-directory> <galaxy>\n"
+        << "  whitehole-pro-console galaxy templates <game-directory>\n"
+        << "  whitehole-pro-console galaxy create <game-directory> <galaxy> [--zone <name>]... [--template <name>]\n"
+        << "  whitehole-pro-console zone templates <game-directory>\n"
+        << "  whitehole-pro-console zone create <game-directory> <zone> [--layer <name>]... [--template <name>]\n"
         << "  whitehole-pro-console galaxy scenario add <game-directory> <galaxy> [name] [--copy <mission-id>]\n"
         << "  whitehole-pro-console galaxy scenario remove <game-directory> <galaxy> <mission-id>\n"
         << "  whitehole-pro-console galaxy scenario set <game-directory> <galaxy> <mission-id> "
@@ -107,6 +113,8 @@ int bcsvRemoveCommand(int argc, char** argv);
 int zoneParamsCommand(int argc, char** argv);
 int zoneSetCommand(int argc, char** argv);
 int zoneListCommand(int argc, char** argv);
+int zoneCreateCommand(int argc, char** argv);
+int templateListCommand(int argc, char** argv, int gameType, bool forGalaxy);
 int mapParamsCommand(int argc, char** argv);
 int mapSetCommand(int argc, char** argv);
 int mapAddCommand(int argc, char** argv);
@@ -666,6 +674,107 @@ int galaxyScenarioEditCommand(int argc, char** argv) {
         "Unknown galaxy scenario sub-command: " + action + "\n(add | set | remove | layer)");
 }
 
+// `galaxy create` / `zone create`. The templates and the builder are shared with
+// the Scenarios panel, so a script and a human create the same thing.
+int galaxyCreateCommand(int argc, char** argv) {
+    // galaxy create <game-directory> <galaxy> [--zone <name>]... [--template <name>]
+    if (argc < 5) {
+        throw std::runtime_error(
+            "galaxy create requires: <game-directory> <galaxy> [--zone <name>]... "
+            "[--template <name>] [--json]");
+    }
+    const std::string directory = argv[3];
+    const std::string name = argv[4];
+    std::vector<std::string> extraZones;
+    std::string templateName;
+    for (int index = 5; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--json") {
+            g_json = true;
+        } else if (flag == "--zone") {
+            if (index + 1 >= argc) {
+                throw std::runtime_error("--zone needs a name");
+            }
+            extraZones.emplace_back(argv[++index]);
+        } else if (flag == "--template") {
+            if (index + 1 >= argc) {
+                throw std::runtime_error("--template needs a name");
+            }
+            templateName = argv[++index];
+        } else if (flag.rfind("--", 0) == 0) {
+            throw std::runtime_error("Unknown flag: " + flag +
+                                     "\n(--zone | --template | --json)");
+        } else {
+            throw std::runtime_error("Unexpected argument: " + flag);
+        }
+    }
+
+    smg::GameArchive game(directory);
+    const int gameType = game.gameType();
+    const auto templates = dataDirectory(directory);
+    const auto available = smg::loadStageTemplates(templates / "templates", gameType, true);
+    // A template is a starting point, never a requirement: with none named, the
+    // bare-minimum schemas are used, which is how an empty galaxy is created.
+    smg::StageTemplate chosen = smg::bareMinimumTemplate(gameType);
+    chosen.forGalaxy = true;
+    bool found = false;
+    for (const auto& candidate : available) {
+        if (templateName.empty() || candidate.name == templateName) {
+            chosen = candidate;
+            found = true;
+            break;
+        }
+    }
+    if (!templateName.empty() && !found) {
+        throw std::runtime_error("No galaxy template named \"" + templateName +
+                                 "\". Run `galaxy templates` to see them.");
+    }
+    const auto schema = chosen.mapArchive(templates / "templates");
+    if (!schema.has_value()) {
+        throw std::runtime_error("Template \"" + chosen.name + "\" has no map archive to "
+                                 "read the zone layout from");
+    }
+    // The template's own layers are created too: the archive carries them, so
+    // leaving them out would promise a zone the template cannot be.
+    auto layers = chosen.usedLayers;
+    if (std::find(layers.begin(), layers.end(), "Common") == layers.end()) {
+        layers.insert(layers.begin(), "Common");
+    }
+
+    io::DirectoryFilesystem project(directory);
+    smg::createGalaxy(project, name, extraZones, layers, *schema, gameType);
+
+    if (g_json) {
+        util::JsonObject root;
+        root["command"] = "galaxy create";
+        root["galaxy"] = name;
+        root["template"] = chosen.name;
+        util::JsonArray zoneNames;
+        zoneNames.emplace_back(name);
+        for (const auto& zoneName : extraZones) {
+            zoneNames.emplace_back(zoneName);
+        }
+        root["zones"] = std::move(zoneNames);
+        util::JsonArray layerNames;
+        for (const auto& layer : layers) {
+            layerNames.emplace_back(layer);
+        }
+        root["layers"] = std::move(layerNames);
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+    std::cout << "Created galaxy " << name << " from \"" << chosen.name << "\":\n";
+    // The REAL paths, from the builder's own rules -- not an SMG2-shaped guess
+    // printed regardless of game. An SMG1 galaxy's map is a flat /StageData/<n>.arc.
+    std::cout << "  " << smg::stageMapFilesystemPath(name, gameType) << '\n';
+    std::cout << "  " << smg::zoneScenarioPath(name, gameType) << '\n';
+    for (const auto& zoneName : extraZones) {
+        std::cout << "  zone " << zoneName
+                  << "  (linked only -- run `zone create` to give it a map)\n";
+    }
+    return 0;
+}
+
 int galaxyCommand(int argc, char** argv) {
     if (argc < 4) {
         throw std::runtime_error("galaxy requires a sub-command: inspect, scenarios, scenario");
@@ -673,6 +782,16 @@ int galaxyCommand(int argc, char** argv) {
     const std::string sub = argv[2];
     if (sub == "scenarios") {
         return galaxyScenariosCommand(argc, argv);
+    }
+    if (sub == "create") {
+        return galaxyCreateCommand(argc, argv);
+    }
+    if (sub == "templates") {
+        if (argc != 4) {
+            throw std::runtime_error("galaxy templates requires a game directory");
+        }
+        smg::GameArchive game(argv[3]);
+        return templateListCommand(argc, argv, game.gameType(), true);
     }
     if (sub == "scenario") {
         // Re-based on the ACTION, so the sub-commands can read argv[2]=action
@@ -778,6 +897,16 @@ int zoneCommand(int argc, char** argv) {
     }
     if (operation == "list") {
         return zoneListCommand(argc, argv);
+    }
+    if (operation == "create") {
+        return zoneCreateCommand(argc, argv);
+    }
+    if (operation == "templates") {
+        if (argc != 4) {
+            throw std::runtime_error("zone templates requires a game directory");
+        }
+        smg::GameArchive game(argv[3]);
+        return templateListCommand(argc, argv, game.gameType(), false);
     }
     if (operation == "params") {
         return zoneParamsCommand(argc, argv);
@@ -1622,6 +1751,152 @@ int mapRemoveCommand(int argc, char** argv) {
 // the workspace itself; --game only overrides it.
 int zoneGameType(const smg::GameArchive& game, const EditOptions& options) {
     return options.gameType != 0 ? options.gameType : game.gameType();
+}
+
+// `zone create <game-directory> <zone> [--galaxy <g>] [--template <t>]
+//                [--layer <name>]...`
+int zoneCreateCommand(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error(
+            "zone create requires: <game-directory> <zone> [--layer <name>]... "
+            "[--template <name>] [--json]");
+    }
+    const std::string directory = argv[3];
+    const std::string name = argv[4];
+    std::string templateName;
+    std::vector<std::string> layers{"Common"};
+    for (int index = 5; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--json") {
+            g_json = true;
+        } else if (flag == "--layer") {
+            if (index + 1 >= argc) {
+                throw std::runtime_error("--layer needs a name (Common, LayerA .. LayerP)");
+            }
+            layers.emplace_back(argv[++index]);
+        } else if (flag == "--template") {
+            if (index + 1 >= argc) {
+                throw std::runtime_error("--template needs a name");
+            }
+            templateName = argv[++index];
+        } else if (flag.rfind("--", 0) == 0) {
+            throw std::runtime_error("Unknown flag: " + flag +
+                                     "\n(--layer | --template | --json)");
+        } else {
+            throw std::runtime_error("Unexpected argument: " + flag);
+        }
+    }
+
+    smg::GameArchive game(directory);
+    const int gameType = game.gameType();
+    const auto templates = dataDirectory(directory) / "templates";
+    const auto available = smg::loadStageTemplates(templates, gameType, false);
+    smg::StageTemplate chosen = smg::bareMinimumTemplate(gameType);
+    bool found = false;
+    for (const auto& candidate : available) {
+        if (templateName.empty() || candidate.name == templateName) {
+            chosen = candidate;
+            found = true;
+            break;
+        }
+    }
+    if (!templateName.empty() && !found) {
+        throw std::runtime_error("No zone template named \"" + templateName +
+                                 "\". Run `zone templates` to see them.");
+    }
+    // A named template's layers are part of the template, not a suggestion, so
+    // they are added to whatever was asked for rather than replacing it.
+    const auto schema = chosen.mapArchive(templates);
+    if (!schema.has_value()) {
+        throw std::runtime_error("Template \"" + chosen.name + "\" has no map archive to "
+                                 "read the zone layout from");
+    }
+    for (const auto& layer : chosen.usedLayers) {
+        if (std::find(layers.begin(), layers.end(), layer) == layers.end()) {
+            layers.push_back(layer);
+        }
+    }
+
+    io::DirectoryFilesystem project(directory);
+    smg::CreatedZone created;
+    smg::createStageZone(project, name, layers, *schema, gameType, &created);
+
+    if (g_json) {
+        util::JsonObject root;
+        root["command"] = "zone create";
+        root["zone"] = name;
+        root["template"] = chosen.name;
+        root["map"] = created.mapPath;
+        util::JsonArray layerNames;
+        for (const auto& layer : created.layers) {
+            layerNames.emplace_back(layer);
+        }
+        root["layers"] = std::move(layerNames);
+        util::JsonArray files;
+        for (const auto& file : created.layerFiles) {
+            files.emplace_back(file);
+        }
+        root["files"] = std::move(files);
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+    std::cout << "Created zone " << name << " from \"" << chosen.name << "\":\n";
+    std::cout << "  " << created.mapPath << '\n';
+    std::cout << "  layers:";
+    for (const auto& layer : created.layers) {
+        std::cout << ' ' << layer;
+    }
+    std::cout << "\n  " << created.layerFiles.size() << " tables, and a spawn point at the "
+              << "origin\n";
+    std::cout << "  Add it to a galaxy's zone list with:\n"
+              << "    galaxy scenario layer ... (or the Scenarios panel's zone list)\n";
+    return 0;
+}
+
+// `zone templates` / `galaxy templates` -- what can be created from, so the
+// names accepted by --template are discoverable instead of guessed.
+int templateListCommand(int argc, char** argv, int gameType, bool forGalaxy) {
+    const auto templates = dataDirectory(argv[3]) / "templates";
+    auto list = smg::loadStageTemplates(templates, gameType, forGalaxy);
+    const auto bare = smg::bareMinimumTemplate(gameType);
+    if (g_json) {
+        util::JsonArray entries;
+        const auto emit = [&entries](const smg::StageTemplate& tmpl) {
+            util::JsonObject entry;
+            entry["name"] = tmpl.name;
+            entry["mapFile"] = tmpl.mapFile;
+            util::JsonArray layers;
+            for (const auto& layer : tmpl.usedLayers) {
+                layers.emplace_back(layer);
+            }
+            entry["layers"] = std::move(layers);
+            entries.emplace_back(std::move(entry));
+        };
+        emit(bare);
+        for (const auto& tmpl : list) {
+            emit(tmpl);
+        }
+        util::JsonObject root;
+        root["command"] = forGalaxy ? "galaxy templates" : "zone templates";
+        root["game"] = gameType;
+        root["templates"] = std::move(entries);
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+    std::cout << "Templates for this game:\n";
+    std::cout << "  " << bare.name << "  (layers:";
+    for (const auto& layer : bare.usedLayers) {
+        std::cout << ' ' << layer;
+    }
+    std::cout << ")\n";
+    for (const auto& tmpl : list) {
+        std::cout << "  " << tmpl.name << "  (layers:";
+        for (const auto& layer : tmpl.usedLayers) {
+            std::cout << ' ' << layer;
+        }
+        std::cout << ")\n";
+    }
+    return 0;
 }
 
 int zoneListCommand(int argc, char** argv) {

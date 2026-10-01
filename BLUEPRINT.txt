@@ -1067,6 +1067,84 @@
   populateJMapFields* functions -- SMG2StandardZoneMap.arc is already a correct
   bare zone with the exact layout and the one StartInfo row Java adds.
 
+   [done]  CREATE ZONE / CREATE GALAXY, and the template loader. The builder
+            derives its JMP schemas from the shipped template archives instead
+            of transcribing Java's 13 populateJMapFields* functions, and asks
+            ScenarioModel for the scenario columns rather than restating them.
+            `zone create` / `galaxy create` / `zone templates` /
+            `galaxy templates` in the CLI. See section 15 for the four bugs the
+            test found, two of them silent data loss.
+
+================================================================================
+15. CREATING ZONES AND GALAXIES (cpp/include/whitehole/smg/stage_builder.hpp)
+================================================================================
+
+  THE DESIGN DECISION, because it is the whole reason this was tractable:
+  Java builds every JMap file by hand through thirteen populateJMapFields*
+  functions -- ObjInfo alone is 38 fields, and a wrong field is a zone the game
+  rejects. But every one of those field lists is ALREADY in the template
+  archives shipped in data/templates: a template is a real game file with the
+  right schema and no rows. So the builder COPIES the schema and transcribes
+  nothing, and the scenario side asks ScenarioModel, which already owns the
+  columns and the SMG1/SMG2 split. Roughly 400 lines of hand-transcribed
+  guessing became a loop over a file the game itself produced.
+
+  That is also why a template is REQUIRED even for a "bare minimum" zone:
+  without a real game file there is no trustworthy schema, and the builder
+  refuses rather than inventing one. bareMinimumMapArchive() is the bundled
+  per-game bare zone (SMG2StandardZoneMap.arc / SMG1OneStarGalaxy.arc).
+
+  THE FOUR BUGS, all found by the test, all silent except the first:
+
+   1. createDirectory()'s idempotence check used find(), which falls back to a
+      bare-filename and path-suffix match. Asking whether ".../MapParts/Common"
+      exists was answered by the FILE ".../MapParts/Common/MapPartsInfo" -- a
+      suffix match, and not a directory. The per-layer directory was skipped, and
+      every file in it then failed to serialize for having no parent.
+
+   2. insert() had the SAME problem, and far worse. Every layer's tables have the
+      SAME file names (Common/StartInfo, LayerA/StartInfo, ...), so inserting
+      LayerA's table found Common's and REPLACED it. The archive looked
+      complete -- every layer directory was present -- while every non-Common
+      layer silently held no tables at all. insert() now uses findExact(); the
+      loose fallback is right for a human reading a path and catastrophic for a
+      writer.
+
+   3. ensureScenarioColumns() unconditionally created PowerStarType and
+      CometLimitTimer, which are SMG2-ONLY. Adding a mission to an SMG1 galaxy
+      would have put columns in the file the game has never seen -- exactly the
+      mistake the Scenarios panel refuses to make with its star-type picker. It
+      now reads the game's own SMG1 marker (IsHidden) to decide.
+
+   4. A fresh galaxy's first mission awarded NO star, because addScenario()
+      deliberately leaves a new mission empty -- right for the panel's "add a
+      mission", wrong for a galaxy's FIRST, which would open handing out no
+      stars at all. Java's own starter row sets PowerStarId = ScenarioNo.
+
+  LAYOUT FACTS THAT ARE EASY TO GET WRONG, all from StageHelper:
+   * SMG1 lowercases EVERY path: /stage/jmp/placement/common. The root of an SMG1
+     scenario archive is lowercased too, but the FILE name is not.
+   * SoundInfo and ChildObjInfo are SMG1-ONLY; creating them for SMG2 adds files
+     the game does not expect. (This is why stageLayeredTables() is shared with
+     the loader -- see section 11.)
+   * GalaxyInfo is SMG2-ONLY. Its absence is MEANINGFUL: the Scenarios panel
+     reads an absent PowerStarType as "this galaxy records no star type".
+   * SMG1 zones are FLAT (/StageData/<zone>.arc); SMG2 zones get a folder.
+
+  WHAT IS PROVEN, AND WHAT IS NOT: a created zone reopens through
+  StageArchive::open (the loader the editor itself uses) with its spawn point and
+  its tables, and a created galaxy reopens through GalaxyArchive with its map
+  zone leading the editable list. Both games are covered, and the template is
+  byte-identical afterwards. This does NOT establish that a retail SMG1/SMG2
+  accepts a created zone: no game has been run against it. Treat "the game reads
+  this" as unverified until someone opens a created zone on hardware.
+
+  STILL OPEN: the GUI layer picker. The CLI (zone create / galaxy create / zone
+  templates / galaxy templates) and the shared core are done; the Scenarios
+  panel has no create button yet, and creation is NOT undoable -- it writes whole
+  new archives, which the GalaxyTableCommand snapshot model cannot express. The
+  GUI must say so in the confirm step rather than hiding the gap.
+
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.
 ================================================================================

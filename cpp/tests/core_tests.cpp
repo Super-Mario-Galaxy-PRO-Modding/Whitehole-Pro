@@ -38,6 +38,7 @@
 #include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 #include "whitehole/smg/stage_builder.hpp"
+#include "whitehole/smg/stage_templates.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -356,6 +357,134 @@ void testWriteFileLeavesNoTemporaries() {
     whitehole::io::writeFile(nested, {7});
     expect(whitehole::io::readFile(nested) == std::vector<std::uint8_t>({7}),
            "writeFile must create missing parent directories");
+}
+
+// The creation templates, which shipped in data/templates since before the port
+// and which nothing in the C++ read at all.
+void testStageTemplates() {
+    using namespace whitehole::smg;
+    const auto templates =
+        std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+
+    // The game split and the galaxy/zone split both filter, exactly as Java's
+    // isApplicableTemplate does: a template for the wrong game must never be
+    // offered, and neither must a galaxy template appear when creating a zone.
+    const auto smg2Galaxies = loadStageTemplates(templates, 2, true);
+    const auto smg2Zones = loadStageTemplates(templates, 2, false);
+    const auto smg1Galaxies = loadStageTemplates(templates, 1, true);
+    expect(!smg2Galaxies.empty(), "the SMG2 galaxy templates must load");
+    expect(!smg2Zones.empty(), "the SMG2 zone templates must load");
+    expect(!smg1Galaxies.empty(), "the SMG1 galaxy templates must load");
+
+    const auto hasName = [](const std::vector<StageTemplate>& list, const std::string& name) {
+        return std::any_of(list.begin(), list.end(),
+                           [&name](const StageTemplate& tmpl) { return tmpl.name == name; });
+    };
+    expect(hasName(smg2Galaxies, "Big Galaxy"), "the SMG2 Big Galaxy template must load");
+    expect(hasName(smg1Galaxies, "1 Star Galaxy"),
+           "the SMG1 1 Star Galaxy template must load");
+    // The one that matters most: a ZONE template must not turn up as a galaxy
+    // one, or `galaxy create` would build a galaxy from a bare zone.
+    expect(!hasName(smg2Galaxies, "Standard Zone"),
+           "a zone template must never be offered as a galaxy template");
+    expect(!hasName(smg1Galaxies, "Standard Zone"),
+           "a zone template must never be offered for SMG1 either");
+    expect(!hasName(smg2Galaxies, "1 Star Galaxy"),
+           "an SMG1 template must not be offered for SMG2");
+
+    // UsedLayers are the layers the archive already carries, which the layer
+    // picker shows as forced. A template with none listed is not a broken file,
+    // it just forces nothing.
+    for (const auto& tmpl : smg2Galaxies) {
+        if (tmpl.name == "Big Galaxy") {
+            expect(tmpl.usedLayers.size() >= 4,
+                   "the Big Galaxy template must record the layers it uses");
+            expect(std::find(tmpl.usedLayers.begin(), tmpl.usedLayers.end(), "Common")
+                       != tmpl.usedLayers.end(),
+                   "a galaxy template's used layers must include Common");
+        }
+    }
+
+    // Every galaxy template must be able to produce its map archive: a template
+    // that names a file which is not there would fail at creation time, and the
+    // error would be far from the cause.
+    for (const auto& tmpl : smg2Galaxies) {
+        const auto bytes = tmpl.mapArchive(templates);
+        expect(bytes.has_value(), "template \"" + tmpl.name + "\" must name a map archive");
+        expect(!bytes->empty(), "template \"" + tmpl.name + "\"'s archive must not be empty");
+    }
+
+    // Bare minimum is not a file -- it is the bundled bare-zone map per game.
+    const auto bare2 = bareMinimumTemplate(2);
+    const auto bare1 = bareMinimumTemplate(1);
+    expect(bare2.mapFile != bare1.mapFile,
+           "the two games must use DIFFERENT bare-zone templates, or one game's "
+           "lowercase layout would be built with the other's casing");
+    expect(!bareMinimumMapArchive(templates, 2).empty(),
+           "the SMG2 bare-zone archive must load");
+    expect(!bareMinimumMapArchive(templates, 1).empty(),
+           "the SMG1 bare-zone archive must load");
+
+    // These files are user-editable, so a malformed one must be a clear error
+    // naming the file -- not a crash, and not a silently half-built galaxy. Each
+    // case gets its own directory: a leftover Broken.json would otherwise be
+    // re-reported by the NEXT load and mask what that one is asserting.
+    bool reported = false;
+    {
+        TemporaryDirectory brokenDirectory;
+        std::ofstream broken(brokenDirectory.path / "Broken.json");
+        broken << "{ this is not json";
+        try {
+            (void)loadStageTemplates(brokenDirectory.path, 2, true);
+        } catch (const std::runtime_error& error) {
+            reported = std::string(error.what()).find("Broken.json") != std::string::npos;
+        }
+        expect(reported, "a malformed template must be reported BY NAME, not ignored");
+
+        // A template file that is valid JSON but not an object is the same class
+        // of mistake, and just as likely from a hand-edited file. Broken.json goes
+        // first: the loader reports the FIRST bad file it meets, and directory
+        // order is not something to depend on.
+        std::filesystem::remove(brokenDirectory.path / "Broken.json");
+        reported = false;
+        std::ofstream array(brokenDirectory.path / "Array.json");
+        array << "[1, 2, 3]";
+        try {
+            (void)loadStageTemplates(brokenDirectory.path, 2, true);
+        } catch (const std::runtime_error& error) {
+            reported = std::string(error.what()).find("Array.json") != std::string::npos;
+        }
+        expect(reported, "a template that is not a JSON object must be reported BY NAME");
+    }
+    TemporaryDirectory temporary;
+
+    // A template that names a map archive which is not there is a broken
+    // template, not a bare one: the user asked for content we cannot deliver.
+    {
+        std::ofstream missing(temporary.path / "Missing.json");
+        missing << R"({"Name":"Ghost","Game":2,"ForGalaxy":true,"MapFile":"Nope.arc"})";
+    }
+    // Listing does not open the file -- that check belongs to mapArchive(), which
+    // is what the create path actually calls, so it is where a missing archive
+    // is caught.
+    const auto ghosts = loadStageTemplates(temporary.path, 2, true);
+    bool listed = false;
+    for (const auto& tmpl : ghosts) {
+        listed = listed || tmpl.name == "Ghost";
+    }
+    expect(listed, "a template naming a missing archive must still be LISTED, so the "
+                   "user can see what is installed");
+    reported = false;
+    try {
+        for (const auto& tmpl : ghosts) {
+            if (tmpl.name == "Ghost") {
+                (void)tmpl.mapArchive(temporary.path);
+            }
+        }
+    } catch (const std::runtime_error& error) {
+        reported = std::string(error.what()).find("Nope.arc") != std::string::npos;
+    }
+    expect(reported, "opening a template whose archive is missing must be reported");
 }
 
 void testDirectoryFilesystem() {
@@ -5448,6 +5577,7 @@ int main() {
     try {
         testBinaryData();
         testStageBuilder();
+        testStageTemplates();
         testWriteFileLeavesNoTemporaries();
         testDirectoryFilesystem();
         testYaz0();

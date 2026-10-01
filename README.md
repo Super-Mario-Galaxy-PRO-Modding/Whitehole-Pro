@@ -235,6 +235,12 @@ whitehole-pro-console.exe galaxy scenario layer C:\path\to\extracted\files Honey
 whitehole-pro-console.exe galaxy scenario add C:\path\to\extracted\files HoneyBeeKingdomGalaxy "Extra Mission" --copy 3
 whitehole-pro-console.exe galaxy scenario remove C:\path\to\extracted\files HoneyBeeKingdomGalaxy 9
 
+# Create a galaxy or a zone from scratch, using the bundled templates
+whitehole-pro-console.exe galaxy templates C:\path\to\extracted\files
+whitehole-pro-console.exe galaxy create C:\path\to\extracted\files NewGalaxy --zone Cave
+whitehole-pro-console.exe zone templates C:\path\to\extracted\files
+whitehole-pro-console.exe zone create C:\path\to\extracted\files Cave --layer LayerA
+
 # Field-name hashes (parity with the Java reader)
 whitehole-pro-console.exe hash Obj_arg0
 
@@ -364,7 +370,7 @@ editor's core · full test suite.
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. 🚧 Layer filtering & hierarchical object tree
 4. 🚧 BCSV spreadsheet editor
-5. 🚧 Galaxy & zone management — scenario editor shipped (View > Scenarios) and the CLI reaches the scenario tables; archives can now be created from nothing, which is what "create a galaxy / create a zone" needs — the builder and the GUI's layer picker are still to do
+5. 🚧 Galaxy & zone management — scenario editor (View > Scenarios), a full CLI for the scenario tables, and `zone create` / `galaxy create` with the bundled templates; the GUI's layer picker is the last piece
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)
 7. 🚧 Model/texture browser inside the app
 8. ⏳ Cross-platform GUI (the core already builds anywhere)

@@ -107,7 +107,15 @@ public:
             throw std::runtime_error("could not create temporary test directory");
         }
     }
-    ~TemporaryDirectory() { std::filesystem::remove_all(path); }
+    // Best-effort, and DELIBERATELY non-throwing. remove_all's throwing overload
+    // turns any lingering handle into a hard test failure that names a file the
+    // test author never mentioned -- which is exactly how a passing run turned
+    // red on one machine and stayed green on another. Cleanup is housekeeping; a
+    // stale temp directory must never be able to fail a test.
+    ~TemporaryDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path, ignored);
+    }
 
     TemporaryDirectory(const TemporaryDirectory&) = delete;
     TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
@@ -432,8 +440,15 @@ void testStageTemplates() {
     bool reported = false;
     {
         TemporaryDirectory brokenDirectory;
-        std::ofstream broken(brokenDirectory.path / "Broken.json");
-        broken << "{ this is not json";
+        // EVERY stream below is scoped to its own block, and closed before the
+        // next statement touches its file. That discipline is the rest of this
+        // file's convention, and it is load-bearing: an ofstream still open when
+        // remove() or ~TemporaryDirectory runs makes THAT call fail with "being
+        // used by another process", naming a file the reader never heard of.
+        {
+            std::ofstream broken(brokenDirectory.path / "Broken.json");
+            broken << "{ this is not json";
+        }
         try {
             (void)loadStageTemplates(brokenDirectory.path, 2, true);
         } catch (const std::runtime_error& error) {
@@ -445,10 +460,14 @@ void testStageTemplates() {
         // of mistake, and just as likely from a hand-edited file. Broken.json goes
         // first: the loader reports the FIRST bad file it meets, and directory
         // order is not something to depend on.
-        std::filesystem::remove(brokenDirectory.path / "Broken.json");
+        std::error_code removed;
+        std::filesystem::remove(brokenDirectory.path / "Broken.json", removed);
+        expect(!removed, "the first broken template must be removable");
         reported = false;
-        std::ofstream array(brokenDirectory.path / "Array.json");
-        array << "[1, 2, 3]";
+        {
+            std::ofstream array(brokenDirectory.path / "Array.json");
+            array << "[1, 2, 3]";
+        }
         try {
             (void)loadStageTemplates(brokenDirectory.path, 2, true);
         } catch (const std::runtime_error& error) {
@@ -461,6 +480,9 @@ void testStageTemplates() {
     // A template that names a map archive which is not there is a broken
     // template, not a bare one: the user asked for content we cannot deliver.
     {
+        // Scoped, for the same reason as the streams above: this directory is
+        // removed by ~TemporaryDirectory at the end of the function, and an open
+        // handle there is what turns cleanup into a test failure.
         std::ofstream missing(temporary.path / "Missing.json");
         missing << R"({"Name":"Ghost","Game":2,"ForGalaxy":true,"MapFile":"Nope.arc"})";
     }

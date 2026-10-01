@@ -83,6 +83,13 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - **Zone list** — add, remove and reorder the zones the galaxy loads. This edits the list only; it never creates or deletes a zone's files.
 - One undo step per edit (`Ctrl+Z`), on its own history so switching zones cannot discard it. `Ctrl+S` saves whichever document is dirty.
 
+### ✨ Creating from scratch
+- **Project > Create** makes a **zone** or a **galaxy** from any bundled template — no terminal needed.
+- **It shows you what it writes first.** "Show what it writes…" lists the exact files and table count before anything touches the disk.
+- **Layers are the game's own.** You pick from a template's real file layout; layers the template already carries are shown locked, and `Common` is locked because it is not a value in the file.
+- **Honest about undo:** creating writes whole new archives, so the confirm step says plainly that `Ctrl+Z` cannot undo it.
+- The same thing from the command line, with `--dry-run`:
+
 ### 💻 CLI — the same engine, scriptable
 - `map objects`, `map paths`, `objectdb check`, `hash`, `bcsv inspect`, and more.
 - The **exact same C++ core** as the GUI — no duplicated logic.
@@ -373,7 +380,7 @@ editor's core · full test suite.
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. 🚧 Layer filtering & hierarchical object tree
 4. 🚧 BCSV spreadsheet editor
-5. 🚧 Galaxy & zone management — scenario editor (View > Scenarios), a full CLI for the scenario tables, and `zone create` / `galaxy create` with the bundled templates; the GUI's layer picker is the last piece
+5. ✅ Galaxy & zone management — scenario editor (View > Scenarios), a full CLI for the scenario tables, `zone create` / `galaxy create` with the bundled templates, **and the GUI's layer picker** (Project > Create) with a "show what it writes" confirm step
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)
 7. 🚧 Model/texture browser inside the app
 8. ⏳ Cross-platform GUI (the core already builds anywhere)

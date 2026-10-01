@@ -29,6 +29,9 @@
 #include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/smg/path.hpp"
+#include "whitehole/smg/scenario_model.hpp"
+#include "whitehole/smg/stage_builder.hpp"
+#include "whitehole/smg/stage_templates.hpp"
 #include "whitehole/util/text.hpp"
 #include "whitehole/render/viewport_win32.hpp"
 #include "whitehole/smg/game_archive.hpp"
@@ -341,6 +344,28 @@ struct EditorState {
     // Seeded per frame from the model; the panel reads it for the layer matrix's
     // "which zone am I editing layers for" picker.
     std::size_t scenarioLayerZone{0};
+
+    // --- Creating a zone / galaxy from the GUI (roadmap 5) -------------------
+    // The create core and the CLI are shared, so this is UI only. What it must not
+    // be is a second, looser layer picker: the panel feeds its selection through
+    // smg::normalizeStageLayers(), the same function the builder calls, so the two
+    // surfaces cannot disagree about what a set of layers means.
+    enum class CreateKind { None, Zone, Galaxy };
+    CreateKind createKind{CreateKind::None};
+    // Buffers rather than a std::string, for the same reason the scenario ones are:
+    // an ImGui popup stays open across frames while the author types.
+    char createName[128]{};
+    // Which entry of the template list is picked. Index 0 is always the bare
+    // minimum, which loadStageTemplates does not return and which is added by hand.
+    int createTemplateIndex{0};
+    // Bit per layer, indexed by scenarioLayerBit(). An int rather than a
+    // std::vector<bool> because it maps straight onto that function and must
+    // survive a frame without allocating. "Common" owns no bit and is always on.
+    int createLayerMask{0};
+    // Galaxy only: extra zones to link from the new galaxy map.
+    char createExtraZoneBuf[256]{};
+    // True on the second step, which shows what will be written before doing it.
+    bool createConfirm{false};
 
     // --- Closing guard -------------------------------------------------------
     // Exit (and opening a different archive) would throw away unsaved edits, so
@@ -2210,7 +2235,337 @@ ImVec4 toImVec4(const Rgba& color) {
     return ImVec4(color.r, color.g, color.b, color.a);
 }
 
+// ---------------------------------------------------------------------------
+// Creating a zone / galaxy (the GUI half of roadmap 5).
+// ---------------------------------------------------------------------------
+//
+// The create core and the CLI are shared, so this is UI only -- but it is NOT a
+// second, looser implementation of anything. Two rules keep it honest:
+//
+//  1. The layer selection is handed to smg::normalizeStageLayers(), the same
+//     function createStageZone() calls, so the panel cannot disagree with the
+//     builder about what a set of layers means, and a name that is not a layer
+//     is REJECTED rather than silently dropped.
+//  2. The confirm step renders smg::StageCreatePlan -- the same value `create
+//     --dry-run` prints -- so "what will happen" is the real file list, not a
+//     description of it. testStageCreatePlans pins plan == what create wrote.
+//
+// Creation is NOT undoable: it writes whole new archives, which the
+// GalaxyTableCommand snapshot model cannot express. So the confirm step SAYS SO,
+// in the same TextDisabled voice the Scenarios panel uses for its caveats,
+// rather than leaving it in a file most users never read.
+
+// Splits the extra-zone buffer on commas, newlines and semicolons. All three
+// work because a copy-paste habit and a shell-ish habit should both be accepted
+// without the author having to remember which this dialog prefers.
+std::vector<std::string> splitExtraZones(std::string_view text) {
+    std::vector<std::string> names;
+    std::string current;
+    const auto flush = [&] {
+        // Trim the ends, so "A, B" gives {"A","B"} and not {"A", " B"}.
+        while (!current.empty() &&
+               (current.front() == ' ' || current.front() == '\t')) {
+            current.erase(current.begin());
+        }
+        while (!current.empty() && (current.back() == ' ' || current.back() == '\t' ||
+                                    current.back() == '\r')) {
+            current.pop_back();
+        }
+        if (!current.empty()) {
+            names.push_back(current);
+        }
+        current.clear();
+    };
+    for (const char character : text) {
+        if (character == ',' || character == '\n' || character == ';') {
+            flush();
+        } else {
+            current.push_back(character);
+        }
+    }
+    flush();
+    return names;
+}
+
+// The templates the combo offers: the bare minimum FIRST (it is not a file, so
+// loadStageTemplates never returns it), then whatever ships for this game and
+// this kind. Not cached -- this is a popup and the walk is over five small JSON
+// files, which is not worth an invalidation rule.
+std::vector<smg::StageTemplate> createTemplatesFor(const EditorState& state, bool forGalaxy) {
+    std::vector<smg::StageTemplate> list;
+    if (state.game) {
+        list = smg::loadStageTemplates(state.dataRoot / "templates", state.game->gameType(),
+                                       forGalaxy);
+    }
+    list.insert(list.begin(),
+                smg::bareMinimumTemplate(state.game ? state.game->gameType() : 2));
+    return list;
+}
+
+// Turns the panel's layer bits into the builder's vocabulary, by asking the same
+// function the builder asks. This is the line that keeps the GUI and the CLI from
+// being two different layer pickers -- and it is why the checkbox list above does
+// not hand-roll a layer list of its own.
+std::vector<std::string> requestedCreateLayers(const EditorState& state) {
+    std::vector<std::string> requested{"Common"};
+    for (const auto& layer : smg::scenarioLayerNames()) {
+        if (((state.createLayerMask >> smg::scenarioLayerBit(layer)) & 1) != 0) {
+            requested.push_back(layer);
+        }
+    }
+    return requested;
+}
+
+// The create dialog itself. One function for both kinds: they differ only in the
+// template list, the extra-zone field and which planner they call, and splitting
+// them would duplicate the confirm step -- the part that has to be identical
+// because it is what makes creation not-a-surprise.
+void drawCreateDialog(EditorState& state) {
+    // CreateKind is spelled out rather than pulled in with a using-declaration:
+    // it is a nested enum of EditorState, and qualifying it costs nothing next to
+    // a compile error that only appears once the dialog is actually reached.
+    using Kind = EditorState::CreateKind;
+    if (state.createKind == Kind::None || !state.game) {
+        return;
+    }
+    const bool forGalaxy = state.createKind == Kind::Galaxy;
+    const auto templates = createTemplatesFor(state, forGalaxy);
+
+    // A stale index (a template list that changed under us) must not read past the
+    // end. Clamping is enough because the popup is redrawn every frame.
+    if (state.createTemplateIndex < 0 ||
+        static_cast<std::size_t>(state.createTemplateIndex) >= templates.size()) {
+        state.createTemplateIndex = 0;
+    }
+    const auto& chosen = templates[static_cast<std::size_t>(state.createTemplateIndex)];
+    const auto schema = chosen.mapArchive(state.dataRoot / "templates");
+
+    if (!ImGui::BeginPopup(forGalaxy ? "##creategalaxy" : "##createzone")) {
+        return;
+    }
+    ImGui::SeparatorText(forGalaxy ? "New galaxy" : "New zone");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputText("##createname", state.createName, sizeof(state.createName));
+    ImGui::SetItemTooltip(forGalaxy ? "The galaxy's name -- it is also its map zone's name."
+                                     : "The zone's name. It becomes the folder and the file.");
+
+    if (ImGui::BeginCombo("Template", chosen.name.c_str())) {
+        for (std::size_t index = 0; index < templates.size(); ++index) {
+            const bool picked = static_cast<int>(index) == state.createTemplateIndex;
+            if (ImGui::Selectable(templates[index].name.c_str(), picked)) {
+                state.createTemplateIndex = static_cast<int>(index);
+                // Re-seed the layer bits from what THIS template already carries, so
+                // switching template never leaves a layer the new one cannot
+                // provide. Common is bitless and so is never in the mask.
+                int mask = 0;
+                for (const auto& layer : templates[index].usedLayers) {
+                    const int bit = smg::scenarioLayerBit(layer);
+                    if (bit >= 0) {
+                        mask |= 1 << bit;
+                    }
+                }
+                state.createLayerMask = mask;
+            }
+            if (picked) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Where the file layout and column schemas come from.\n"
+                          "A template is a real game file, so nothing is invented.");
+
+    // ---- layers ------------------------------------------------------------
+    // "Common" is drawn locked, exactly as the Scenarios panel's layer matrix
+    // does: it owns no bit in the file (scenarioLayerBit returns -1), so an
+    // editable checkbox here would be a lie the save would not honour.
+    ImGui::SeparatorText("Layers");
+    {
+        static bool commonOn = true;
+        ImGui::BeginDisabled();
+        ImGui::Checkbox("Common", &commonOn);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Always active. It owns no bit in the file, so there is "
+                             "nothing to switch off.");
+        }
+    }
+    for (const auto& layer : smg::scenarioLayerNames()) {
+        const int bit = smg::scenarioLayerBit(layer);
+        const bool forced =
+            std::find(chosen.usedLayers.begin(), chosen.usedLayers.end(), layer) !=
+            chosen.usedLayers.end();
+        bool on = forced || ((state.createLayerMask >> bit) & 1) != 0;
+        // Forced layers are shown checked and cannot be unticked: the archive
+        // carries them, so the create makes them either way.
+        ImGui::BeginDisabled(forced);
+        if (ImGui::Checkbox(layer.c_str(), &on)) {
+            if (on) {
+                state.createLayerMask |= 1 << bit;
+            } else {
+                state.createLayerMask &= ~(1 << bit);
+            }
+        }
+        ImGui::EndDisabled();
+        if (forced && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("%s already uses this layer, so the create will make it.",
+                              layer.c_str());
+        }
+    }
+
+    if (forGalaxy) {
+        ImGui::SeparatorText("Zones to link");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##createzones", state.createExtraZoneBuf,
+                         sizeof(state.createExtraZoneBuf));
+        ImGui::SetItemTooltip("Separated by commas or newlines.\n"
+                              "Linked FROM the new galaxy map. They are NOT created "
+                              "-- use Create zone for that.");
+    }
+
+    // ---- plan it, and refuse exactly what the builder would refuse ----------
+    const auto requested = requestedCreateLayers(state);
+    const auto extraZones = forGalaxy ? splitExtraZones(state.createExtraZoneBuf)
+                                      : std::vector<std::string>{};
+    std::string problem;
+    smg::StageCreatePlan plan;
+    if (!schema.has_value()) {
+        problem = "This template has no map archive to read the zone layout from.";
+    } else if (state.createName[0] == '\0') {
+        problem = "Give it a name first.";
+    } else {
+        try {
+            plan = forGalaxy ? smg::planGalaxy(state.createName, extraZones, requested,
+                                               *schema, state.game->gameType())
+                             : smg::planStageZone(state.createName, requested, *schema,
+                                                  state.game->gameType());
+        } catch (const std::exception& error) {
+            // The builder's own message, verbatim. It already names the bad layer or
+            // the unusable name, which beats anything re-derived here.
+            problem = error.what();
+        }
+    }
+    if (!problem.empty()) {
+        ImGui::TextDisabled("%s", problem.c_str());
+    }
+
+    // ---- step two: the files, before they exist -----------------------------
+    if (state.createConfirm && problem.empty()) {
+        ImGui::SeparatorText("This will write");
+        for (const auto& file : plan.filesWritten()) {
+            ImGui::BulletText("%s", file.c_str());
+        }
+        ImGui::TextDisabled("%d tables inside the map archive",
+                            static_cast<int>(plan.layerFiles.size()));
+        // The line BLUEPRINT section 17 asked to move out of the document and onto
+        // the screen. Creation writes whole new archives, which no undo command
+        // here can express, so an author who is not told will assume Ctrl+Z.
+        ImGui::TextDisabled("This writes whole new archives. Ctrl+Z cannot undo it.");
+    }
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!problem.empty());
+    if (ImGui::Button(state.createConfirm ? "Create it" : "Show what it writes...",
+                      ImVec2(170.0F, 0.0F))) {
+        if (!state.createConfirm) {
+            state.createConfirm = true;
+        } else {
+            // The one place anything is written. The name is read BEFORE the
+            // buffers are cleared below, because the post-create refresh has to
+            // find the thing it just made.
+            const std::string created(state.createName);
+            try {
+                io::DirectoryFilesystem project(state.settings.lastGameDir);
+                if (forGalaxy) {
+                    smg::createGalaxy(project, created, extraZones, requested, *schema,
+                                      state.game->gameType());
+                } else {
+                    smg::createStageZone(project, created, requested, *schema,
+                                         state.game->gameType());
+                }
+                ImGui::CloseCurrentPopup();
+                state.createKind = Kind::None;
+                state.createConfirm = false;
+                state.createName[0] = '\0';
+                state.createExtraZoneBuf[0] = '\0';
+                state.createTemplateIndex = 0;
+                state.createLayerMask = 0;
+
+                // Refresh what the Project panel draws from, then SELECT what was
+                // just created so the author lands on it instead of hunting.
+                //
+                // The two cases differ and must: a new GALAXY is not in the galaxy
+                // list yet, while a new ZONE is not in the current galaxy's zone
+                // list either -- it has to be added to the galaxy's ZoneList before
+                // it appears there. So a zone create re-reads the galaxy and then
+                // reports honestly if the zone is not listed, instead of silently
+                // selecting the wrong thing.
+                state.galaxies = state.game->galaxies();
+                if (forGalaxy) {
+                    const auto entry =
+                        std::find(state.galaxies.begin(), state.galaxies.end(), created);
+                    if (entry != state.galaxies.end()) {
+                        selectGalaxy(state, static_cast<int>(entry - state.galaxies.begin()));
+                        if (!state.zones.empty()) {
+                            // editableZones() leads with the galaxy's OWN map zone.
+                            selectZone(state, 0);
+                        }
+                    }
+                    pushToast(state, "Created galaxy " + created + ".", false);
+                } else {
+                    // Re-open the current galaxy so state.zones is rebuilt, then
+                    // look for the new zone by name.
+                    const int galaxyIndex = state.selectedGalaxy;
+                    int zoneIndex = -1;
+                    if (galaxyIndex >= 0 &&
+                        static_cast<std::size_t>(galaxyIndex) < state.galaxies.size()) {
+                        selectGalaxy(state, galaxyIndex);
+                        const auto entry =
+                            std::find(state.zones.begin(), state.zones.end(), created);
+                        if (entry != state.zones.end()) {
+                            zoneIndex = static_cast<int>(entry - state.zones.begin());
+                            selectZone(state, zoneIndex);
+                        }
+                    }
+                    refreshViewport(state, true);
+                    refreshZoneCollision(state);
+                    if (zoneIndex >= 0) {
+                        pushToast(state, "Created zone " + created + ".", false);
+                    } else {
+                        // Created on disk, but not listed by any galaxy -- which is
+                        // exactly the state `galaxy scenario layer` exists to fix.
+                        // Saying so beats a toast that implies it is now open.
+                        pushToast(state,
+                                  "Created zone " + created +
+                                      ", but no galaxy lists it yet. Add it to a "
+                                      "galaxy's zone list to open it.",
+                                  true);
+                    }
+                    return;
+                }
+                refreshViewport(state, true);
+                refreshZoneCollision(state);
+            } catch (const std::exception& error) {
+                pushToast(state, error.what(), true);
+                state.createConfirm = false;
+            }
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(100.0F, 0.0F))) {
+        state.createConfirm = false;
+        state.createKind = Kind::None;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void drawGalaxyZonePanel(EditorState& state) {
+    // Drawn before the early-outs below, so the popup keeps working even on a
+    // frame where the panel is hidden or collapsed -- otherwise a create would be
+    // cancelled by simply switching tabs mid-flow.
+    drawCreateDialog(state);
     if (!state.showProject) {
         return;
     }
@@ -2277,6 +2632,39 @@ void drawGalaxyZonePanel(EditorState& state) {
             }
         }
         ImGui::EndListBox();
+    }
+
+    // ---- create ------------------------------------------------------------
+    // Disabled with a stated reason when no workspace is open, because the
+    // builder needs a game directory AND a game type to pick a layout. A greyed
+    // button with no explanation is the failure mode BLUEPRINT section 13 calls
+    // out for the SMG1 PowerStarType column.
+    ImGui::SeparatorText("Create");
+    ImGui::BeginDisabled(!state.game.has_value());
+    if (ImGui::Button("New zone...", ImVec2(0.0F, 0.0F))) {
+        state.createKind = EditorState::CreateKind::Zone;
+        state.createConfirm = false;
+        state.createName[0] = '\0';
+        ImGui::OpenPopup("##createzone");
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("Creates a zone's files from a template.\n"
+                          "It is not added to any galaxy until you list it.");
+    }
+    if (ImGui::Button("New galaxy...", ImVec2(0.0F, 0.0F))) {
+        state.createKind = EditorState::CreateKind::Galaxy;
+        state.createConfirm = false;
+        state.createName[0] = '\0';
+        ImGui::OpenPopup("##creategalaxy");
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("Creates a galaxy: its map zone, its scenario tables and\n"
+                          "one starter mission.");
+    }
+    ImGui::EndDisabled();
+    if (!state.game.has_value()) {
+        ImGui::TextDisabled("Open a game directory first -- creating needs to know "
+                            "which game it is for.");
     }
     ImGui::End();
 }

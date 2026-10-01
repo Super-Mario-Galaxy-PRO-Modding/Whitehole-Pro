@@ -1228,6 +1228,36 @@ Six of those commits are the camera feature and the next nine are the
   panel has no create button yet, and creation is NOT undoable -- it writes whole
   new archives, which the GalaxyTableCommand snapshot model cannot express. The
   GUI must say so in the confirm step rather than hiding the gap.
+^ SUPERSEDED -- see below. The paragraph above is what the picker looked like
+     while it was still to do.
+
+   [DONE] THE GUI LAYER PICKER HAS LANDED. Project > Create offers "New zone..."
+   and "New galaxy...", sharing the CLI's core through the SAME
+   planStageZone()/planGalaxy() that `create --dry-run` prints -- so the confirm
+   step lists the REAL file list rather than describing it. Three rules keep it
+   from becoming a second, looser implementation of the CLI:
+
+     * the layer checkboxes hand their selection to smg::normalizeStageLayers(),
+       the same function the builder calls, so the GUI and the CLI cannot disagree
+       about what a set of layers means;
+     * template layers are drawn CHECKED AND DISABLED (the archive carries them,
+       so the create makes them either way), and "Common" is locked exactly as
+       the layer matrix locks it, because it owns no bit in the file;
+     * the buttons are disabled WITH A STATED REASON when no workspace is open,
+       because creating needs a game directory and a game type. A greyed button
+       with no explanation is the same lie as an editable Common checkbox.
+
+   The confirm step says "This writes whole new archives. Ctrl+Z cannot undo it."
+   That is section 17's "document NOT UNDOABLE in the UI" finally satisfied on
+   screen instead of only in this file.
+
+   HONEST BEHAVIOUR AFTER A ZONE CREATE, worth knowing before using it: a new
+   zone is in no galaxy's ZoneList until it is added there. So the panel re-reads
+   the current galaxy and, if the zone is not listed, says so in an ERROR toast
+   rather than implying it is now open -- that is the state `galaxy scenario
+   layer` exists to fix. A galaxy create has no such gap: the builder writes the
+   scenario archive itself and editableZones() leads with the new galaxy's own
+   map zone, so it opens immediately.
 
 ================================================================================
 16. WHAT IS LEFT, IN ORDER (opinionated ranking, not a promise)

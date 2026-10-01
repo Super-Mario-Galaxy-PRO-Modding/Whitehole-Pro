@@ -227,6 +227,14 @@ whitehole-pro-console.exe map paths data\templates\SMG2BigGalaxyMap.arc
 whitehole-pro-console.exe game list C:\path\to\extracted\files
 whitehole-pro-console.exe galaxy inspect C:\path\to\extracted\files HoneyBeeKingdomGalaxy
 
+# A galaxy's missions: what each awards, and which layers it activates
+whitehole-pro-console.exe galaxy scenarios C:\path\to\extracted\files HoneyBeeKingdomGalaxy
+whitehole-pro-console.exe galaxy scenario set C:\path\to\extracted\files HoneyBeeKingdomGalaxy 3 name "Comet Course"
+whitehole-pro-console.exe galaxy scenario set C:\path\to\extracted\files HoneyBeeKingdomGalaxy 3 star 42
+whitehole-pro-console.exe galaxy scenario layer C:\path\to\extracted\files HoneyBeeKingdomGalaxy 3 HoneyBeeKingdomGalaxy LayerB on
+whitehole-pro-console.exe galaxy scenario add C:\path\to\extracted\files HoneyBeeKingdomGalaxy "Extra Mission" --copy 3
+whitehole-pro-console.exe galaxy scenario remove C:\path\to\extracted\files HoneyBeeKingdomGalaxy 9
+
 # Field-name hashes (parity with the Java reader)
 whitehole-pro-console.exe hash Obj_arg0
 

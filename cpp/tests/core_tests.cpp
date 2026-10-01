@@ -4237,6 +4237,14 @@ void testScenarioEditing() {
     expect(model.layerMask(1, "FreshZone") == 0,
            "a new column must default to 0 for the other scenarios, not garbage");
     expect(scenarioData.hasField("FreshZone"), "the new zone column must be stored");
+    // Note that FreshZone is NOT in this galaxy's zone list, and the model still
+    // created the column. That is right for the panel, which only ever passes a
+    // zone it is showing, but it is why `galaxy scenario layer` has to check the
+    // name against zones() itself: without that check a typo silently added a
+    // column the game will never read and the command still reported success.
+    expect(std::find(model.zones().begin(), model.zones().end(), "FreshZone")
+               == model.zones().end(),
+           "FreshZone was never added to the zone list");
 
     expect(model.nextFreeScenarioNumber() == 7,
            "the next free id after 1-6 must be 7");

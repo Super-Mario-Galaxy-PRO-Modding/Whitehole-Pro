@@ -73,6 +73,15 @@
            three tables, adds dirty() and save(). See section 13 for the format
            facts, which cost three wrong guesses to pin down.
 
+   [done]  THE SCENARIO CLI. `galaxy scenarios` and `galaxy scenario
+            add|set|remove|layer` run the same ScenarioModel the panel renders, so
+            the two cannot drift. Missions are addressed by GAME id, never by row.
+            `galaxy scenario layer` takes a layer NAME and a zone the galaxy
+            actually has, because the model will create a column for any name --
+            right for the panel, which only passes zones it is showing, but a
+            silent no-op for a typed argument. `galaxy inspect` now reports the
+            galaxy map zone, which zones() omits by design, and grew --json.
+
    [done]  THE SCENARIOS PANEL. View > Scenarios, open by default next to
            Cameras. Mission cards with their star, type and comet badge, an
            at-a-glance strip of zone/layer chips, a zone x layer matrix, and

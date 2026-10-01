@@ -13,6 +13,7 @@
 #include "whitehole/smg/field_hashes.hpp"
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/hash.hpp"
+#include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 #include "whitehole/edit/undo.hpp"
 
@@ -57,6 +58,13 @@ void printUsage() {
         << "  whitehole-pro-console game list <game-directory>\n"
         << "  whitehole-pro-console models check <game-directory> <zone>\n"
         << "  whitehole-pro-console galaxy inspect <game-directory> <galaxy>\n"
+        << "  whitehole-pro-console galaxy scenarios <game-directory> <galaxy>\n"
+        << "  whitehole-pro-console galaxy scenario add <game-directory> <galaxy> [name] [--copy <mission-id>]\n"
+        << "  whitehole-pro-console galaxy scenario remove <game-directory> <galaxy> <mission-id>\n"
+        << "  whitehole-pro-console galaxy scenario set <game-directory> <galaxy> <mission-id> "
+           "<name|star|startype|comet|comettimer> <value>\n"
+        << "  whitehole-pro-console galaxy scenario layer <game-directory> <galaxy> <mission-id> "
+           "<zone> <LayerA..LayerP> <on|off>\n"
         << "  whitehole-pro-console zone objects <game-directory> <zone>\n"
         << "  whitehole-pro-console map objects <archive.arc>\n"
         << "  whitehole-pro-console map cameras <archive.arc>\n"
@@ -104,6 +112,24 @@ int mapSetCommand(int argc, char** argv);
 int mapAddCommand(int argc, char** argv);
 int mapRemoveCommand(int argc, char** argv);
 int objectdbQueryCommand(int argc, char** argv);
+
+// The scenario commands sit ABOVE EditOptions and parseEditOptions(), which are
+// defined further down beside the other flag helpers, and those helpers are
+// zone-oriented (--game, --pos, --layer) in ways that mean nothing for a galaxy.
+// So the scenario commands take their own flags through this: it only has to
+// recognise --json, and it REJECTS anything else rather than ignoring it.
+bool scenarioFlags(int argc, char** argv, int start, const char* usage) {
+    for (int index = start; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--json") {
+            g_json = true;
+        } else {
+            throw std::runtime_error(
+                "Unknown flag: " + flag + "\n(" + usage + "\nOnly --json is accepted)");
+        }
+    }
+    return true;
+}
 
 int archiveCommand(int argc, char** argv) {
     if (argc < 4) {
@@ -230,15 +256,490 @@ int gameCommand(int argc, char** argv) {
     return 0;
 }
 
-int galaxyCommand(int argc, char** argv) {
-    if (argc != 5 || std::string(argv[2]) != "inspect") {
-        throw std::runtime_error("galaxy inspect requires a game directory and galaxy name");
+// The layer chips for one mission, as the Scenarios panel draws them: one per
+// zone, naming the layers that zone adds on top of Common. Shared with
+// `galaxy scenarios` so the CLI and the panel cannot disagree about what a
+// mission activates -- both read ScenarioModel, which is the single source.
+std::string scenarioLayerSummary(const smg::ScenarioModel& model, std::size_t row) {
+    std::string out;
+    for (const std::string& zone : model.zones()) {
+        const std::vector<std::string> active = model.activeLayers(row, zone);
+        if (active.size() <= 1) {
+            continue; // Common only: nothing worth saying about it
+        }
+        if (!out.empty()) {
+            out += "  ";
+        }
+        out += zone;
+        out += ": ";
+        for (std::size_t index = 1; index < active.size(); ++index) {
+            if (index > 1) {
+                out += "+";
+            }
+            out += active[index];
+        }
+    }
+    return out;
+}
+
+// `galaxy scenarios` -- every mission of a galaxy, with what it awards and which
+// layers it activates. Reads the same ScenarioModel the panel renders.
+int galaxyScenariosCommand(int argc, char** argv) {
+    if (argc != 5) {
+        throw std::runtime_error("galaxy scenarios requires: <game-directory> <galaxy>");
     }
     smg::GameArchive game(argv[3]);
-    const auto galaxy = game.openGalaxy(argv[4]);
-    std::cout << galaxy.name() << " zones:\n";
+    smg::GalaxyArchive galaxy = game.openGalaxy(argv[4]);
+    smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                             galaxy.editableZones(), 0);
+
+    if (g_json) {
+        util::JsonArray missions;
+        for (const smg::Scenario& scenario : model.scenarios()) {
+            util::JsonObject entry;
+            entry["number"] = scenario.number;
+            entry["name"] = scenario.name;
+            entry["powerStarId"] = scenario.powerStarId;
+            // The stored text verbatim, so an absent PowerStarType column (SMG1)
+            // and an empty one stay distinguishable rather than both "".
+            entry["powerStarType"] = scenario.powerStarType;
+            entry["comet"] = scenario.comet;
+            entry["cometTimer"] = scenario.cometTimer;
+            util::JsonObject layers;
+            for (const std::string& zone : model.zones()) {
+                layers[zone] = model.layerMask(scenario.row, zone);
+            }
+            entry["layers"] = std::move(layers);
+            missions.emplace_back(std::move(entry));
+        }
+        util::JsonObject root;
+        root["command"] = "galaxy scenarios";
+        root["galaxy"] = galaxy.name();
+        root["powerStars"] = static_cast<double>(model.powerStarCount());
+        root["ordinaryPowerStars"] = static_cast<double>(model.ordinaryPowerStarCount());
+        root["missions"] = std::move(missions);
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+
+    std::cout << galaxy.name() << ": " << model.scenarioCount() << " mission"
+              << (model.scenarioCount() == 1 ? "" : "s") << ", " << model.powerStarCount()
+              << " star" << (model.powerStarCount() == 1 ? "" : "s") << " ("
+              << model.ordinaryPowerStarCount() << " ordinary)\n";
+    for (const smg::Scenario& scenario : model.scenarios()) {
+        std::cout << "  #" << scenario.number << "  "
+                  << (scenario.name.empty() ? "(unnamed)" : scenario.name);
+        if (scenario.awardsStar()) {
+            std::cout << "  star " << scenario.powerStarId;
+            // "-" when the galaxy records no type at all, which is a different
+            // fact from a mission whose type happens to be empty.
+            const std::string type =
+                scenario.powerStarType.empty()
+                    ? (galaxy.scenarioData().hasField("PowerStarType") ? "(not recorded)"
+                                                                         : "-")
+                    : scenario.powerStarType;
+            std::cout << "   " << type;
+        } else {
+            std::cout << "  no star";
+        }
+        if (scenario.comet) {
+            std::cout << ", comet (" << scenario.cometTimer << "f)";
+        }
+        const std::string layers = scenarioLayerSummary(model, scenario.row);
+        if (!layers.empty()) {
+            std::cout << "   layers: " << layers;
+        }
+        std::cout << '\n';
+    }
+    return 0;
+}
+
+// A mission is addressed by its GAME id (ScenarioNo), never by row: that is how
+// the game resolves one, and two rows sharing an id make the first unreachable.
+std::size_t requireScenarioRow(const smg::ScenarioModel& model, const std::string& text,
+                               const std::string& galaxyName) {
+    std::int32_t number = 0;
+    try {
+        std::size_t used = 0;
+        number = std::stoi(text, &used);
+        if (used != text.size()) {
+            throw std::runtime_error("trailing characters");
+        }
+    } catch (const std::exception&) {
+        throw std::runtime_error("mission id must be a number, got: " + text);
+    }
+    const auto found = model.findScenario(number);
+    if (!found.has_value()) {
+        throw std::runtime_error(galaxyName + " has no mission with id " + text);
+    }
+    return model.scenarios()[*found].row;
+}
+
+bool parseOnOff(const std::string& text, bool& out) {
+    const std::string lower(whitehole::util::toLower(text));
+    if (lower == "on" || lower == "true" || lower == "1" || lower == "yes") {
+        out = true;
+        return true;
+    }
+    if (lower == "off" || lower == "false" || lower == "0" || lower == "no") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+// Reports the mission as it stands after a change, in the same words the panel
+// uses, so a script and a human read the same thing.
+void reportScenario(const smg::ScenarioModel& model, std::size_t row) {
+    const smg::Scenario& scenario = model.scenarios()[row];
+    std::cout << "  #" << scenario.number << "  " << scenario.name;
+    if (scenario.awardsStar()) {
+        std::cout << "  star " << scenario.powerStarId << "   "
+                  << (scenario.powerStarType.empty() ? "(not recorded)"
+                                                      : scenario.powerStarType);
+    } else {
+        std::cout << "  no star";
+    }
+    if (scenario.comet) {
+        std::cout << ", comet (" << scenario.cometTimer << "f)";
+    }
+    const std::string layers = scenarioLayerSummary(model, row);
+    if (!layers.empty()) {
+        std::cout << "   layers: " << layers;
+    }
+    std::cout << '\n';
+}
+
+// Prints either the JSON envelope or the human line, so every sub-command below
+// shares one shape.
+void reportScenarioChange(const smg::GalaxyArchive& galaxy, const smg::ScenarioModel& model,
+                          std::size_t row, const char* command, const char* field) {
+    if (g_json) {
+        util::JsonObject root;
+        root["command"] = command;
+        root["galaxy"] = galaxy.name();
+        root["changed"] = true;
+        if (field != nullptr) {
+            root["field"] = field;
+        }
+        std::cout << util::serializeJson(root) << '\n';
+        return;
+    }
+    std::cout << "Updated " << galaxy.name() << ":\n";
+    reportScenario(model, row);
+}
+
+// `galaxy scenario add|remove|set|layer` -- the editing half. Every sub-command
+// resolves the mission by its game id, mutates through ScenarioModel so the
+// table is re-read afterwards, and saves the galaxy (which refuses to touch an
+// unchanged file). No undo stack here: a CLI invocation is its own process.
+int galaxyScenarioAddCommand(int argc, char** argv) {
+    // galaxy scenario add <dir> <galaxy> [name] [--copy <id>]
+    if (argc < 5) {
+        throw std::runtime_error(
+            "galaxy scenario add requires: <game-directory> <galaxy> [name] [--copy <id>]");
+    }
+    std::string name;
+    std::optional<int> copyFrom;
+    for (int index = 5; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--json") {
+            g_json = true;
+        } else if (flag == "--copy") {
+            if (index + 1 >= argc) {
+                throw std::runtime_error("--copy needs a mission id");
+            }
+            copyFrom = std::stoi(argv[++index]);
+        } else if (flag.rfind("--", 0) == 0) {
+            throw std::runtime_error("Unknown flag: " + flag);
+        } else if (name.empty()) {
+            name = flag;
+        } else {
+            throw std::runtime_error("Unexpected argument: " + flag);
+        }
+    }
+    if (name.empty()) {
+        name = "New Mission";
+    }
+    smg::GameArchive game(argv[3]);
+    smg::GalaxyArchive galaxy = game.openGalaxy(argv[4]);
+    std::size_t row = 0;
+    {
+        smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                 galaxy.editableZones(), 0);
+        std::optional<std::size_t> source;
+        if (copyFrom.has_value()) {
+            source = requireScenarioRow(model, std::to_string(*copyFrom), galaxy.name());
+        }
+        row = model.addScenario(name, source);
+    }
+    galaxy.save();
+    {
+        smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                 galaxy.editableZones(), 0);
+        if (g_json) {
+            util::JsonObject root;
+            root["command"] = "galaxy scenario add";
+            root["galaxy"] = galaxy.name();
+            root["added"] = true;
+            root["row"] = static_cast<double>(row);
+            std::cout << util::serializeJson(root) << '\n';
+        } else {
+            std::cout << "Added a mission to " << galaxy.name() << ":\n";
+            reportScenario(model, row);
+        }
+    }
+    return 0;
+}
+
+int galaxyScenarioRemoveCommand(int argc, char** argv) {
+    // galaxy scenario remove <dir> <galaxy> <mission-id>
+    if (argc != 6) {
+        throw std::runtime_error(
+            "galaxy scenario remove requires: <game-directory> <galaxy> <mission-id>");
+    }
+    scenarioFlags(argc, argv, 6, "galaxy scenario remove requires: <game-directory> "
+                                 "<galaxy> <mission-id>");
+    smg::GameArchive game(argv[3]);
+    smg::GalaxyArchive galaxy = game.openGalaxy(argv[4]);
+    std::string removedName;
+    {
+        smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                 galaxy.editableZones(), 0);
+        const std::size_t row = requireScenarioRow(model, argv[5], galaxy.name());
+        removedName = model.scenarios()[row].name;
+        (void)model.removeScenario(row);
+    }
+    galaxy.save();
+    if (g_json) {
+        util::JsonObject root;
+        root["command"] = "galaxy scenario remove";
+        root["galaxy"] = galaxy.name();
+        root["removed"] = true;
+        root["name"] = removedName;
+        std::cout << util::serializeJson(root) << '\n';
+    } else {
+        std::cout << "Removed " << (removedName.empty() ? "(unnamed)" : removedName)
+                  << " from " << galaxy.name() << ".\n";
+    }
+    return 0;
+}
+
+int galaxyScenarioEditCommand(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error(
+            "galaxy scenario requires a sub-command: add | set | remove | layer");
+    }
+    const std::string action = argv[2];
+    if (action == "add") {
+        return galaxyScenarioAddCommand(argc, argv);
+    }
+    if (action == "remove") {
+        return galaxyScenarioRemoveCommand(argc, argv);
+    }
+    if (action == "set") {
+        // galaxy scenario set <dir> <galaxy> <mission-id> <field> <value>
+        if (argc != 8) {
+            throw std::runtime_error(
+                "galaxy scenario set requires: <game-directory> <galaxy> <mission-id> "
+                "<name|star|startype|comet|comettimer> <value>");
+        }
+        scenarioFlags(argc, argv, 8, "galaxy scenario set requires: <game-directory> <galaxy> "
+                                 "<mission-id> <field> <value>");
+        smg::GameArchive game(argv[3]);
+        smg::GalaxyArchive galaxy = game.openGalaxy(argv[4]);
+        const std::string field = argv[6];
+        const std::string value = argv[7];
+        std::size_t row = 0;
+        {
+            smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                     galaxy.editableZones(), 0);
+            row = requireScenarioRow(model, argv[5], galaxy.name());
+            if (field == "name") {
+                if (value.empty()) {
+                    throw std::runtime_error("name cannot be empty");
+                }
+                model.renameScenario(row, value);
+            } else if (field == "star") {
+                model.setPowerStar(row, std::stoi(value));
+            } else if (field == "startype") {
+                // An SMG1 galaxy has no such column. Writing one would ADD a
+                // column the game never had, so it is refused rather than
+                // silently changing the file's shape.
+                if (!galaxy.scenarioData().hasField("PowerStarType")) {
+                    throw std::runtime_error(
+                        "this galaxy has no PowerStarType column (SMG1 stores a hidden "
+                        "flag instead), so a star type cannot be set");
+                }
+                if (value != "Normal" && value != "Green" && value != "Hidden") {
+                    throw std::runtime_error(
+                        "startype must be Normal, Green or Hidden, got: " + value);
+                }
+                model.setPowerStarType(row, value);
+            } else if (field == "comet") {
+                bool on = false;
+                if (!parseOnOff(value, on)) {
+                    throw std::runtime_error("comet must be on or off, got: " + value);
+                }
+                model.setComet(row, on, model.scenarios()[row].cometTimer);
+            } else if (field == "comettimer") {
+                const int timer = std::stoi(value);
+                if (timer < 0) {
+                    throw std::runtime_error("comettimer cannot be negative");
+                }
+                model.setComet(row, true, timer);
+            } else {
+                throw std::runtime_error(
+                    "Unknown mission field: " + field +
+                    "\n(name | star | startype | comet | comettimer)");
+            }
+        }
+        galaxy.save();
+        {
+            smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                     galaxy.editableZones(), 0);
+            reportScenarioChange(galaxy, model, row, "galaxy scenario set", field.c_str());
+        }
+        return 0;
+    }
+    if (action == "layer") {
+        // galaxy scenario layer <dir> <galaxy> <mission-id> <zone> <LayerB|on|off>
+        if (argc != 9) {
+            throw std::runtime_error(
+                "galaxy scenario layer requires: <game-directory> <galaxy> <mission-id> "
+                "<zone> <LayerB|on|off>");
+        }
+        scenarioFlags(argc, argv, 9,
+                      "galaxy scenario layer requires: <game-directory> <galaxy> "
+                      "<mission-id> <zone> <layer> <on|off>");
+        smg::GameArchive game(argv[3]);
+        smg::GalaxyArchive galaxy = game.openGalaxy(argv[4]);
+        std::size_t row = 0;
+        std::string layerName;
+        {
+            smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                     galaxy.editableZones(), 0);
+            row = requireScenarioRow(model, argv[5], galaxy.name());
+            const std::string zone = argv[6];
+            // The zone must be one the galaxy actually has. The model would
+            // happily CREATE a column for any name, which is right for the panel
+            // (it only ever passes a listed zone) but wrong for a typed argument:
+            // without this, `layer ... Nope LayerB on` silently added a column the
+            // game will never read and reported success.
+            const std::vector<std::string>& known = model.zones();
+            if (std::find(known.begin(), known.end(), zone) == known.end()) {
+                throw std::runtime_error(
+                    zone + " is not a zone of " + galaxy.name() + "\n(run "
+                    "`galaxy inspect` to list them)");
+            }
+            // Hoisted out of this block: it is named again in the report below,
+            // outside the scope the lookup lives in.
+            layerName = argv[7];
+            const std::string on = argv[8];
+            // The LAYER NAME is the vocabulary, not a raw mask: a hand-typed
+            // integer could set a bit the panel cannot represent, quietly
+            // corrupting that zone's layers for every other mission.
+            if (smg::scenarioLayerBit(layerName) < 0) {
+                throw std::runtime_error(
+                    "not a layer name: " + layerName +
+                    "\n(LayerA .. LayerP; Common owns no bit and cannot be toggled)");
+            }
+            if (on != "on" && on != "off") {
+                throw std::runtime_error("layer state must be on or off, got: " + on);
+            }
+            if (!model.setLayerActive(row, zone, layerName, on == "on")) {
+                throw std::runtime_error(
+                    "could not set " + layerName + " on " + zone +
+                    " (is the zone name spelled the way the game stores it?)");
+            }
+        }
+        galaxy.save();
+        {
+            smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                     galaxy.editableZones(), 0);
+            reportScenarioChange(galaxy, model, row, "galaxy scenario layer",
+                                 layerName.c_str());
+        }
+        return 0;
+    }
+    throw std::runtime_error(
+        "Unknown galaxy scenario sub-command: " + action + "\n(add | set | remove | layer)");
+}
+
+int galaxyCommand(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error("galaxy requires a sub-command: inspect, scenarios, scenario");
+    }
+    const std::string sub = argv[2];
+    if (sub == "scenarios") {
+        return galaxyScenariosCommand(argc, argv);
+    }
+    if (sub == "scenario") {
+        // Re-based on the ACTION, so the sub-commands can read argv[2]=action
+        // argv[3]=dir argv[4]=galaxy ... like every other sub-command here.
+        // Passing the original argv straight through would leave argv[2] as
+        // "scenario" and shift every positional by one, which is exactly the
+        // off-by-one that made `galaxy scenario set` report "unknown
+        // sub-command: scenario" before this.
+        //
+        // The copied strings must outlive the call, so they live in the frame
+        // rather than in a fixed buffer: a path can be longer than any buffer
+        // we would be willing to guess at.
+        // Every string the shifted argv points at has to outlive the call, so they are
+        // held in `held` (not in fixed buffers: a path can be longer than any
+        // size we would be willing to guess at). `shifted` is then just the
+        // char* view of them.
+std::vector<std::string> held;
+held.reserve(static_cast<std::size_t>(argc - 3));
+held.emplace_back(argv[0]); // the program name, kept so argv[0] still works
+held.emplace_back(argv[1]); // "--json", if it was given before "galaxy"
+held.emplace_back(argv[3]); // the action: add | set | remove | layer
+held.emplace_back(argv[4]); // the game directory
+held.emplace_back(argv[5]); // the galaxy
+for (int index = 6; index < argc; ++index) {
+    held.emplace_back(argv[index]);
+}
+std::vector<char*> shifted;
+shifted.reserve(held.size());
+for (std::string& text : held) {
+    shifted.push_back(text.data());
+}
+return galaxyScenarioEditCommand(static_cast<int>(shifted.size()), shifted.data());
+    }
+    if (argc != 5 || sub != "inspect") {
+        throw std::runtime_error(
+            "galaxy inspect requires a game directory and galaxy name\n"
+            "galaxy scenarios requires a game directory and galaxy name\n"
+            "galaxy scenario requires: add | set | remove | layer");
+    }
+    smg::GameArchive game(argv[3]);
+    smg::GalaxyArchive galaxy = game.openGalaxy(argv[4]);
+    if (g_json) {
+        util::JsonArray zones;
+        for (const auto& zone : galaxy.zones()) {
+            zones.emplace_back(zone);
+        }
+        util::JsonObject root;
+        root["command"] = "galaxy inspect";
+        root["galaxy"] = galaxy.name();
+        root["zones"] = std::move(zones);
+        // The galaxy's own map zone is NOT in ZoneList.bcsv, and zones() stays
+        // ZoneList-only on purpose (area-limit validation counts per scenario), so
+        // it is reported separately rather than merged into the list.
+        root["hasMapZone"] = galaxy.hasMapZone();
+        root["mapZone"] = galaxy.hasMapZone() ? util::JsonValue(galaxy.name())
+                                              : util::JsonValue();
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+    std::cout << galaxy.name() << " zones (ZoneList, " << galaxy.zones().size() << "):\n";
     for (const auto& zone : galaxy.zones()) {
         std::cout << "  " << zone << '\n';
+    }
+    if (galaxy.hasMapZone()) {
+        // Without this the galaxy map zone looks missing, which is how it used to
+        // be: zones() is the ZoneList, and the map zone is not in it.
+        std::cout << "  " << galaxy.name() << "   (galaxy map -- not in ZoneList)\n";
     }
     return 0;
 }

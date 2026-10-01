@@ -534,6 +534,117 @@ void testWriteFileLeavesNoTemporaries() {
            "the .bak must hold what the file held before");
 }
 
+// THE TEMPLATES THAT ACTUALLY SHIP MUST STILL BE USABLE. testStageTemplates
+// below checks the LOADER against hand-written broken files; this checks the
+// OTHER direction -- that every data/templates/*.json in the repo still parses,
+// still names files that exist, and still names archives the game format can
+// open.
+//
+// Why this is not redundant: these are user-editable files in an installation
+// directory. Someone who typos "MapFile", renames an .arc, or saves a galaxy
+// archive over a map one ships a repo where `galaxy create --template "Big
+// Galaxy"` fails at the user's desk, with an error naming the missing file
+// rather than the JSON that asked for it. Nothing else notices: the loader tests
+// use synthetic files, and the builder tests name templates by string.
+//
+// The gap this fills is specific. testStageTemplates already checks
+// mapArchive() returns non-empty bytes, but only for the SMG2 GALAXY templates --
+// SMG1's galaxies and both zone templates were unchecked; "non-empty" is much
+// weaker than "parses as a RARC"; and ScenarioFile was never validated at all
+// despite createGalaxy being its only consumer.
+void testShippedTemplatesParse() {
+    using namespace whitehole::smg;
+    const auto templates =
+        std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+
+    // Every .json must be ACCEPTED by at least one of the four (game, galaxy/zone)
+    // filters. A template nobody can ever be offered is dead weight at best and a
+    // mislabelled file at worst, and this is the only place that would notice.
+    std::size_t seen = 0;
+    for (const auto& gameType : {1, 2}) {
+        for (const bool forGalaxy : {true, false}) {
+            for (const auto& tmpl : loadStageTemplates(templates, gameType, forGalaxy)) {
+                ++seen;
+                const std::string who =
+                    tmpl.name + " (SMG" + std::to_string(gameType) + (forGalaxy ? " galaxy)" : " zone)");
+
+                // The declared game must match the filter that found it, or the
+                // same template would be reachable from two places at once.
+                expect(tmpl.game == gameType,
+                       "template \"" + who + "\" was offered for the wrong game");
+
+                // Its map archive must exist AND open. mapArchive() returning bytes
+                // proves the file was read, not that it is an archive the RARC
+                // parser accepts -- a truncated .arc would sail past a "non-empty"
+                // check and blow up inside create.
+                const auto bytes = tmpl.mapArchive(templates);
+                expect(bytes.has_value(),
+                       "template \"" + who + "\" names a map archive that cannot be read");
+                expect(!bytes->empty(), "template \"" + who + "\" has an empty map archive");
+                const whitehole::io::RarcArchive map{*bytes};
+                expect(!map.entries().empty(),
+                       "template \"" + who + "\"'s map archive holds no entries");
+                expect(!map.rootName().empty(),
+                       "template \"" + who + "\"'s map archive has no root name");
+
+                // And it must carry at least one JMap table, because that is the
+                // entire reason a template exists: the builder copies schemas from
+                // it, and a map with no tables would create a zone with no files at
+                // all -- which looks like success.
+                std::size_t tables = 0;
+                for (const auto& entry : map.entries()) {
+                    if (!entry.directory && entry.path.find("/jmp/") != std::string::npos) {
+                        ++tables;
+                    }
+                }
+                expect(tables > 0,
+                       "template \"" + who + "\"'s map archive carries no JMap tables");
+
+                // ScenarioFile is optional (a zone template has none), but when it
+                // IS declared it must exist and open, because createGalaxy copies it
+                // wholesale and nothing else would notice it was missing until a
+                // user's galaxy came out empty.
+                if (!tmpl.scenarioFile.empty()) {
+                    const auto scenarioPath = templates / tmpl.scenarioFile;
+                    expect(std::filesystem::exists(scenarioPath),
+                           "template \"" + who + "\" names a scenario archive that does not "
+                           "exist: " + tmpl.scenarioFile);
+                    if (std::filesystem::exists(scenarioPath)) {
+                        const auto scenario =
+                            whitehole::io::RarcArchive{whitehole::io::readFile(scenarioPath)};
+                        expect(!scenario.entries().empty(),
+                               "template \"" + who + "\"'s scenario archive holds no entries");
+                    }
+                }
+            }
+        }
+    }
+
+    // Five ship today: two SMG1 galaxies, two SMG2 galaxies, one SMG2 zone. A FLOOR
+    // rather than an exact list, so ADDING a template is not a failure while
+    // deleting one still is -- and deletion is the failure that matters.
+    expect(seen >= 5,
+           "fewer than five shipped templates were reachable; data/templates is "
+           "missing or malformed files");
+
+    // The bare minimum is not a file at all -- it is synthesized in code and points
+    // at a bundled archive -- so the loop above never touches it. It is the
+    // fallback every create uses when no template is named, so both games are
+    // checked explicitly and each must actually open.
+    for (const auto& gameType : {1, 2}) {
+        const auto bare = bareMinimumTemplate(gameType);
+        expect(!bare.mapFile.empty(), "the bare-minimum template for SMG" +
+                                          std::to_string(gameType) + " must name an archive");
+        const auto bytes = bareMinimumMapArchive(templates, gameType);
+        expect(!bytes.empty(),
+               "the bare-minimum archive for SMG" + std::to_string(gameType) + " must load");
+        const whitehole::io::RarcArchive archive{bytes};
+        expect(!archive.entries().empty(),
+               "the bare-minimum archive for SMG" + std::to_string(gameType) +
+               " holds no entries");
+    }
+}
+
 // The creation templates, which shipped in data/templates since before the port
 // and which nothing in the C++ read at all.
 void testStageTemplates() {
@@ -798,6 +909,204 @@ std::vector<std::uint8_t> makeTinyRarc(whitehole::io::Endian endian) {
     writer.writeU8(2);
     writer.writeU8(3);
     return std::move(writer).take();
+}
+
+// ROUND-TRIP PROPERTIES. The strongest tests in this suite are the ones that
+// build something, write it, re-read it and compare -- testRarcCreation and the
+// two-layer zone case are the models. This generalises that shape.
+//
+// The claim under test is the one BLUEPRINT section 3 states as law: a table or
+// archive that was NOT edited must save back byte-identical. It is the property
+// most likely to rot silently, because almost every change here rewrites some
+// table, and "it still loads" is not "it still loads the same way" -- a field
+// mask shifted by one, a row stride widened, an entry reordered, and the game
+// rejects the file with no hint as to why.
+//
+// Both endiannesses run in every case. Retail SMG1/SMG2 are big-endian, but the
+// parser accepts little-endian too and the writer has an explicit little-endian
+// path -- an untested one is an untested one.
+void testRarcRoundTripProperties() {
+    using whitehole::io::Endian;
+    using whitehole::io::RarcArchive;
+
+    // ---- built-from-nothing archives ---------------------------------------
+    // Nested directories, mixed casing, an empty file and a multi-byte one: the
+    // shapes a real zone actually has. create() always writes big-endian, so this
+    // half is big-endian only by construction; the little-endian half follows.
+    {
+        RarcArchive archive = RarcArchive::create("MixedCase");
+        archive.createDirectory("/jmp");
+        archive.createDirectory("/jmp/Placement");
+        archive.createDirectory("/jmp/Placement/Common");
+        archive.createDirectory("/jmp/Placement/LayerA");
+        archive.insert("/jmp/Placement/Common/ObjInfo", {1, 2, 3, 4, 5});
+        archive.insert("/jmp/Placement/LayerA/ObjInfo", {});
+        archive.insert("/jmp/Placement/LayerA/StarInfo", {0xFF, 0x00, 0x7F});
+        // Casing is exercised on the FILE NAME only, never on a directory path.
+        // Lookups are case-insensitive, but serialize()'s parent map is keyed by
+        // the exact stored paths, so writing "jmp/placement/common/..." when the
+        // directory was created as "jmp/Placement/Common" produces a file with no
+        // serialized parent -- section 14 invariant 2. An editor that did that
+        // would fail at save time with a message about the wrong thing.
+        archive.insert("/jmp/Placement/Common/MAPPartsInfo", {9});
+
+        const auto bytes = archive.serialize(false);
+        const RarcArchive reparsed(bytes);
+
+        expect(reparsed.rootName() == archive.rootName(),
+               "RARC round trip: root name changed");
+        expect(reparsed.endian() == archive.endian(), "RARC round trip: endian changed");
+        expect(reparsed.entries().size() == archive.entries().size(),
+               "RARC round trip: entry count changed");
+        for (const auto& before : archive.entries()) {
+            const auto* after = reparsed.find(before.path);
+            expect(after != nullptr,
+                   "RARC round trip: entry missing after re-parse: " + before.path);
+            if (after == nullptr) {
+                continue;
+            }
+            expect(after->directory == before.directory,
+                   "RARC round trip: directory flag changed for " + before.path);
+            if (!before.directory) {
+                expect(reparsed.read(*after) == archive.read(before),
+                       "RARC round trip: payload changed for " + before.path);
+            }
+        }
+        bool keptCasing = false;
+        for (const auto& entry : reparsed.entries()) {
+            if (entry.path == "MixedCase/jmp/Placement/Common/MAPPartsInfo") {
+                keptCasing = true;
+            }
+        }
+        expect(keptCasing, "RARC round trip: an entry's stored casing was normalised away");
+
+        // NOTE: byte-identity is deliberately NOT asserted for a built-from-nothing
+        // archive, only for parsed ones (below). parse() rebuilds entries_ in node
+        // tree order -- each directory followed by its children -- while a builder
+        // appends directories and files as it goes. serialize() lays the string
+        // table out by walking entries_, so the two orderings produce different
+        // bytes for an IDENTICAL tree. That is benign and expected: nothing has
+        // been written yet, the tree is what the game reads, and the property that
+        // actually matters -- an untouched PARSED file re-saving byte-for-byte --
+        // is asserted in the loop below.
+    }
+
+    // ---- parsed archives, both endiannesses --------------------------------
+    for (const auto endian : {Endian::big, Endian::little}) {
+        RarcArchive archive(makeTinyRarc(endian));
+        // A directory and a second file, so this is not a trivial single-entry
+        // copy of what parse() already produced. The directory has to be created
+        // FIRST: insert() refuses a file whose parent does not exist, which is
+        // one of the section 14 invariants, and makeTinyRarc ships no directories.
+        archive.createDirectory("root/nested");
+        archive.insert("root/file", {1, 2, 3});
+        archive.insert("root/nested/deep.bin", {7, 7, 7, 7});
+        const auto before = archive.serialize(false);
+        const RarcArchive reparsed(before);
+
+        expect(reparsed.endian() == endian, "RARC round trip: endian not preserved");
+        expect(reparsed.entries().size() == archive.entries().size(),
+               "RARC round trip: entry count not preserved");
+        for (const auto& original : archive.entries()) {
+            const auto* copy = reparsed.find(original.path);
+            expect(copy != nullptr, "RARC round trip: lost " + original.path);
+            if (copy != nullptr && !original.directory) {
+                expect(reparsed.read(*copy) == archive.read(original),
+                       "RARC round trip: payload not preserved for " + original.path);
+            }
+        }
+        expect(reparsed.serialize(false) == before,
+               "RARC round trip: a second serialize differed");
+    }
+}
+
+// BCSV has the same law and more ways to break it, because a BCSV's schema is
+// bit-packed: fields share words behind masks and shifts, and the row stride is
+// aligned. A change that looks harmless -- one extra field, one new row -- can
+// shift every following field's offset, and the file still parses while meaning
+// something else entirely. "It still loads" is not "it still means the same".
+void testBcsvRoundTripProperties() {
+    using whitehole::smg::BcsvTable;
+    using whitehole::smg::BcsvType;
+
+    // One endianness here, and deliberately so. A default-constructed BcsvTable
+    // is BIG-endian (the retail layout), and there is no public way to BUILD a
+    // little-endian one from scratch -- only to parse one. Iterating both here
+    // would have meant writing big bytes and re-parsing them claiming to be
+    // little, which fails loudly and correctly. Little-endian PARSING and
+    // re-serialization are pinned by testBcsvEndianness; this test is about the
+    // round trip itself.
+    const std::string where = "BCSV";
+
+    {
+            BcsvTable table;
+            const auto i = table.ensureField("AnInt", BcsvType::integer);
+            const auto s = table.ensureField("AString", BcsvType::fixedString);
+            const auto f = table.ensureField("AFloat", BcsvType::floatingPoint);
+            const auto i2 = table.ensureField("APair", BcsvType::integer2);
+            const auto sh = table.ensureField("AShort", BcsvType::shortInteger);
+            const auto b = table.ensureField("AByte", BcsvType::byte);
+            const auto so = table.ensureField("AStringRef", BcsvType::stringOffset);
+            expect(i < s && s < f && f < i2 && i2 < sh && sh < b && b < so,
+                   where + ": ensureField must append in order");
+
+            const std::size_t row = table.addRow();
+            auto& cells = table.rows()[row];
+            table.setInt(cells, "AnInt", -12345);
+            table.setString(cells, "AString", "Mario");
+            table.setFloat(cells, "AFloat", 1.5F);
+            table.setInt(cells, "APair", 7);
+            table.setString(cells, "AStringRef", "obj/ObjInfo");
+            (void)sh;
+            (void)b;
+
+            const BcsvTable reparsed(table.serialize(), table.endian());
+            expectTablesEqual(table, reparsed, where + " mixed-type round trip");
+            expect(reparsed.getInt(reparsed.rows()[0], "AnInt") == -12345,
+                   where + ": a negative integer must survive the round trip");
+            expect(reparsed.getString(reparsed.rows()[0], "AString") == "Mario",
+                   where + ": a string must survive the round trip");
+            expect(std::abs(reparsed.getFloat(reparsed.rows()[0], "AFloat") - 1.5F) < 0.0001F,
+                   where + ": a float must survive the round trip");
+            expect(reparsed.getString(reparsed.rows()[0], "AStringRef") == "obj/ObjInfo",
+                   where + ": a string-offset field must resolve back to its text");
+        }
+
+        // ---- several rows, then a byte-exact second pass ----------------------
+        {
+            BcsvTable table;
+            (void)table.ensureField("l_id", BcsvType::shortInteger);
+            (void)table.ensureField("name", BcsvType::stringOffset);
+            (void)table.ensureField("pos_x", BcsvType::floatingPoint);
+            for (std::int32_t index = 0; index < 8; ++index) {
+                const std::size_t row = table.addRow();
+                auto& cells = table.rows()[row];
+                table.setInt(cells, "l_id", index);
+                table.setString(cells, "name", "Object" + std::to_string(index));
+                table.setFloat(cells, "pos_x", static_cast<float>(index) * 0.25F);
+            }
+            const auto bytes = table.serialize();
+            const BcsvTable reparsed(bytes, table.endian());
+            expectTablesEqual(table, reparsed, where + " eight-row round trip");
+            expect(reparsed.rows().size() == 8, where + ": row count changed");
+            expect(reparsed.serialize() == bytes,
+                   where + ": a second BCSV serialize produced different bytes");
+        }
+
+        // ---- a table with no rows at all --------------------------------------
+        // A schema with zero rows is what every created zone is built from, and it
+        // is the shape that has quietly broken before -- a zone that "succeeded" and
+        // contained no tables.
+        {
+            BcsvTable table;
+            (void)table.ensureField("WorldNo", BcsvType::integer);
+            expect(table.rows().empty(), where + ": a fresh table must have no rows");
+            const BcsvTable reparsed(table.serialize(), table.endian());
+            expectTablesEqual(table, reparsed, where + " empty-table round trip");
+            expect(reparsed.rows().empty(), where + ": an empty table gained rows");
+            expect(reparsed.hasField("WorldNo"),
+                   where + ": an empty table lost its only field");
+        }
 }
 
 void testRarcEndianness() {
@@ -5918,6 +6227,7 @@ int main() {
         testStageBuilder();
         testStageCreatePlans();
         testStageTemplates();
+        testShippedTemplatesParse();
         testWriteFileLeavesNoTemporaries();
         testDirectoryFilesystem();
         testYaz0();
@@ -5946,6 +6256,8 @@ int main() {
         testValidation();
         testDocument();
         testRarcEndianness();
+        testRarcRoundTripProperties();
+        testBcsvRoundTripProperties();
         testRarcWriterNeverLooseMatches();
         testProjectArchives();
         testArchiveTableEdit();

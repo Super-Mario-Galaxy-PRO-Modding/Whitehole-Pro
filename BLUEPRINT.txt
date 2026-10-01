@@ -1281,6 +1281,11 @@ Six of those commits are the camera feature and the next nine are the
   Things I noticed while working that would pay back more than the feature they
   came from. Recorded so the next session can pick them up if they agree.
 
+  STATUS: four are now DONE and carry a [DONE] marker with what they found --
+  the findExact() convention, temp-file naming, --dry-run, the round-trip
+  property tests, the shipped-template check, and the API holes. The rest are
+  still open.
+
   * A "VERIFY AGAINST RETAIL" CHECKLIST for every format change. The one test
     that would have caught section 15's worst bug -- a layer silently holding no
     tables -- is opening the result in a real game, and that is not automatable
@@ -1295,10 +1300,31 @@ Six of those commits are the camera feature and the next nine are the
     paths use findExact() and nothing else. It bit twice in one feature and will
     bite again.
 
-  * MORE ROUND-TRIP PROPERTY TESTS. The strongest tests in this repo are the
-    ones that build something, write it, re-read it and compare -- testRarcCreation
-    and the two-layer case. Anything with a hand-built writer deserves that
-    shape. It is also the only way to catch a schema mistake without a game.
+  * MORE ROUND-TRIP PROPERTY TESTS. [DONE, and it found two things]
+    testRarcRoundTripProperties + testBcsvRoundTripProperties now build across
+    shapes (nested dirs, mixed casing, empty files, zero-row tables), serialize,
+    re-parse and compare. THREE FACTS they established, each of which cost a
+    failed run to learn:
+
+      1. A BUILT-FROM-NOTHING ARCHIVE IS NOT BYTE-STABLE ACROSS A RE-PARSE, and
+         does not need to be. parse() rebuilds entries_ in node-tree order while
+         a builder appends directories and files as it goes, and serialize()
+         lays out the string table by walking entries_ -- so identical TREES give
+         different bytes. The law in section 3 is about an untouched PARSED file
+         re-saving identically, and THAT is asserted (and passes). Do not "fix"
+         the built case by trying to make entry order canonical.
+      2. CASE ON A DIRECTORY PATH BREAKS SERIALIZATION. insert() resolves parents
+         case-INSENSITIVELY, so writing "jmp/placement/common/X" under a
+         directory created as "jmp/Placement/Common" is accepted and then fails
+         at save with "RARC file has no serialized parent", because serialize()'s
+         parent map is keyed by the exact stored paths. That is section 14
+         invariant 2, and nothing in the code stops you from walking into it.
+         Mixed casing is safe on FILE NAMES only.
+      3. A DEFAULT-CONSTRUCTED BcsvTable IS BIG-ENDIAN and there is no public way
+         to build a little-endian one -- only to parse one. Iterating both
+         endiannesses when constructing tables from scratch means writing big
+         bytes and re-parsing them claiming to be little. testBcsvEndianness
+         covers the little path.
 
   * A --dry-run FOR THE CREATE COMMANDS. [DONE] `zone create --dry-run` and
     `galaxy create --dry-run` print every file that would be written and stop.
@@ -1340,10 +1366,16 @@ Six of those commits are the camera feature and the next nine are the
     temporaryPathFor() is now PUBLIC in binary_file.hpp so a caller that cannot
     use writeFile() cannot invent a second naming scheme that drifts.
 
-  * A TEST THAT THE TEMPLATES ON DISK STILL PARSE. They are user-editable files
-    in the install directory. testStageTemplates covers malformed and missing
-    ones, but nothing catches "someone edited a shipped template into something
-    invalid" until a user hits it. A cheap CI check would do it.
+  * A TEST THAT THE TEMPLATES ON DISK STILL PARSE. [DONE] testShippedTemplatesParse
+    walks data/templates/*.json through all four (game, galaxy/zone) filters and
+    asserts each map archive EXISTS, OPENS as a RARC (not merely non-empty), and
+    carries at least one /jmp/ table -- plus that every declared ScenarioFile
+    exists and opens, and that both games' bare-minimum archives open. The gap it
+    fills over testStageTemplates is specific: that test only checked mapArchive()
+    returning non-empty bytes, and only for the SMG2 GALAXY templates. SMG1's
+    galaxies, both zone templates, every ScenarioFile, and "parses" as opposed to
+    "is not empty" were all unverified. Asserts a floor of 5 templates rather
+    than an exact list, so adding one is not a failure while deleting one is.
 
   * CLOSE THE TWO UNDOCUMENTED API HOLES. [DONE] scenarioArchivePath() replaces
     zoneScenarioPath()/galaxyScenarioPath(): one function, no gameType parameter

@@ -76,6 +76,13 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - **Angles read in degrees** (the file's radians are converted for you), switches are checkboxes, and every edit is one undo step (`Ctrl+Z`).
 - Rows the game's cutscene system owns show as "Cannot preview (game-only)" instead of guessing.
 
+### 🌌 Galaxy missions (Scenarios)
+- **View > Scenarios** edits the galaxy's own scenario file: add, rename and remove **missions**, choose the star each one awards and its type, set comet state and timer.
+- **Layers matrix** — pick which `LayerA`…`LayerP` each mission activates per zone. `Common` is always on and is shown locked, because it is not a value in the file.
+- **At a glance** — each mission shows its star, type and comet badge, plus the zones and layers it brings in, so a whole galaxy is legible at once.
+- **Zone list** — add, remove and reorder the zones the galaxy loads. This edits the list only; it never creates or deletes a zone's files.
+- One undo step per edit (`Ctrl+Z`), on its own history so switching zones cannot discard it. `Ctrl+S` saves whichever document is dirty.
+
 ### 💻 CLI — the same engine, scriptable
 - `map objects`, `map paths`, `objectdb check`, `hash`, `bcsv inspect`, and more.
 - The **exact same C++ core** as the GUI — no duplicated logic.
@@ -349,7 +356,7 @@ editor's core · full test suite.
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. 🚧 Layer filtering & hierarchical object tree
 4. 🚧 BCSV spreadsheet editor
-5. 🚧 Galaxy & zone management (create galaxy, zone add/remove) — scenario tables now editable in the core; panel next
+5. 🚧 Galaxy & zone management — scenario editor shipped (View > Scenarios); creating a galaxy and adding brand-new zones still to do
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)
 7. 🚧 Model/texture browser inside the app
 8. ⏳ Cross-platform GUI (the core already builds anywhere)

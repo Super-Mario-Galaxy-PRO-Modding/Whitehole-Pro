@@ -73,6 +73,13 @@
            three tables, adds dirty() and save(). See section 13 for the format
            facts, which cost three wrong guesses to pin down.
 
+   [done]  THE SCENARIOS PANEL. View > Scenarios, open by default next to
+           Cameras. Mission cards with their star, type and comet badge, an
+           at-a-glance strip of zone/layer chips, a zone x layer matrix, and
+           the galaxy's zone list (add/remove/reorder). Every edit is one
+           GalaxyTableCommand on the galaxy's OWN undo stack, and Ctrl+Z routes
+           to whichever document owns the key. See section 13.
+
    [done]  THE WORDING. The panel no longer speaks LaunchCamPlus: every field
            has a plain-English label + tooltip (plain-English layer, section 8),
            the camtype row is "Camera style" in human words first, angles show as
@@ -856,7 +863,9 @@
   bd82516  feat(cameras): make the Cameras panel readable
   9bf7da8  feat(cameras): hide the last raw BCAM strings from the panel
   this     feat(cameras): author e: cameras, and open a galaxy's own map zone
-  this     feat(galaxy): keep and save the scenario tables (ScenarioModel)  <- HEAD
+  this     feat(galaxy): keep and save the scenario tables (ScenarioModel)
+ 8b93ea6  feat(galaxy): undo and dirty tracking for the scenario tables
+  this     feat(gui): the Scenarios panel (missions, layers, zone list)  <- HEAD
 
  Six of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
@@ -944,6 +953,27 @@
   writing); GalaxyInfo.bcsv is never created for a galaxy that shipped without one.
   testScenarioModel / testScenarioEditing / testGalaxyScenarioSave pin all of it,
   including that a layer edit and its exact inverse are byte-exact.
+
+  THE PANEL (gui_win32.cpp), and the two rules that keep it honest:
+   * TWO DOCUMENTS, TWO STACKS. EditorState holds `galaxy` (a GalaxyArchive BY
+     VALUE) beside `stage`, plus `scenarioUndoStack` beside `undoStack`. Ctrl+Z
+     goes to the galaxy's stack when a mission is selected, else the zone's
+     (scenarioUndoActive()), and the Scenarios panel prints its own undo label so
+     the seam is never a mystery. selectZone() clears the zone stack, which is
+     exactly why they cannot be one stack.
+   * GalaxyArchive borrows the workspace filesystem OUT of state.game, so
+     resetGalaxy() runs at the top of openMapImpl, openGameImpl and selectGalaxy.
+     Miss one and it is a dangling pointer, not a compile error -- this is the
+     single most dangerous line in the feature.
+   * The model is rebuilt from the archive EVERY FRAME. These tables are a few
+     hundred bytes, and it means the panel cannot display something an undo has
+     already replaced. Inside a commit lambda the model is rebuilt again from the
+     tables the lambda is handed, never captured.
+   * Common is drawn as a LOCKED column in the layer matrix: it owns no bit in the
+     file (scenarioLayerBit("Common") == -1), so offering it as an editable
+     checkbox would be a lie the save would not honour.
+   * An SMG1 galaxy has no PowerStarType column. The panel says so instead of
+     offering a picker that would ADD a column the game never asked for.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

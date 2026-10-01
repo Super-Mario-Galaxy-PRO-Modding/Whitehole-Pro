@@ -69,6 +69,41 @@ struct SnapScene {
                                                    float maxDistance,
                                                    std::size_t ignoreIndex) noexcept;
 
+// Closest hit against the exact collision soup, for PICKING rather than for
+// dropping. Snapping only ever casts straight down; a click is an arbitrary ray,
+// and "clicking through a wall selects the thing behind it" is the single most
+// common way an editor feels broken.
+//
+// Pure by design -- no Win32, no OpenGL -- so the whole decision is unit-testable,
+// which matters because the Win32 pick path itself cannot be.
+struct CollisionHit {
+    float distance{0.0F};
+    math::Vec3f point{};
+    // The KCL face normal (outward, as the engine's own hit tests use it).
+    math::Vec3f normal{0.0F, 1.0F, 0.0F};
+    // Stage index of the object that owns this collision, or kCollisionNoOwner for
+    // zone-level soup parsed straight from a zone KCL with no placement. That is
+    // what lets a click on a wall SELECT the wall instead of selecting nothing.
+    std::size_t sourceIndex{kCollisionNoOwner};
+};
+
+// Closest triangle along the ray, within maxDistance. Two-sided, like every other
+// pick here: any drawn surface is clickable regardless of winding, because that is
+// what the eye sees. Nullopt when the ray misses, which is the common case and
+// must stay cheap.
+[[nodiscard]] std::optional<CollisionHit> rayIntersectsCollision(
+    const math::Vec3f& origin, const math::Vec3f& direction,
+    const std::vector<SnapTriangle>& triangles, float maxDistance) noexcept;
+
+// THE DECISION, stated once so both the viewport and the tests read it the same
+// way: a candidate hit this far along the ray is hidden BEHIND collision.
+//
+// Returned as "should reject" rather than "should accept" because the honest
+// default is to keep the existing behaviour -- if there is no collision at all,
+// nothing is rejected, and picking behaves exactly as it did before this existed.
+[[nodiscard]] bool collisionOccludes(const std::optional<CollisionHit>& hit,
+                                     float candidateDistance) noexcept;
+
 // Y of the highest box top under (x, z) within maxDrop below topY.
 [[nodiscard]] std::optional<SnapHit> snapToObjectTop(const SnapScene& scene, float x, float z,
                                                      float topY, float maxDrop,

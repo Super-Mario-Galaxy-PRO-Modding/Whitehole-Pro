@@ -1,7 +1,9 @@
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/scenario_model.hpp"
+#include "whitehole/util/text.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace whitehole::smg {
 namespace {
@@ -142,6 +144,40 @@ int scenarioLayerBit(std::string_view layerName) noexcept {
         return -1;
     }
     return letter - 'A';
+}
+
+std::string canonicalLayerName(std::string_view layerName) {
+    // "layera" -> "LayerA", and the letter must be folded TO UPPER while the word
+    // "Layer" is folded to Capitalised. Uppercasing the whole string does NOT work
+    // and is the obvious thing to try: it yields "LAYERA", which still fails
+    // scenarioLayerBit()'s "Layer" prefix test, and "Layera" fails the A-P letter
+    // test. The two halves need opposite folds, so they are done separately.
+    constexpr std::string_view word = "layer";
+    if (layerName.size() == word.size() + 1) {
+        bool matchesWord = true;
+        for (std::size_t index = 0; index < word.size(); ++index) {
+            if (std::tolower(static_cast<unsigned char>(layerName[index])) != word[index]) {
+                matchesWord = false;
+                break;
+            }
+        }
+        if (matchesWord) {
+            const char letter = layerName[word.size()];
+            if (letter >= 'A' && letter <= 'P') {
+                return std::string("Layer") + letter;
+            }
+            if (letter >= 'a' && letter <= 'p') {
+                return std::string("Layer") + static_cast<char>(letter - 'a' + 'A');
+            }
+        }
+    }
+    // Common owns no bit but IS a layer name, and it is stored lowercase in SMG1.
+    if (whitehole::util::equalIgnoreCase(layerName, "Common")) {
+        return "Common";
+    }
+    // Not a layer: hand it back as it arrived, so a caller can tell "not a layer"
+    // from "renamed". Canonicalising it would invent a name the game never stores.
+    return std::string(layerName);
 }
 
 bool Scenario::starTypeIsGreen() const noexcept { return powerStarType == "Green"; }

@@ -1289,9 +1289,54 @@ Six of those commits are the camera feature and the next nine are the
      single feature: it needs BCK/BPK/BRK/BTK parsers AND a timeline UI AND a
      preview. Everything above is smaller than this.
 
-  5. KCL COLLISION RENDERING (roadmap 1). Collision-aware picking is the single
-     change that would most improve day-to-day editing, because clicking through
-     geometry correctly is what an editor is judged on.
+  5. KCL COLLISION RENDERING (roadmap 1). [DONE] Collision-aware picking is the
+      single change that would most improve day-to-day editing, because clicking
+      through geometry correctly is what an editor is judged on. Snapping was
+      already there; this added the PICKING half and the overlay.
+THE DECISION IS PURE AND TESTED, in render/surface_snap, deliberately away
+      from the Win32 path that cannot be unit-tested:
+        rayIntersectsCollision(origin, dir, triangles, maxDistance) -> CollisionHit
+          {distance, point, KCL face normal, sourceIndex}. Normalises the
+          direction, so a caller passing a non-unit vector gets a DISTANCE back
+          rather than a ray parameter -- otherwise the two get compared wrongly.
+        collisionOccludes(hit, candidateDistance) -> should reject
+          Shaped as "reject" not "accept" on purpose: with no collision on the ray
+          it returns false, which IS the pre-existing behaviour, so the feature
+          degrades to what came before instead of failing open.
+
+      THREE THINGS THAT WOULD HAVE LOOKED LIKE FEATURES AND WERE BUGS:
+        * WITHOUT the on-surface tolerance, every click on a modelled object
+          rejects itself against its own collision, and in a collision zone
+          NOTHING is selectable. That would have read as a catastrophic
+          regression rather than an improvement. kOnSurfaceTolerance = 0.05.
+        * The forgiving pick FALLBACK (no box under the cursor, one picked by 10px
+          proximity) usually has no ray hit, so no distance and no occlusion. That
+          is deliberate: a proximity pick is a "you probably meant this" gesture.
+        * Zone-level KCL with no placement owner selects NOTHING rather than
+          something misleading.
+
+      Clicking a wall selects the WALL (sourceIndex names its owner), which is the
+      whole point of carrying sourceIndex through from parseKclTriangles.
+      WHY the distance is re-derived in pickAt rather than returned by
+      pickForgiving: that returns a box INDEX, the rule needs a DISTANCE, and
+      rayIntersectsBox() is already a free function over the same box -- so one
+      more ray on a discrete click costs nothing, and changing that signature
+      would reach the camera, the gizmo and the marquee for no user-visible gain.
+
+      THE OVERLAY: View > Overlays > Collision, off by default. It is NOT an
+      OverlayFlags family -- the soup lives on ViewportWindow and is replaced once
+      per zone load, whereas OverlayFlags drives ViewportScene::rebuild(), so
+      coupling them would force a full scene rebuild on every KCL load. Built
+      LAZILY on the off->on edge and cached, because a dense zone is ~200k
+      triangles and per-frame rebuilds would cost more than the rest of the
+      overlay together. The wireframe is WELDED (collisionSegmentsFor(), tested):
+      a KCL is a closed mesh, so naive 3-per-triangle output draws every interior
+      edge and turns a planet's hull into a thicket. std::hash is not specialised
+      for std::pair before C++26, so the edge set needs its own hash -- MSVC
+      rejects the default outright and GCC only fails when it is used.
+
+      STILL UNVERIFIED, and it needs a human: clicking through a wall is
+      unit-tested at the decision level, but the wiring is only compile-verified.
 
   6. BCSV SPREADSHEET (roadmap 4). Lower value than it looks: the panels now
      cover the fields people actually edit. The real win is BULK editing, not

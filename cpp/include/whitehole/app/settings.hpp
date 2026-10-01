@@ -42,6 +42,11 @@ public:
     bool showCameras{true};
     bool showGravity{true};
     bool showPaths{true};
+    // Draw the game's exact collision (the KCL) as a wireframe. Off by default:
+    // a new overlay must never appear uninvited in someone's zone. It is also
+    // genuinely expensive -- a dense zone is ~200k triangles -- so it is built
+    // once on toggle and cached, not per frame.
+    bool showCollision{false};
     bool betterQuality{true};
     bool lowPolyModels{false};
     bool collisionModels{false};

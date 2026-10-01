@@ -9,6 +9,7 @@
 #include "whitehole/render/camera.hpp"
 #include "whitehole/render/model_library.hpp"
 #include "whitehole/render/object_visual.hpp"
+#include "whitehole/render/surface_snap.hpp"
 #include "whitehole/smg/path.hpp"
 #include "whitehole/smg/placement.hpp"
 
@@ -70,6 +71,14 @@ struct RailPointRef {
 
     [[nodiscard]] bool operator==(const RailPointRef& other) const noexcept = default;
 };
+
+// WELDED, so this lives here rather than in the viewport: no Win32 and no GL,
+// and therefore testable. A KCL is a closed mesh of prisms, so the SAME edge is
+// shared by two triangles and naive 3-per-triangle output draws every interior
+// edge -- roughly tripling the line count and turning a planet's hull into an
+// unreadable thicket.
+[[nodiscard]] std::vector<OverlaySegment> collisionSegmentsFor(
+    const std::vector<SnapTriangle>& triangles);
 
 // Which overlay families a rebuild generates. The View menu toggles map onto
 // these one-to-one, so a disabled family produces no geometry at all instead

@@ -5893,6 +5893,19 @@ void drawMenuBar(EditorState& state, bool& done) {
             state.settings.save();
             refreshViewport(state, false);
         }
+        // Collision is the game's EXACT geometry, not the drawn model -- that
+        // difference is the entire reason to look at it, so the label says so.
+        // No refreshViewport() here: the wireframe is built from the KCL soup the
+        // viewport already holds, and rebuilding the whole scene to show it would
+        // be a second full rebuild for a toggle.
+        if (ImGui::MenuItem("Collision", nullptr, &state.settings.showCollision)) {
+            state.settings.save();
+            state.viewport.setShowCollision(state.settings.showCollision);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("The game's exact collision geometry, not the drawn model.\n"
+                              "This is also what snapping and click-through use.");
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Settings")) {
@@ -6267,6 +6280,13 @@ void drawPreferencesDialog(EditorState& state) {
     changed |= ImGui::Checkbox("Camera overlays", &state.settings.showCameras);
     changed |= ImGui::Checkbox("Gravity", &state.settings.showGravity);
     changed |= ImGui::Checkbox("Paths", &state.settings.showPaths);
+    if (ImGui::Checkbox("Collision", &state.settings.showCollision)) {
+        state.viewport.setShowCollision(state.settings.showCollision);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("Draw the game's exact collision geometry.\n"
+                          "Not the drawn model -- where Mario actually collides.");
+    }
     ImGui::SeparatorText("Editor controls");
     changed |= ImGui::Checkbox("Invert camera motion", &state.settings.reverseRotation);
     ImGui::SeparatorText("Navigation");

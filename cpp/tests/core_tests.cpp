@@ -231,6 +231,220 @@ void testStageCreatePlans() {
     }
 }
 
+// THE COLLISION WIREFRAME MUST BE WELDED. A KCL is a closed mesh of prisms, so
+// every interior edge belongs to TWO triangles. Emitting three segments per
+// triangle -- the obvious thing -- draws all of them, roughly tripling the line
+// count and turning a planet's hull into an unreadable thicket. This is the
+// cheapest possible test for that: two triangles sharing one edge must yield
+// three segments, not six.
+void testCollisionWireframeWelding() {
+    using whitehole::math::Vec3f;
+    using whitehole::render::SnapTriangle;
+
+    // Two triangles forming a square, split along the diagonal they share.
+    const std::vector<SnapTriangle> square{
+        {Vec3f{0.0F, 0.0F, 0.0F}, Vec3f{10.0F, 0.0F, 0.0F}, Vec3f{10.0F, 10.0F, 0.0F},
+         Vec3f{0.0F, 0.0F, 1.0F}, 0},
+        {Vec3f{0.0F, 0.0F, 0.0F}, Vec3f{10.0F, 10.0F, 0.0F}, Vec3f{0.0F, 10.0F, 0.0F},
+         Vec3f{0.0F, 0.0F, 1.0F}, 0},
+    };
+    const auto welded = whitehole::render::collisionSegmentsFor(square);
+    // 6 triangle-edges minus the 3 that are shared (the diagonal and the two sides
+    // each pair touches twice) leaves 5 unique: the 4 square sides plus the
+    // diagonal. Naive output would be 6.
+    expect(welded.size() == 5,
+           "two triangles sharing an edge must weld to 5 segments, not 6; got " +
+               std::to_string(welded.size()));
+
+    // A single triangle has no shared edges, so all three survive.
+    const std::vector<SnapTriangle> one{
+        {Vec3f{0.0F, 0.0F, 0.0F}, Vec3f{1.0F, 0.0F, 0.0F}, Vec3f{0.0F, 1.0F, 0.0F},
+         Vec3f{0.0F, 0.0F, 1.0F}, 0},
+    };
+    expect(whitehole::render::collisionSegmentsFor(one).size() == 3,
+           "one triangle must yield exactly 3 segments");
+
+    // Floating-point noise must NOT defeat the weld. Two triangles that share an
+    // edge computed it independently can differ in the last bits, and a key built
+    // from raw floats would then miss the weld and make the whole thing pointless.
+    // 1/10000th of a unit is far below anything visible and far above that noise.
+    const std::vector<SnapTriangle> noisy{
+        {Vec3f{0.0F, 0.0F, 0.0F}, Vec3f{10.0F, 0.0F, 0.0F}, Vec3f{10.0F, 10.0F, 0.0F},
+         Vec3f{0.0F, 0.0F, 1.0F}, 0},
+        {Vec3f{0.00001F, 0.0F, 0.0F}, Vec3f{10.00001F, 10.0F, 0.0F},
+         Vec3f{0.0F, 10.0F, 0.0F}, Vec3f{0.0F, 0.0F, 1.0F}, 0},
+    };
+    expect(whitehole::render::collisionSegmentsFor(noisy).size() == 5,
+           "a shared edge must still weld when its endpoints differ in the last bits");
+
+    // An edge drawn in the opposite direction is the SAME edge. Without the
+    // ordering, the weld misses every closed mesh in the format.
+    const std::vector<SnapTriangle> reversed{
+        {Vec3f{0.0F, 0.0F, 0.0F}, Vec3f{10.0F, 0.0F, 0.0F}, Vec3f{10.0F, 10.0F, 0.0F},
+         Vec3f{0.0F, 0.0F, 1.0F}, 0},
+        {Vec3f{0.0F, 10.0F, 0.0F}, Vec3f{10.0F, 10.0F, 0.0F}, Vec3f{0.0F, 0.0F, 0.0F},
+         Vec3f{0.0F, 0.0F, 1.0F}, 0},
+    };
+    expect(whitehole::render::collisionSegmentsFor(reversed).size() == 5,
+           "an edge traversed in the opposite direction is the same edge and must weld");
+
+    // Empty soup is the common case (no workspace bound) and must be empty, not a
+    // crash and not a dummy segment.
+    expect(whitehole::render::collisionSegmentsFor({}).empty(),
+           "an empty collision soup must produce no segments");
+}
+
+// COLLISION-AWARE PICKING. "Clicking through a wall selects the thing behind it"
+// is the single most common way an editor feels broken, so the decision is put
+// in surface_snap as pure math with no Win32 in it -- the pick path itself cannot
+// be unit-tested, and this is the part that can actually be wrong.
+//
+// The geometry is the smallest thing that shows the bug: a floor at y=0, a wall
+// standing on it at z=50, and a ray cast at the wall from z=0. Anything the wall
+// hides must be rejected; the wall's own owner must be selectable.
+void testCollisionAwarePicking() {
+    using whitehole::math::Vec3f;
+    using whitehole::render::CollisionHit;
+    using whitehole::render::SnapTriangle;
+
+    // A floor spanning the whole scene, owned by object 0.
+    std::vector<SnapTriangle> soup;
+    soup.push_back({Vec3f{-500.0F, 0.0F, -500.0F}, Vec3f{-500.0F, 0.0F, 500.0F},
+                    Vec3f{500.0F, 0.0F, 500.0F}, Vec3f{0.0F, 1.0F, 0.0F}, 0});
+    // A wall at z=50 facing the ray, owned by object 1.
+    soup.push_back({Vec3f{-100.0F, 0.0F, 50.0F}, Vec3f{-100.0F, 200.0F, 50.0F},
+                    Vec3f{100.0F, 200.0F, 50.0F}, Vec3f{0.0F, 0.0F, -1.0F}, 1});
+
+    // ---- the raycast itself -------------------------------------------------
+    // Straight at the wall from 100 units away, dead level at its centre.
+    const auto wall = whitehole::render::rayIntersectsCollision(
+        {0.0F, 100.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, soup, 1000.0F);
+    expect(wall.has_value(), "a ray fired straight at the wall must hit it");
+    expect(std::abs(wall->distance - 50.0F) < 0.01F,
+           "the wall must be reported 50 units away");
+    expect(std::abs(wall->point.z - 50.0F) < 0.01F, "the hit point must be on the wall");
+    expect(wall->sourceIndex == 1, "the hit must name the object that OWNS the wall");
+    expect(std::abs(wall->normal.z + 1.0F) < 0.01F, "the KCL face normal must survive");
+
+    // A ray that goes over the wall misses entirely.
+    const auto over = whitehole::render::rayIntersectsCollision(
+        {0.0F, 400.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, soup, 1000.0F);
+    expect(!over.has_value(), "a ray above the wall must miss it");
+    // A ray pointed away misses.
+    expect(!whitehole::render::rayIntersectsCollision({0.0F, 100.0F, 0.0F},
+                                                      {0.0F, 0.0F, -1.0F}, soup, 1000.0F)
+               .has_value(),
+           "a ray pointing away from the wall must miss it");
+    // maxDistance is honoured, so an out-of-reach surface cannot occlude a click.
+    expect(!whitehole::render::rayIntersectsCollision({0.0F, 100.0F, 0.0F},
+                                                      {0.0F, 0.0F, 1.0F}, soup, 10.0F)
+               .has_value(),
+           "a wall beyond maxDistance must not be hit");
+    // An empty soup is the common case (no workspace bound) and must be cheap and
+    // empty, not a special case that throws.
+    expect(!whitehole::render::rayIntersectsCollision({0.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F},
+                                                      {}, 100.0F)
+               .has_value(),
+           "an empty collision soup must miss");
+
+    // ---- the occlusion decision --------------------------------------------
+    // THE ASSERTION THAT MATTERS: whatever sits behind the wall is not selectable.
+    expect(whitehole::render::collisionOccludes(wall, 400.0F),
+           "an object 350 units behind the wall must be REJECTED");
+    expect(whitehole::render::collisionOccludes(wall, 60.0F),
+           "anything behind the wall must be rejected, however close");
+    // ...and what is in FRONT of the wall is untouched.
+    expect(!whitehole::render::collisionOccludes(wall, 10.0F),
+           "an object in front of the wall must stay selectable");
+    // A click ON the surface is not "behind" it. Without this tolerance every
+    // surface click on a modelled object rejects itself, and in a zone full of
+    // collision NOTHING would be selectable.
+    expect(!whitehole::render::collisionOccludes(wall, 50.0F),
+           "a click exactly on a surface must not reject itself");
+    expect(!whitehole::render::collisionOccludes(wall, 50.02F),
+           "a click within tolerance of a surface must not reject itself");
+    // No collision at all means no rejection anywhere: this is the behaviour the
+    // editor had before this existed, and it must degrade to it exactly.
+    expect(!whitehole::render::collisionOccludes(std::nullopt, 9999.0F),
+           "with no collision on the ray, nothing may be occluded");
+
+    // ---- a floor, the other common case -------------------------------------
+    // Looking down at the floor, something UNDER it must be rejected while the
+    // floor itself stays selectable. This is the drop-to-surface geometry turned
+    // into a click, which is where the bug would bite most often.
+    const auto down = whitehole::render::rayIntersectsCollision(
+        {0.0F, 500.0F, 0.0F}, {0.0F, -1.0F, 0.0F}, soup, 1000.0F);
+    expect(down.has_value(), "a ray straight down must hit the floor");
+    expect(down->sourceIndex == 0, "the floor must be owned by object 0");
+    expect(whitehole::render::collisionOccludes(down, 600.0F),
+           "anything below the floor must be rejected");
+    expect(!whitehole::render::collisionOccludes(down, 400.0F),
+           "anything above the floor must stay selectable");
+}
+
+// THE LAYER NAME MUST MEAN THE SAME THING IN BOTH GAMES. StageArchive reads a
+// table's layer from the directory name AS STORED, and SMG1 archives are
+// all-lowercase -- so it used to be "common"/"layera" for SMG1 and
+// "Common"/"LayerA" for SMG2, in one field consumed by both.
+//
+// scenarioLayerBit() is case-SENSITIVE, so on the old data it returned -1 for
+// EVERY object in EVERY SMG1 zone. Any layer filter built on it would work
+// perfectly on SMG2 and silently show nothing on SMG1, with no error anywhere --
+// the same bug family as the loose find() in RARC, and the reason this test exists.
+// It also pins that a non-layer name is handed back untouched rather than
+// "normalised" into something the game never stores.
+void testCanonicalLayerNames() {
+    using whitehole::smg::canonicalLayerName;
+    using whitehole::smg::scenarioLayerBit;
+
+    // The whole point: every spelling that means the same layer resolves to the
+    // SAME bit, so nothing downstream has to be lenient.
+    for (int bit = 0; bit < 16; ++bit) {
+        // std::string(...) on the left is REQUIRED, not stylistic: "Layer" is a
+        // const char*, and `const char* + char` is POINTER ARITHMETIC (the char
+        // promotes to an offset), so it silently returns a pointer 65 bytes into
+        // the string-literal pool -- which then reads out as whatever literal text
+        // happens to sit there. It compiles clean under /W4 and -Wconversion.
+        const std::string canonical =
+            std::string("Layer") + static_cast<char>('A' + bit);
+        expect(canonicalLayerName(canonical) == canonical,
+               "a canonical layer name must survive canonicalisation: " + canonical);
+        expect(canonicalLayerName(whitehole::util::toLower(canonical)) == canonical,
+               "the lowercase spelling must canonicalise to " + canonical);
+        // ...and the decisive assertion: the bit agrees with the canonical name.
+        const auto normalised = canonicalLayerName(whitehole::util::toLower(canonical));
+        expect(scenarioLayerBit(normalised) == bit,
+               "scenarioLayerBit of the normalised name must be the layer's own bit; "
+               "canonical='" + canonical + "' lower='" +
+                   whitehole::util::toLower(canonical) + "' normalised='" + normalised +
+                   "'");
+        // Without the normalisation this is -1, which is the bug.
+        expect(scenarioLayerBit(whitehole::util::toLower(canonical)) == -1,
+               "scenarioLayerBit must stay case-sensitive -- that is WHY the "
+               "canonicalisation exists rather than loosening the resolver");
+    }
+
+    expect(canonicalLayerName("common") == "Common",
+           "the lowercase Common must canonicalise to Common");
+    expect(canonicalLayerName("COMMON") == "Common",
+           "Common must canonicalise regardless of case");
+    expect(canonicalLayerName("Common") == "Common",
+           "an already-canonical Common must survive");
+    // Common owns no bit, in either spelling. The panel locks that column
+    // because of exactly this.
+    expect(scenarioLayerBit("Common") == -1 && scenarioLayerBit("common") == -1,
+           "Common must own no bit in either casing");
+
+    // A name that is not a layer comes back AS IT ARRIVED, so a caller can tell
+    // "not a layer" from "renamed" -- and nothing invents a name the game does not
+    // store.
+    expect(canonicalLayerName("LayerQ") == "LayerQ",
+           "a letter past P must not be canonicalised into a layer");
+    expect(canonicalLayerName("ObjInfo") == "ObjInfo",
+           "a non-layer name must come back unchanged");
+    expect(canonicalLayerName("") == "", "an empty name must stay empty");
+}
+
 // Creating zones and galaxies. The claim under test is that a created zone is
 // indistinguishable from a real one TO WHITEHOLE PRO -- it reopens through the
 // same loaders the editor uses. It is NOT a claim that a retail game accepts it;
@@ -6225,6 +6439,9 @@ int main() {
     try {
         testBinaryData();
         testStageBuilder();
+        testCanonicalLayerNames();
+        testCollisionAwarePicking();
+        testCollisionWireframeWelding();
         testStageCreatePlans();
         testStageTemplates();
         testShippedTemplatesParse();

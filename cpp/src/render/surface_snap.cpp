@@ -101,6 +101,52 @@ std::optional<float> rayIntersectsTriangle(const math::Vec3f& origin, const math
     return t;
 }
 
+std::optional<CollisionHit> rayIntersectsCollision(const math::Vec3f& origin,
+                                                  const math::Vec3f& direction,
+                                                  const std::vector<SnapTriangle>& triangles,
+                                                  float maxDistance) noexcept {
+    if (!(maxDistance > 0.0F)) {
+        return std::nullopt;
+    }
+    // The ray is expected to be unit length (that is what screenToRay returns),
+    // but a caller that hands over a non-unit direction must still get a DISTANCE
+    // back rather than a parameter, or the two would be compared against each
+    // other wrongly. Normalising costs one sqrt and removes a whole class of
+    // caller bug.
+    const math::Vec3f dir = direction.normalized();
+    std::optional<CollisionHit> best;
+    float bestDistance = maxDistance;
+    for (const auto& triangle : triangles) {
+        const auto t = rayIntersectsTriangle(origin, dir, triangle);
+        if (!t.has_value() || *t <= 0.0F || *t >= bestDistance) {
+            continue;
+        }
+        bestDistance = *t;
+        CollisionHit hit;
+        hit.distance = *t;
+        hit.point = origin + dir * (*t);
+        hit.normal = triangle.normal;
+        hit.sourceIndex = triangle.sourceIndex;
+        best = hit;
+    }
+    return best;
+}
+
+bool collisionOccludes(const std::optional<CollisionHit>& hit, float candidateDistance) noexcept {
+    // No collision on this ray: accept, which is exactly the pre-existing
+    // behaviour. This is the default the whole feature degrades to.
+    if (!hit.has_value()) {
+        return false;
+    }
+    // Collision nearer than the candidate means the candidate is behind a wall.
+    // The tolerance matters at exactly one place -- a click ON a surface, where
+    // the object and its own collision are at the same distance. Without it, every
+    // surface click on a modelled object would reject itself and nothing in a
+    // collision zone would be selectable at all.
+    constexpr float kOnSurfaceTolerance = 0.05F;
+    return candidateDistance > hit->distance + kOnSurfaceTolerance;
+}
+
 std::optional<SnapHit> raycastDown(const SnapScene& scene, const math::Vec3f& origin,
                                    float maxDistance, std::size_t ignoreIndex) noexcept {
     if (!(maxDistance > 0.0F)) {

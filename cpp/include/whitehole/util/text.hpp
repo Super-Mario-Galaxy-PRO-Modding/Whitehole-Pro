@@ -15,6 +15,17 @@ inline std::string toLower(std::string_view value) {
     return result;
 }
 
+// The counterpart of toLower, added for canonicalLayerName(): SMG1 archives
+// store every path lowercase and the canonical spelling the code uses is
+// capitalised, so something has to fold the other direction.
+inline std::string toUpper(std::string_view value) {
+    std::string result(value);
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char character) {
+        return static_cast<char>(std::toupper(character));
+    });
+    return result;
+}
+
 inline std::string replaceSlashes(std::string_view value) {
     std::string result(value);
     std::replace(result.begin(), result.end(), '\\', '/');

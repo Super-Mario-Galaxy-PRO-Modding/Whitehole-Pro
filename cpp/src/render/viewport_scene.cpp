@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <unordered_set>
 
 namespace whitehole::render {
 namespace {
@@ -662,6 +664,75 @@ std::vector<std::size_t> ViewportScene::pickRect(const ViewportCamera& camera, f
         }
     }
     return hits;
+}
+
+// An unordered_set of pairs needs its own hash and equality: std::hash is NOT
+// specialised for std::pair before C++26, so leaving it to the default is a
+// compile error on MSVC (and a silent compile on GCC that only fails on use).
+struct EdgeKey {
+    std::int64_t low{0};
+    std::int64_t high{0};
+    bool operator==(const EdgeKey& other) const noexcept {
+        return low == other.low && high == other.high;
+    }
+};
+
+struct EdgeKeyHash {
+    std::size_t operator()(const EdgeKey& key) const noexcept {
+        // splitmix64 finaliser on each half, then combine. A plain XOR would put
+        // mirrored coordinates in the same bucket and make a closed mesh O(n^2).
+        const auto mix = [](std::int64_t value) noexcept {
+            auto bits = static_cast<std::uint64_t>(value);
+            bits ^= bits >> 33;
+            bits *= 0xff51afd7ed558ccdULL;
+            bits ^= bits >> 33;
+            bits *= 0xc4ceb9fe1a85ec53ULL;
+            bits ^= bits >> 33;
+            return bits;
+        };
+        return static_cast<std::size_t>(mix(key.low) ^ (mix(key.high) + 0x9e3779b97f4a7c15ULL +
+                                                            (mix(key.low) << 6) +
+                                                            (mix(key.low) >> 2)));
+    }
+};
+
+std::vector<OverlaySegment> collisionSegmentsFor(const std::vector<SnapTriangle>& triangles) {
+    // Vertices are quantised before keying. Two triangles that share an edge
+    // computed it independently can differ in the last bits, so a key built from
+    // raw floats would miss the weld and the whole thing would be pointless.
+    // KCL coordinates are large-ish world units, so 1/64th of a unit is far below
+    // anything an author can see and comfortably above that float noise.
+    constexpr float kQuantum = 1.0F / 64.0F;
+    const auto vertexKey = [](const math::Vec3f& point) {
+        const auto q = [](float value) {
+            return static_cast<std::int64_t>(std::lround(value / kQuantum));
+        };
+        return (q(point.x) * 73856093LL) ^ (q(point.y) * 19349663LL) ^ (q(point.z) * 83492791LL);
+    };
+
+    std::vector<OverlaySegment> segments;
+    // Reserve for the WELDED count, which is unknown, so guess at the welded
+    // figure (~1.5 edges per triangle for a closed mesh) rather than 3.
+    segments.reserve(triangles.size() + triangles.size() / 2);
+    std::unordered_set<EdgeKey, EdgeKeyHash> seen;
+
+    const auto addEdge = [&](const math::Vec3f& from, const math::Vec3f& to) {
+        const auto a = vertexKey(from);
+        const auto b = vertexKey(to);
+        // Ordered, because an edge is the same edge whichever way round you look
+        // at it -- that is what makes the weld work at all.
+        if (a == b || !seen.emplace(EdgeKey{std::min(a, b), std::max(a, b)}).second) {
+            return;
+        }
+        segments.push_back({from, to});
+    };
+
+    for (const auto& triangle : triangles) {
+        addEdge(triangle.a, triangle.b);
+        addEdge(triangle.b, triangle.c);
+        addEdge(triangle.c, triangle.a);
+    }
+    return segments;
 }
 
 } // namespace whitehole::render

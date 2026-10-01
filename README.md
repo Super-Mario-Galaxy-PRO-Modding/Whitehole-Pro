@@ -376,7 +376,8 @@ editor's core · full test suite.
 
 **Next (in order):**
 
-1. 🚧 KCL collision rendering — collision-aware selection & snapping
+1. ✅ KCL collision rendering — collision-aware picking, and a wireframe overlay
+      (View > Overlays > Collision, off by default)
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. 🚧 Layer filtering & hierarchical object tree
 4. 🚧 BCSV spreadsheet editor

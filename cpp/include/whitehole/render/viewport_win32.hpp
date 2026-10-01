@@ -142,6 +142,11 @@ public:
     [[nodiscard]] float flySpeedMultiplier() const noexcept { return controller_.flyMultiplier; }
     // Optional exact collision geometry (KCL triangles) for surface snapping.
     void setCollisionTriangles(std::vector<SnapTriangle> triangles);
+        // Draw that same geometry as a wireframe. Off by default, and the segment
+        // list is built only on the off->on edge (and whenever the soup is
+        // replaced), because a dense zone is ~200k triangles and rebuilding that
+        // every frame would cost more than the rest of the overlay put together.
+    void setShowCollision(bool show);
     // Step size for arrow-key nudging (mirrors the editor's snap steps).
     void setNudgeStep(float step) noexcept { nudgeStep_ = step > 0.0F ? step : 10.0F; }
     void frameAll();
@@ -434,6 +439,12 @@ private:
     float nudgeStep_{10.0F};
     // Optional exact collision for surface snapping.
     std::vector<SnapTriangle> collisionTriangles_;
+    // The collision wireframe, built from collisionTriangles_ only when it is
+    // actually going to be drawn. Kept beside the soup it came from so the two
+    // cannot get out of step.
+    std::vector<OverlaySegment> collisionSegments_;
+    bool showCollision_{false};
+    bool collisionSegmentsDirty_{true};
     bool meshesFilled_{false};  // lazily built once per GL context
     std::vector<math::Vec3f> meshes_[5]; // unit triangles, one entry per CategoryStyle::Shape
     std::vector<ModelListEntry> modelLists_; // display lists, validated via weak_ptr

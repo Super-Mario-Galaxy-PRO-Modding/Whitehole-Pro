@@ -76,6 +76,7 @@ void Settings::load() {
     showCameras = getB(root, "showCameras", true);
     showGravity = getB(root, "showGravity", true);
     showPaths = getB(root, "showPaths", true);
+    showCollision = getB(root, "showCollision", false);
     betterQuality = getB(root, "betterQuality", true);
     lowPolyModels = getB(root, "lowPolyModels", false);
     collisionModels = getB(root, "collisionModels", false);
@@ -133,6 +134,7 @@ void Settings::save() const {
     putB(o, "showCameras", showCameras);
     putB(o, "showGravity", showGravity);
     putB(o, "showPaths", showPaths);
+    putB(o, "showCollision", showCollision);
     putB(o, "betterQuality", betterQuality);
     putB(o, "lowPolyModels", lowPolyModels);
     putB(o, "collisionModels", collisionModels);
@@ -185,6 +187,7 @@ void Settings::reset() {
     darkMode = true;
     openMaximized = false;
     showAxis = showAreas = showCameras = showGravity = showPaths = true;
+    showCollision = false;
     betterQuality = true;
     lowPolyModels = collisionModels = false;
     texturedModels = translucentModels = true;

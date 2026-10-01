@@ -60,6 +60,25 @@ enum class StarType { normal, green, hidden, custom };
 // "Common" deliberately returns -1: it is always active and owns no bit.
 [[nodiscard]] int scenarioLayerBit(std::string_view layerName) noexcept;
 
+// The canonical spelling of a layer name: "common" and "layera" as an SMG1
+// archive stores them become "Common" and "LayerA"; anything that is not a layer
+// comes back unchanged so a caller can tell "not a layer" from "renamed".
+//
+// WHY THIS EXISTS, because it is not cosmetic. StageArchive loads a table's layer
+// from the directory name AS STORED, and SMG1 archives are all-lowercase -- so an
+// SMG1 zone yields "common"/"layera" while an SMG2 zone yields "Common"/"LayerA".
+// scenarioLayerBit() above is case-SENSITIVE, so calling it on that field returns
+// -1 for EVERY object in EVERY SMG1 zone: a layer filter built on it would work
+// perfectly on SMG2 and silently show nothing on SMG1, with no error anywhere.
+// That is the same bug family as the loose find() in RARC -- a lookup that is
+// right for half the inputs and quietly wrong for the rest.
+//
+// Normalising once, at load, fixes every consumer at once. The symptom of it
+// not being done is already visible: cli.cpp compares layer names with
+// equalIgnoreCase because it had to cope, and edit/rails.cpp writes a literal
+// "Common" with a capital C beside data read from the archive.
+[[nodiscard]] std::string canonicalLayerName(std::string_view layerName);
+
 // One scenario row, resolved. Every field falls back to a documented default
 // rather than throwing, so a hand-edited or truncated table still lists.
 struct Scenario {

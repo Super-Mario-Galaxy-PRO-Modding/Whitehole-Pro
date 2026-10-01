@@ -3,6 +3,7 @@
 #include "whitehole/io/binary_file.hpp"
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/path.hpp"
+#include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/util/text.hpp"
 
 #include <algorithm>
@@ -67,7 +68,7 @@ void StageArchive::loadTable(std::string_view path, std::string_view kind, std::
         ObjectTable table;
         table.path = std::string(path);
         table.kind = std::string(kind);
-        table.layer = std::string(layer);
+        table.layer = canonicalLayerName(layer);
         table.table = BcsvTable(archive_->read(path), archive_->endian());
         tables_.push_back(std::move(table));
     } catch (const std::exception&) {

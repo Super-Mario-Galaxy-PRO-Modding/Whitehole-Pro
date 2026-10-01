@@ -3,21 +3,27 @@
 ================================================================================
 
  Read this first, then README.md (user-facing). This file exists so the next
- session does not have to re-derive two weeks of context. It is written on top
- of commit 8f70eb3 ("docs: add BLUEPRINT.txt, the cross-session handoff notes")
- and has been amended by every camera commit since; the two most recent are
- listed as real hashes in section 11 and the newest one as "this commit".
+  session does not have to re-derive weeks of context. It was written on top
+  of commit 8f70eb3 ("docs: add BLUEPRINT.txt, the cross-session handoff notes")
+  and has been amended by every camera, scenario and creation commit since;
+  section 11 lists them with real hashes and the newest as "<- HEAD".
 
  Line numbers below are ANCHORS as of that commit. They drift. Trust the symbol
  names, use the numbers only as a shortcut to jump near the right code.
 
  HOW TO USE THIS FILE
+   - Section 0 is the state of play: what is done, and what is NOT verified.
+   - Sections 4, 5 and 6 are the REAL camera API, copied from the headers.
+     Never guess a signature; re-read it (see section 10).
    - Section 8 describes the Cameras panel as shipped, and ends with the manual
      checks a human still has to run (8.5).
    - Section 9 records the target decision the panel made, and the questions
      that are still open and deliberately untouched.
    - Section 10 lists the time sinks (tooling traps) - read it before you run
      anything, it saves about an hour per session.
+   - Sections 13, 14 and 15 describe the scenario tables, archive creation and
+     zone/galaxy creation, each ending with the bugs that cost real time.
+   - Section 16 ranks what is left. Section 17 is opinion, not plan.
    - If you change anything described here, update the section that describes it
      in the same commit. A stale blueprint is worse than none.
 
@@ -97,11 +103,33 @@
            while still surfacing any flag the row already stores. Labels only:
            names, types, defaults and round trips are untouched.
 
- What is NOT verified in this session: the five manual checks in section 8.5,
- which need a person clicking a real map.
 
+   [done]  ARCHIVE CREATION. RarcArchive::create() + createDirectory(), and the
+            shared stageLayeredTables() list. The enabling piece for roadmap 5.
+            See section 14 for three invariants that are all invisible until
+            violated, and for what is NOT proven (no retail game has been run).
 
-           now a description of what shipped plus what a human still must check.
+   [done]  THE SAVE PATH. writeFile()'s in-place fallback threw instead of using
+            the error_code it was written around, and its temporary name was a
+            FIXED ".tmp", so two writers saving one archive raced on it. Fixed,
+            and pinned by testWriteFileLeavesNoTemporaries. See section 10.
+
+   [done]  CREATING ZONES AND GALAXIES. StageHelper.createZone / createGalaxy,
+            with the JMap SCHEMAS DERIVED FROM THE SHIPPED TEMPLATES rather
+            than transcribed from Java's thirteen populateJMapFields* functions.
+            Plus the template loader (data/templates/*.json, which shipped unread
+            since before the port) and the CLI: `zone create`, `galaxy create`,
+            `zone templates`, `galaxy templates`. See section 15, including four
+            bugs the test found -- two of them silent data loss.
+
+  What is NOT verified: the nine manual checks in section 8.5, which need a
+  person clicking a real map. Section 16 ranks what is left; section 17 is
+  opinion, not plan.
+
+  ONE TESTING TRAP THAT HAS ALREADY COST A SESSION: an std::ofstream still open
+  when its file is removed, or when a TemporaryDirectory is destroyed, fails on
+  MSVC and passes on MinGW. Scope every stream in its own block -- see section 10.
+
 
  ONE WARNING THAT COST A REVERT: an earlier draft of the GUI panel was written
  against an invented API (a flat `game::CameraRecord` with eyePoint/focusPoint/
@@ -858,10 +886,17 @@
    PowerShell prints the Japanese camtype jpNames as mojibake. That is a console
    rendering artefact, NOT corruption - verify with the editor tool before
    "fixing" it. This exact false alarm already happened once here.
- - A carried-over context summary is a SUMMARY, not ground truth. When it
-   disagrees with the header, the header wins, and that is why section 4 exists.
-   Re-read a signature before you call it; guessing an API is how the reverted
-   draft happened.
+  - A carried-over context summary is a SUMMARY, not ground truth. When it
+    disagrees with the header, the header wins, and that is why section 4 exists.
+    Re-read a signature before you call it; guessing an API is how the reverted
+    draft happened.
+  - AN OPEN std::ofstream IS A LOCKED FILE, AND MINGW WILL NOT TELL YOU. Scope
+    every test fixture stream in its own block before anything removes the
+    file or lets a TemporaryDirectory die. This passed on MinGW and failed on
+    MSVC with "cannot remove: ... is being used by another process [Broken.json]"
+    -- see ef55168. Related: run ctest --output-on-failure on BOTH toolchains
+    before calling a test fixed, because the toolchain that reproduces the bug
+    is not the one you develop on.
 
 --------------------------------------------------------------------------------
 11. RECENT COMMIT LADDER (oldest -> newest, all on origin/master)
@@ -890,16 +925,20 @@
   9837f34  feat(cli): reach the scenario tables from the command line
   d51b851  feat(rarc): create archives from nothing                 <- section 14
   ca0e0cd  refactor(smg): share the layered-table list with the loader
-  this     fix(io): unique save temporaries, and no throwing fallback <- HEAD
+  f8904bf  feat(zones): create zones and galaxies from nothing  <- section 15
+  f8820ec  feat(cli): zone/galaxy create + the template loader
+  ef55168  fix(tests): close test streams before removing their files <- HEAD
 
- Six of those commits are the camera feature; the ones before them are the
- viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
- (reversed-Z: near->+1, far->0, clear to 0, GL_GEQUAL, and the x/y terms must
- stay centric so GL_CW winding keeps working - see the comment at
- camera.hpp:119) or 1872379 (gizmo drag singularity) without re-running the
- matching test. Commit subjects here are terse imperative - sometimes Conventional
- ("feat(cameras): ..."), sometimes plain prose. Either is fine; the WHY belongs in
- the body, as a paragraph, never as a restatement of the diff.
+Six of those commits are the camera feature and the next nine are the
+  scenario / galaxy / zone work (sections 13, 14 and 15); the ones before
+  them are the viewport-math landmines the camera now stands on. Do not
+  "clean up" dfcf520 (reversed-Z: near->+1, far->0, clear to 0, GL_GEQUAL, and
+  the x/y terms must stay centric so GL_CW winding keeps working - see the
+  comment at camera.hpp:119) or 1872379 (gizmo drag singularity) without
+  re-running the matching test. Commit subjects here are terse imperative -
+  sometimes Conventional ("feat(cameras): ..."), sometimes plain prose. Either
+  is fine; the WHY belongs in the body, as a paragraph, never as a restatement
+  of the diff.
 
 --------------------------------------------------------------------------------
 12. DEFINITION OF DONE FOR THIS SESSION (what the Cameras commit had to meet)
@@ -915,10 +954,13 @@
     three PoseSupport classes, with no NaN for degenerate rows. DONE as
     testCameraPreviewChain, including NaN-poisoned rows.
  4) Builds clean with /W4 AND -Wall -Wextra -Wpedantic -Wconversion; ctest green;
-    the five manual checks in 8.5 pass. DONE except 8.5: MinGW Release + MSVC
-    Release both built with zero NEW warnings (only pre-existing ones remain)
-    and ctest passed on both. 8.5 is unrunnable from a shell and still open --
-    it now has NINE checks, three added for the Scenarios panel and the save path.
+     the five manual checks in 8.5 pass. DONE except 8.5: MinGW Release + MSVC
+     Release both built with zero NEW warnings (only pre-existing ones remain)
+     and ctest --output-on-failure passed on BOTH. 8.5 is unrunnable from a shell and
+     still open -- it has NINE checks, three added for the Scenarios panel and
+     the save path. See ef55168 for why "green on my toolchain" is not evidence:
+     a test that deletes a file an ofstream still holds passes on MinGW and fails
+     on MSVC.
  5) This file updated in the same commit as the code it describes. Done just
     below this line.
  6) The panel must not require LaunchCamPlus literacy to read. The wording pass
@@ -1144,6 +1186,101 @@
   panel has no create button yet, and creation is NOT undoable -- it writes whole
   new archives, which the GalaxyTableCommand snapshot model cannot express. The
   GUI must say so in the confirm step rather than hiding the gap.
+
+================================================================================
+16. WHAT IS LEFT, IN ORDER (opinionated ranking, not a promise)
+================================================================================
+
+  The roadmap in README.md is a flat list. This is the same work ranked by what
+  UNBLOCKS THE MOST, with the two non-code items first -- because the highest
+  value thing on this list is not a feature and is not mine to do.
+
+  1. VERIFY A CREATED ZONE ON HARDWARE. Ten minutes of a person's time, and it
+     is the only way to close the gap section 15 leaves open. Everything there is
+     proven against Whitehole Pro's own readers; nobody has run a retail game.
+     If a created zone loads and plays, the biggest unproven claim in the repo
+     becomes proven. If it does not, we learn something worth far more than the
+     ten minutes cost. DO THIS BEFORE ANY MORE FORMAT WORK.
+
+  2. THE GUI LAYER PICKER. The last piece of roadmap 5. The core and the CLI are
+     done and shared, so this is UI only -- but it is what makes creation
+     reachable for a person who does not want to open a terminal. Note the
+     honesty requirement: creation is NOT undoable (section 15), and the confirm
+     step must say so.
+
+  3. LAYER FILTERING + HIERARCHICAL OBJECT TREE (roadmap 3). What makes a LARGE
+     galaxy usable. The Scenarios panel made the structure legible, but the
+     viewport still cannot hide a layer or navigate a galaxy's zones as a tree.
+     This is the biggest usability win left per unit of work.
+
+  4. ANIMATIONS (roadmap 2). Spin platforms, doors, live stars. The largest
+     single feature: it needs BCK/BPK/BRK/BTK parsers AND a timeline UI AND a
+     preview. Everything above is smaller than this.
+
+  5. KCL COLLISION RENDERING (roadmap 1). Collision-aware picking is the single
+     change that would most improve day-to-day editing, because clicking through
+     geometry correctly is what an editor is judged on.
+
+  6. BCSV SPREADSHEET (roadmap 4). Lower value than it looks: the panels now
+     cover the fields people actually edit. The real win is BULK editing, not
+     visibility.
+
+  7. Model/texture browser, specialized renderers (star trajectories, world-map
+     links), cross-platform GUI. All real, all later.
+
+  Deliberately NOT on this list, from section 9: the cutscene time slider, the
+  screen-region projection, per-zone camera tables. Each is either its own
+  feature or needs hardware; section 9 says why, and that reasoning still holds.
+
+================================================================================
+17. SUGGESTIONS (opinion, not plan -- none of this is promised work)
+================================================================================
+
+  Things I noticed while working that would pay back more than the feature they
+  came from. Recorded so the next session can pick them up if they agree.
+
+  * A "VERIFY AGAINST RETAIL" CHECKLIST for every format change. The one test
+    that would have caught section 15's worst bug -- a layer silently holding no
+    tables -- is opening the result in a real game, and that is not automatable
+    here. Make it a documented step BEFORE the code lands, not something the
+    author remembers afterwards. It is the single highest-value process change
+    available to this repo.
+
+  * GUARD AGAINST THE find() CLASS OF BUG. Section 15 lost data TWICE to a
+    lookup that is deliberately loose (it falls back to bare-filename and
+    suffix matching, which is right for a human reading a path and wrong for
+    anything writing). The cheap systemic fix is a convention or a lint: write
+    paths use findExact() and nothing else. It bit twice in one feature and will
+    bite again.
+
+  * MORE ROUND-TRIP PROPERTY TESTS. The strongest tests in this repo are the
+    ones that build something, write it, re-read it and compare -- testRarcCreation
+    and the two-layer case. Anything with a hand-built writer deserves that
+    shape. It is also the only way to catch a schema mistake without a game.
+
+  * A --dry-run FOR THE CREATE COMMANDS. `galaxy scenario layer ... on` already
+    refuses a zone the galaxy does not have, which is the right instinct. A
+    dry run would let `zone create` print every file it is about to write before
+    writing any of them, and it fits the rule the Scenarios panel already
+    follows: show what will happen, then happen it.
+
+  * DOCUMENT "NOT UNDOABLE" IN THE UI, NOT ONLY HERE. Section 15 says creation
+    cannot be undone by the snapshot model. That belongs on screen in the
+    confirm step. It is currently written down in exactly one place, and that
+    place is a file most users will not read.
+
+  * UNIFY TEMP-FILE NAMING. writeFile() now uses a per-writer suffix (section 10),
+    but the builder and the CLI do not create temporaries. The day a second
+    writer appears there, the same race returns.
+
+  * A TEST THAT THE TEMPLATES ON DISK STILL PARSE. They are user-editable files
+    in the install directory. testStageTemplates covers malformed and missing
+    ones, but nothing catches "someone edited a shipped template into something
+    invalid" until a user hits it. A cheap CI check would do it.
+
+  * CLOSE THE TWO UNDOCUMENTED API HOLES. galaxyScenarioPath() is declared and
+    takes a gameType it deliberately ignores; stage_templates.hpp is not
+    mentioned in any section above. Small, but a reader will trip on both.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

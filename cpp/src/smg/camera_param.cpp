@@ -538,18 +538,11 @@ std::string_view resolveCameraType(std::string_view camtype, std::uint32_t engin
 namespace {
 
 // ---- known id knowledge base ----------------------------------------------
-// Japanese event/id names -> English display names, transcribed from
-// LaunchCamPlus' EventData tables (which mirror Luma's Workshop's Camera ID
-// Names documentation). needsId: the game appends a 3-digit camera-set id;
-// needsSub: the id carries a ":XX番目" sub-index as well.
-struct KnownEvent {
-    std::string_view jp;
-    std::string_view en;
-    bool needsId;
-    bool needsSub;
-};
-
-const KnownEvent kKnownEvents[] = {
+// The data behind the cameraKnownEvents() / cameraKnownOthers() /
+// cameraGameCreatedEvents() dictionaries. Kept in one place so the lookups
+// below and the public accessors can never drift apart.
+const std::vector<KnownCameraEvent>& eventStore() {
+    static const std::vector<KnownCameraEvent> events = {
     {"シナリオスターター", "Scenario Starter", true, true},
     {"スーパースピンドライバー固有出現イベント用", "Launch Star Appearance", true, false},
     {"スーパースピンドライバー", "Launch Star", true, true},
@@ -651,34 +644,37 @@ const KnownEvent kKnownEvents[] = {
     {"フーファイターカメラ", "Foo Fighter Camera", false, false},
     {"DemoName[CameraPartName]", "Demo Camera Template", false, false},
     {"g:ObjectName:CameraID:0", "Collision Camera Template", false, false},
-};
+    };
+    return events;
+}
 
 // o: cameras -- names the game looks up after the "o:" prefix.
-struct KnownOther {
-    std::string_view jp;
-    std::string_view en;
-};
-
-const KnownOther kKnownOthers[] = {
-    {"デフォルトカメラ", "Default Camera"},
-    {"デフォルト水中カメラ", "Default Underwater"},
-    {"デフォルト水面カメラ", "Default Water Surface"},
-    {"デフォルトフーファイターカメラ", "Default Flying Mario"},
-    {"スタートカメラ", "Default Spawn Point"},
-    {"ズームカメラ", "Zoom Camera (first person)"},
-};
+const std::vector<KnownCameraEvent>& otherStore() {
+    static const std::vector<KnownCameraEvent> others = {
+    {"デフォルトカメラ", "Default Camera", false, false},
+    {"デフォルト水中カメラ", "Default Underwater", false, false},
+    {"デフォルト水面カメラ", "Default Water Surface", false, false},
+    {"デフォルトフーファイターカメラ", "Default Flying Mario", false, false},
+    {"スタートカメラ", "Default Spawn Point", false, false},
+    {"ズームカメラ", "Zoom Camera (first person)", false, false},
+    };
+    return others;
+}
 
 // Cameras the game creates at runtime (never stored in a BCAM file). They
 // still appear in ids occasionally, so the editor can explain them.
-const KnownOther kGameCreatedEvents[] = {
-    {"スタートアニメカメラ", "Galaxy Intro Camera"},
-    {"ブラックホール", "Default Black Hole Death"},
-    {"共通会話カメラ", "Default NPC Dialogue"},
-    {"主観カメラ", "First Person Camera"},
-    {"昇天カメラ", "Ground Death Camera"},
-    {"奈落カメラ", "Air Death Camera"},
-    {"変身初出カメラ", "First Time Powerup Get"},
-};
+const std::vector<KnownCameraEvent>& gameCreatedStore() {
+    static const std::vector<KnownCameraEvent> created = {
+    {"スタートアニメカメラ", "Galaxy Intro Camera", false, false},
+    {"ブラックホール", "Default Black Hole Death", false, false},
+    {"共通会話カメラ", "Default NPC Dialogue", false, false},
+    {"主観カメラ", "First Person Camera", false, false},
+    {"昇天カメラ", "Ground Death Camera", false, false},
+    {"奈落カメラ", "Air Death Camera", false, false},
+    {"変身初出カメラ", "First Time Powerup Get", false, false},
+    };
+    return created;
+}
 
 // ---- small string helpers --------------------------------------------------
 bool isAsciiDigit(char ch) noexcept { return ch >= '0' && ch <= '9'; }
@@ -748,18 +744,18 @@ std::vector<std::string_view> splitColons(std::string_view text) {
     return parts;
 }
 
-// Looks a Japanese event name up in kKnownEvents, trying the exact name,
+// Looks a Japanese event name up in eventStore(), trying the exact name,
 // the name minus its trailing digit run, and the name with all digits
 // removed (the "パワースター固有005" family concatenates the set id).
-const KnownEvent* findKnownEvent(std::string_view name) {
-    for (const auto& entry : kKnownEvents) {
+const KnownCameraEvent* findKnownEvent(std::string_view name) {
+    for (const auto& entry : eventStore()) {
         if (entry.jp == name) {
             return &entry;
         }
     }
     const std::string_view trimmed = stripTrailingDigits(name);
     if (trimmed != name) {
-        for (const auto& entry : kKnownEvents) {
+        for (const auto& entry : eventStore()) {
             if (entry.jp == trimmed) {
                 return &entry;
             }
@@ -767,7 +763,7 @@ const KnownEvent* findKnownEvent(std::string_view name) {
     }
     const std::string stripped = stripAllDigits(name);
     if (stripped != name) {
-        for (const auto& entry : kKnownEvents) {
+        for (const auto& entry : eventStore()) {
             if (entry.jp == stripped) {
                 return &entry;
             }
@@ -776,8 +772,8 @@ const KnownEvent* findKnownEvent(std::string_view name) {
     return nullptr;
 }
 
-const KnownOther* findKnownOther(std::string_view name) {
-    for (const auto& entry : kKnownOthers) {
+const KnownCameraEvent* findKnownOther(std::string_view name) {
+    for (const auto& entry : otherStore()) {
         if (entry.jp == name) {
             return &entry;
         }
@@ -785,8 +781,8 @@ const KnownOther* findKnownOther(std::string_view name) {
     return nullptr;
 }
 
-const KnownOther* findGameCreatedEvent(std::string_view name) {
-    for (const auto& entry : kGameCreatedEvents) {
+const KnownCameraEvent* findGameCreatedEvent(std::string_view name) {
+    for (const auto& entry : gameCreatedStore()) {
         if (entry.jp == name) {
             return &entry;
         }
@@ -795,6 +791,36 @@ const KnownOther* findGameCreatedEvent(std::string_view name) {
 }
 
 } // namespace
+
+const std::vector<KnownCameraEvent>& cameraKnownEvents() {
+    return eventStore();
+}
+
+const std::vector<KnownCameraEvent>& cameraKnownOthers() {
+    return otherStore();
+}
+
+const std::vector<KnownCameraEvent>& cameraGameCreatedEvents() {
+    return gameCreatedStore();
+}
+
+const KnownCameraEvent* cameraKnownEvent(std::string_view jp) noexcept {
+    for (const auto& entry : eventStore()) {
+        if (entry.jp == jp) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+std::string eventCameraIdFor(std::string_view jpEvent, int setId, int subIndex) noexcept {
+    // The game writes both indices zero padded, then the literal "番目"
+    // ("-th", 6 UTF-8 bytes) after the sub-index. describeEventId() reads the
+    // shape back by stripping exactly those 6 bytes, so the two must agree.
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), ":%03d:%02d\xe7\x95\xaa\xe7\x9b\xae", setId, subIndex);
+    return "e:" + std::string(jpEvent) + buffer;
+}
 
 CameraId parseCameraId(std::string_view id) {
     CameraId result;
@@ -911,7 +937,7 @@ std::string describeEventId(std::string_view name) {
 
     const std::vector<std::string_view> parts = splitColons(name);
     if (!parts.empty() && !parts[0].empty()) {
-        const KnownEvent* known = findKnownEvent(parts[0]);
+        const KnownCameraEvent* known = findKnownEvent(parts[0]);
         if (known != nullptr) {
             // The camera-set id is either the second colon segment or a digit
             // run concatenated onto the event name ("パワースター固有005").
@@ -967,10 +993,10 @@ std::string describeCameraId(const CameraId& id) {
     case CameraContext::group:
         return "Group: " + id.name;
     case CameraContext::other:
-        if (const KnownOther* known = findKnownOther(id.name)) {
+        if (const KnownCameraEvent* known = findKnownOther(id.name)) {
             return std::string(known->en);
         }
-        if (const KnownOther* created = findGameCreatedEvent(id.name)) {
+        if (const KnownCameraEvent* created = findGameCreatedEvent(id.name)) {
             return std::string(created->en) + " (created by the game)";
         }
         return id.raw;
@@ -1374,6 +1400,36 @@ GameCameraPose solveGameCameraPose(const CameraPreviewParams& raw, const math::V
     pose.at = pivot;
     pose.up = finiteUp(params.up);
     return pose;
+}
+
+bool cameraIdExists(const CameraParamTable& table, std::string_view id) noexcept {
+    const CameraId wanted = parseCameraId(id);
+    if (wanted.context == CameraContext::invalid) {
+        // A half-typed or unrecognised id is never "already there": reporting a
+        // duplicate here would block the author from finishing it.
+        return false;
+    }
+    for (const auto& camera : table.cameras()) {
+        const CameraId existing = parseCameraId(camera.id);
+        if (existing.context == wanted.context && existing.number == wanted.number &&
+            existing.name == wanted.name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string nextFreeEventCameraId(const CameraParamTable& table, std::string_view jpEvent,
+                                  int setId) {
+    // The game numbers the sub-index 00..99 (eventCameraIdFor writes %02d), so
+    // that is the whole space worth scanning.
+    for (int sub = 0; sub < 100; ++sub) {
+        const std::string id = eventCameraIdFor(jpEvent, setId, sub);
+        if (!cameraIdExists(table, id)) {
+            return id;
+        }
+    }
+    return eventCameraIdFor(jpEvent, setId, 0);
 }
 
 } // namespace whitehole::smg

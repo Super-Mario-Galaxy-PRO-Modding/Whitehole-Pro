@@ -4,10 +4,9 @@
 
  Read this first, then README.md (user-facing). This file exists so the next
  session does not have to re-derive two weeks of context. It is written on top
- of commit 8f70eb3 ("docs: add BLUEPRINT.txt, the cross-session handoff notes",
- master, pushed, clean tree), 2026-09-29: the commit that carries this edit is
- the Cameras panel (section 8), so the ladder in section 11 lists that one as
- "this commit" rather than as a hash it did not have yet.
+ of commit 8f70eb3 ("docs: add BLUEPRINT.txt, the cross-session handoff notes")
+ and has been amended by every camera commit since; the two most recent are
+ listed as real hashes in section 11 and the newest one as "this commit".
 
  Line numbers below are ANCHORS as of that commit. They drift. Trust the symbol
  names, use the numbers only as a shortcut to jump near the right code.
@@ -47,6 +46,23 @@
            honestly and shows the tracked target it solved against. Section 8 is
  The solver also sanitises its inputs now (section 4), because a hand-edited row
  can carry a literal NaN and one NaN in a pose is an invisible viewport.
+
+   [done]  AUTHORING e: ROWS. The scenario-starter / cutscene cameras were
+           display-only, because the event dictionary was file-private and the
+           panel's font has no CJK glyphs, so nobody could type "e:シナリオスター
+           ター:005:01番目". camera_param.hpp now exposes the dictionaries
+           (section 4) and eventCameraIdFor() composes the id, so "Add camera"
+           offers a "Cutscene event" mode: pick the event by its English name,
+           set the two indices, done. "Type it myself" survives for custom
+           events. The id buffer went 64 -> 160 bytes because the longest
+           dictionary entry does not fit in 64.
+
+   [done]  THE GALAXY MAP ZONE. A galaxy's own <Galaxy>Map.arc is a real zone
+           with its own CameraParam.bcam and is NOT in its ZoneList.bcsv, so
+           selectGalaxy's use of GalaxyArchive::zones() made it unreachable from
+           the Project panel. editableZones() now leads with it; zones() stays
+           ZoneList-only, because area-limit validation counts objects per
+           scenario and adding the map zone there would change those numbers.
 
    [done]  THE WORDING. The panel no longer speaks LaunchCamPlus: every field
            has a plain-English label + tooltip (plain-English layer, section 8),
@@ -231,6 +247,29 @@
    cubeCameraIdForArg(objArg0) / spawnCameraIdFor(cameraSetId) reproduce the
    game's printf: Obj_arg0 15 -> "c:000f", CameraSetId 60 -> "s:003c".
    cameraContextLabel(context) -> "Camera area", "Spawn point", ...
+   eventCameraIdFor(jpEvent, setId, subIndex) -> the e: id the game itself
+   writes: "シナリオスターター",5,1 -> "e:シナリオスターター:005:01番目". The
+   set id is %03d and the sub-index %02d plus the literal 6-byte "番目" that
+   describeEventId() strips on the way back. THIS is the function that makes a
+   scenario-starter camera authorable: the stored text is Japanese and the panel
+   font has no CJK glyphs, so an author who has to TYPE an e: id cannot.
+   cameraIdExists(table, id) -> is this id already in the table? Compares the
+   PARSED id, so "c:000F" matches a stored "c:000f"; an unparseable or empty id
+   is never a duplicate (it must not block a half-typed one).
+   nextFreeEventCameraId(table, jpEvent, setId) -> the lowest ":NN番目" not
+   already stored, for that event + set id. Scans 00..99 and falls back to 00.
+
+  The known-name dictionaries (ADDED for the id composer; were file-private,
+   which is WHY e: rows were display-only)
+   struct KnownCameraEvent { std::string_view jp, en; bool needsId, needsSub; }
+   cameraKnownEvents()          -> e: event names, LaunchCamPlus order
+   cameraKnownOthers()          -> o: names (needsId/needsSub always false)
+   cameraGameCreatedEvents()    -> cameras the game BUILDS at runtime. Never in
+       a file, so the editor names them but must never offer one to add. A test
+       asserts no name is in both this list and cameraKnownEvents().
+   cameraKnownEvent(jp)         -> exact lookup, nullptr when unknown
+   All three come from ONE store per list in camera_param.cpp, shared with the
+   describeCameraId() lookups: there is no second copy to drift.
 
  Field spec (52 known BCAM fields, in the game's preferred column order)
    struct CameraFieldSpec { name, type, baseDefault, smg2Default, scope, group,
@@ -679,6 +718,16 @@
           the scene is not sheared (proves the orthogonal-roll projection).
        5. Click in the viewport: preview must exit, camera must be EXACTLY where
           it was (compare the target/distance readout before and after).
+       6. "Add camera..." -> "Triggered by: Cutscene event" -> pick "Scenario
+          Starter", leave Camera set 1 and index 0, press Add. The row must appear
+          labelled in English, and `map cameras` on the saved file must show one
+          `e:` id with a 3-digit set id and a 2-digit index. Add a second one
+          with "Use the next free one" and confirm the index advances, not
+          collides.
+       7. Open a game workspace, pick a galaxy, and confirm the zone list leads
+          with the galaxy's own map zone (labelled "(galaxy map)"). Open it, edit
+          a camera, save, reload: the edit must still be there. A galaxy map must
+          appear ONCE even when its ZoneList also names the galaxy.
      If 3 or 4 fails, the bug is in camera.cpp, not the panel.
 
 
@@ -715,6 +764,10 @@
  Resolve names through db/name_table + db/object_db before string matching.
 
  Still open (do not "fix" these without asking):
+   - The cutscene/scenario-starter types are now AUTHORABLE, but a row added that
+     way will usually land on a camtype the solver reports PoseSupport::none for
+     (CAM_TYPE_ANIM / RAIL_DEMO are keyframed over time in game). The badge says
+     so honestly; a time slider + key sampling is still its own feature.
    - Per-zone tables: StageArchive loads ONE CameraParam.bcam per open map file,
      so "zone" is currently "the map file you opened". A per-zone picker implies a
      StageArchive change first.
@@ -724,9 +777,6 @@
      If someone adds it, it belongs in the projection, not in eye/at.
    - SMG1 rows default several fields differently; hasColumn() is the only
      trustworthy answer. Never render a defaulted 0 as if it were authored.
-   - CAM_TYPE_ANIM / RAIL_DEMO / cutscene types are keyframed over time and the
-     solver reports none. Grey them out with the badge; do not hide them. A time
-     slider + key sampling is its own feature.
    - `roll` is passed straight through as radians. Whether the game treats it as
      camera-local or screen-space was inferred from the translators, not verified
      on hardware. If a runtime capture ever disagrees, the fix is one line in the
@@ -794,9 +844,11 @@
  8f70eb3  docs: add BLUEPRINT.txt, the cross-session handoff notes
  85ab818  feat(cameras): the Cameras panel (list, edit, live preview)
   5600e5c  chore(repo): stop tracking build-check output, document Cameras
-  this     feat(cameras): plain-English Cameras panel (labels, degrees, simple view)  <- HEAD
+  bd82516  feat(cameras): make the Cameras panel readable
+  9bf7da8  feat(cameras): hide the last raw BCAM strings from the panel
+  this     feat(cameras): author e: cameras, and open a galaxy's own map zone  <- HEAD
 
- Three of those commits are the camera feature; the ones before them are the
+ Five of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
  (reversed-Z: near->+1, far->0, clear to 0, GL_GEQUAL, and the x/y terms must
  stay centric so GL_CW winding keeps working - see the comment at

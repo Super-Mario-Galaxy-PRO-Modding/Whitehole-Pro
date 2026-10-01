@@ -22,6 +22,13 @@ struct ObjectTable {
     BcsvTable table;
 };
 
+// Workspace-relative path of a stage's map archive. SMG2 keeps each zone in
+// its own folder (/StageData/<stage>/<stage>Map.arc); SMG1 flattens them into
+// /StageData/<stage>.arc. Shared rather than duplicated so GalaxyArchive's
+// "does this galaxy have a map zone" check and StageArchive::open() can never
+// disagree about where a zone actually lives.
+[[nodiscard]] std::string stageMapFilesystemPath(std::string_view stageName, int gameType);
+
 class StageArchive {
 public:
     [[nodiscard]] static StageArchive openMapFile(const std::filesystem::path& path, int gameType = 2);

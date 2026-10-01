@@ -84,6 +84,36 @@ struct CameraId {
 [[nodiscard]] std::string cubeCameraIdForArg(std::int32_t objArg0);
 [[nodiscard]] std::string spawnCameraIdFor(std::int32_t cameraSetId);
 
+// ---- the known-name dictionaries -------------------------------------------
+// The Japanese event names the game looks a camera id up by, and the English the
+// editor shows instead (the panel's font has no CJK glyphs, so the JP text is
+// never displayed -- these tables are how a row becomes readable, and how an
+// author picks a name without ever typing Japanese). Transcribed from
+// LaunchCamPlus' EventData tables; see camera_param.cpp for the data.
+struct KnownCameraEvent {
+    std::string_view jp;    // "シナリオスターター" (stored in the file)
+    std::string_view en;    // "Scenario Starter" (shown in the editor)
+    bool needsId{false};    // the game appends a 3-digit camera-set id
+    bool needsSub{false};   // ...and a ":NN番目" sub-index as well
+};
+
+// e: event names, in LaunchCamPlus' order.
+[[nodiscard]] const std::vector<KnownCameraEvent>& cameraKnownEvents();
+// o: names the game looks up after the "o:" prefix.
+[[nodiscard]] const std::vector<KnownCameraEvent>& cameraKnownOthers();
+// Cameras the game builds at runtime. They never appear in a BCAM file, so the
+// editor only names them -- it must never offer one as something to add.
+[[nodiscard]] const std::vector<KnownCameraEvent>& cameraGameCreatedEvents();
+// Exact lookup by stored (Japanese) name, or nullptr when unknown.
+[[nodiscard]] const KnownCameraEvent* cameraKnownEvent(std::string_view jp) noexcept;
+
+// Builds the id the game itself writes for an e: camera:
+// ("シナリオスターター", 5, 1) -> "e:シナリオスターター:005:01番目".
+// The set id is %03d and the sub-index %02d followed by the 6-byte "番目"
+// suffix, which is exactly the form describeEventId() parses back.
+[[nodiscard]] std::string eventCameraIdFor(std::string_view jpEvent, int setId,
+                                           int subIndex) noexcept;
+
 // Friendly English name for an id: known event names are translated
 // ("e:シナリオスターター:005:01番目" -> "Scenario Starter 005 camera 01"),
 // c:/s: get "Camera Area 15" / "Spawn Point 60" style labels, g:/o: fall
@@ -296,6 +326,20 @@ private:
     BcsvTable table_;
     std::uint32_t defaultVersion_{kCameraVersionSmg2};
 };
+
+// True when some row already stores this id, comparing the PARSED form rather
+// than the text: "c:000f" and "c:000F" are the same camera, while a
+// differently-prefixed or differently-numbered id is not. An unparseable id
+// never matches, so a half-typed id cannot be reported as a duplicate.
+[[nodiscard]] bool cameraIdExists(const CameraParamTable& table, std::string_view id) noexcept;
+
+// The id the game would generate for the next free camera of this event: the
+// same event + set id with the lowest ":NN番目" sub-index not already stored.
+// Scans a bounded range and returns the canonical id for sub-index 0 if a table
+// somehow already holds them all.
+[[nodiscard]] std::string nextFreeEventCameraId(const CameraParamTable& table,
+                                                std::string_view jpEvent,
+                                                int setId);
 
 } // namespace whitehole::smg
 

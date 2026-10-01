@@ -58,6 +58,7 @@
 
 #include <charconv>
 #include <cstdio>   // std::snprintf: the viewport composite failure code
+#include <cstdlib>   // std::atoi: reading an event sub-index back out of an id
 #include <cstring>
 #include <fstream>     // first-boot marker file
 #include <optional>
@@ -204,8 +205,37 @@ struct EditorState {
     math::Vec3f cameraTargetOverride{};
     // "Add camera" popover buffers, kept here because an ImGui popup reopens
     // across frames while the user types.
-    char cameraNewId[64]{};
+    // 160 bytes, not 64: the longest event name in the dictionary
+    // ("郵便屋さんキノピオ固有注目会話") is 48 UTF-8 bytes, so a full id with both
+    // indices and the "番目" suffix is 63 bytes -- one short of a 64-byte buffer,
+    // which would silently truncate a legitimate id.
+    char cameraNewId[160]{};
     int cameraNewType{0};
+    // How the "Add camera" dialog builds its id. The default (0) is a
+    // camera area, which is what the old free-text box opened on. Every mode
+    // except Manual produces the id in code, so an author never has to type
+    // the Japanese the game stores.
+    enum class NewCameraIdKind {
+        cube,     // c:000f  -- camera area, from Obj_arg0
+        spawn,    // s:003c  -- spawn point, from CameraSetId
+        event,    // e:...   -- cutscene / scenario starter
+        group,    // g:Name  -- group camera
+        other,    // o:Name  -- the game's built-in defaults
+        manual,   // whatever the author types
+    };
+    NewCameraIdKind cameraNewIdKind{NewCameraIdKind::cube};
+    int cameraNewCubeNumber{0};
+    int cameraNewSpawnSetId{0};
+    // Index into smg::cameraKnownEvents() for the event mode, plus the two
+    // indices the game's e: ids carry.
+    int cameraNewEvent{0};
+    int cameraNewEventSetId{1};
+    int cameraNewEventSub{0};
+    // Free-text name for the g:/o: modes and the Manual escape hatch.
+    char cameraNewName[128]{};
+    // True once the author has switched to Manual, so the composed fields do
+    // not overwrite what they typed.
+    bool cameraNewIdManual{false};
 
     // Layout + visibility for the hosted WGL child window. The child is a real
     // HWND, so it always paints above the ImGui framebuffer: `placeViewportChild`
@@ -2005,7 +2035,10 @@ void selectGalaxy(EditorState& state, int index) {
     }
     state.selectedGalaxy = index;
     const auto galaxy = state.game->openGalaxy(state.galaxies[static_cast<std::size_t>(index)]);
-    state.zones = galaxy.zones();
+    // editableZones(), not zones(): the galaxy's OWN map zone is a real zone
+    // with its own CameraParam.bcam and is not in ZoneList.bcsv, so using the
+    // ZoneList alone made the galaxy map unopenable from here.
+    state.zones = galaxy.editableZones();
     state.selectedZone = -1;
     setStatus(state, "Galaxy " + galaxy.name() + " has " +
                          std::to_string(state.zones.size()) + " zones.");
@@ -2113,6 +2146,14 @@ void drawGalaxyZonePanel(EditorState& state) {
             std::string label = state.zoneNames.displayName(state.zones[i]);
             if (label != state.zones[i]) {
                 label += "  [" + state.zones[i] + "]";
+            }
+            // The galaxy's own map zone shares its name with the galaxy, so
+            // without this the entry is indistinguishable from the galaxy row
+            // above it.
+            if (state.selectedGalaxy >= 0 &&
+                static_cast<std::size_t>(state.selectedGalaxy) < state.galaxies.size() &&
+                state.zones[i] == state.galaxies[static_cast<std::size_t>(state.selectedGalaxy)]) {
+                label += "  (galaxy map)";
             }
             const bool selected = state.selectedZone == static_cast<int>(i);
             if (ImGui::Selectable(label.c_str(), selected)) {
@@ -3179,18 +3220,10 @@ std::vector<const smg::CameraTypeInfo*> cameraTypesForVersion(std::uint32_t vers
 // with the same id would make the game take whichever it finds first, which is
 // never what the author meant when they typed the id.
 bool cameraIdTaken(const smg::CameraParamTable& table, std::string_view id) {
-    const smg::CameraId wanted = smg::parseCameraId(id);
-    if (wanted.context == smg::CameraContext::invalid) {
-        return false;
-    }
-    for (const auto& camera : table.cameras()) {
-        const smg::CameraId existing = smg::parseCameraId(camera.id);
-        if (existing.context == wanted.context && existing.number == wanted.number &&
-            existing.name == wanted.name) {
-            return true;
-        }
-    }
-    return false;
+    // The rule lives in core (smg::cameraIdExists) because the "Add camera"
+    // composer below builds candidate ids and has to agree with this check
+    // about what counts as a duplicate. One implementation, one answer.
+    return smg::cameraIdExists(table, id);
 }
 
 // The next unused "c:%04x" camera-area id, so "Add camera" cannot silently
@@ -3203,6 +3236,17 @@ std::string nextFreeCubeCameraId(const smg::CameraParamTable& table) {
         }
     }
     return smg::cubeCameraIdForArg(0);
+}
+
+// The next unused "s:%04x" spawn-point id, the same idea for CameraSetId.
+std::string nextFreeSpawnCameraId(const smg::CameraParamTable& table) {
+    for (std::int32_t candidate = 0; candidate < 0x10000; ++candidate) {
+        const std::string id = smg::spawnCameraIdFor(candidate);
+        if (!cameraIdTaken(table, id)) {
+            return id;
+        }
+    }
+    return smg::spawnCameraIdFor(0);
 }
 
 // A placement row that stands where the game drops the player in: the Start
@@ -3477,6 +3521,288 @@ bool drawCameraFieldRow(EditorState& state, smg::CameraParamTable& table, std::s
     return fieldWrote;
 }
 
+// Reads the ":NN" sub-index back out of an id the core composed, so the spinner
+// and the stored text can never drift apart. Returns -1 when the id carries no
+// sub-index segment.
+int eventSubIndexOf(std::string_view id) {
+    const smg::CameraId parsed = smg::parseCameraId(id);
+    std::size_t at = 0;
+    std::vector<std::string_view> parts;
+    while (at <= parsed.name.size()) {
+        const std::size_t colon = parsed.name.find(':', at);
+        if (colon == std::string_view::npos) {
+            parts.push_back(parsed.name.substr(at));
+            break;
+        }
+        parts.push_back(parsed.name.substr(at, colon - at));
+        at = colon + 1;
+    }
+    if (parts.size() < 3) {
+        return -1;
+    }
+    // The segment is "NN番目"; the suffix is not a digit, so parsing stops there.
+    std::string digits;
+    for (const char ch : parts[2]) {
+        if (ch < '0' || ch > '9') {
+            break;
+        }
+        digits.push_back(ch);
+    }
+    return digits.empty() ? -1 : std::atoi(digits.c_str());
+}
+
+// The event branch of the "Add camera" trigger editor. This is what makes a
+// scenario-starter camera authorable: the author picks "Scenario Starter" (or
+// any other event) by its English name and the panel writes the Japanese id.
+void drawNewCameraEventEditor(EditorState& state, const smg::CameraParamTable& table) {
+    using Kind = EditorState::NewCameraIdKind;
+    if (state.cameraNewIdKind != Kind::event) {
+        return;
+    }
+    const auto& events = smg::cameraKnownEvents();
+    if (events.empty()) {
+        ImGui::TextDisabled("No event names are available.");
+        return;
+    }
+    int chosen = std::clamp(state.cameraNewEvent, 0, static_cast<int>(events.size()) - 1);
+    const smg::KnownCameraEvent& entry = events[static_cast<std::size_t>(chosen)];
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Event");
+    ImGui::SameLine(kCameraFieldLabelWidth);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##event", std::string(entry.en).c_str())) {
+        for (std::size_t i = 0; i < events.size(); ++i) {
+            const bool selected = static_cast<int>(i) == chosen;
+            // ImGui takes const char*, and the dictionary stores string_views,
+            // so each label is materialised rather than kept alive separately.
+            const std::string label(events[i].en);
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                chosen = static_cast<int>(i);
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip(
+        "The game's own event name, shown in English.\n"
+        "The Japanese text the file stores is written for you: the panel's font "
+        "has no Japanese glyphs, so it cannot be typed or read on screen.");
+
+    if (entry.needsId) {
+        int setId = state.cameraNewEventSetId;
+        if (ImGui::InputInt("Camera set", &setId, 1, 8)) {
+            state.cameraNewEventSetId = std::clamp(setId, 0, 999);
+        }
+        ImGui::SetItemTooltip("The 3-digit number the game appends to this event name.");
+    }
+    if (!entry.needsSub) {
+        return;
+    }
+    int sub = state.cameraNewEventSub;
+    if (ImGui::InputInt("Which camera of the set", &sub, 1, 8)) {
+        state.cameraNewEventSub = std::clamp(sub, 0, 99);
+    }
+    ImGui::SetItemTooltip("0-99: how many cameras this event owns. The game stores "
+                          "this as a two-digit index, so 0 is its first.");
+    if (ImGui::Button("Use the next free one")) {
+        const int free = eventSubIndexOf(
+            smg::nextFreeEventCameraId(table, entry.jp, state.cameraNewEventSetId));
+        if (free >= 0) {
+            state.cameraNewEventSub = free;
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(skips the ones already in this zone)");
+}
+
+// The g:/o: branch of the "Add camera" trigger editor, plus the manual escape
+// hatch. The o: list is offered in English and written in Japanese for the same
+// reason the e: list is: the stored text is unreadable on screen.
+void drawNewCameraNameEditor(EditorState& state) {
+    using Kind = EditorState::NewCameraIdKind;
+    if (state.cameraNewIdKind == Kind::manual) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##manualid", state.cameraNewId, sizeof(state.cameraNewId));
+        ImGui::SetItemTooltip("The id exactly as the file stores it. Use this for a "
+                              "custom event the list does not know.");
+        return;
+    }
+    if (state.cameraNewIdKind != Kind::group && state.cameraNewIdKind != Kind::other) {
+        return;
+    }
+    const bool other = state.cameraNewIdKind == Kind::other;
+    const auto& others = smg::cameraKnownOthers();
+    if (other && !others.empty()) {
+        int chosen = -1;
+        const std::string typed(state.cameraNewName);
+        for (std::size_t i = 0; i < others.size(); ++i) {
+            if (typed == others[i].jp) {
+                chosen = static_cast<int>(i);
+            }
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Built-in name");
+        ImGui::SameLine(kCameraFieldLabelWidth);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        // The combo's own label is materialised because ImGui takes const char*
+        // and the dictionary stores string_views into static storage.
+        const std::string otherLabel =
+            chosen >= 0 ? std::string(others[static_cast<std::size_t>(chosen)].en)
+                        : std::string("Custom name");
+        if (ImGui::BeginCombo("##othername", otherLabel.c_str())) {
+            for (std::size_t i = 0; i < others.size(); ++i) {
+                const bool selected = static_cast<int>(i) == chosen;
+                const std::string label(others[i].en);
+                if (ImGui::Selectable(label.c_str(), selected)) {
+                    std::snprintf(state.cameraNewName, sizeof(state.cameraNewName), "%s",
+                                  std::string(others[i].jp).c_str());
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            if (ImGui::Selectable("Custom name", chosen < 0)) {
+                state.cameraNewName[0] = '\0';
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("A camera stored under one of these names overrides the "
+                              "game's built-in behaviour for it.");
+    }
+    if (!other || state.cameraNewName[0] == '\0') {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##cameraname", state.cameraNewName, sizeof(state.cameraNewName));
+        ImGui::SetItemTooltip(other ? "Any other o: name."
+                                    : "The name the game looks this camera up by.");
+    }
+}
+
+// Builds the id the "Add camera" dialog will store, from the mode the author
+// picked. Everything but Manual is composed in code out of the English-facing
+// dictionaries, which is the whole point: the stored text is Japanese and the
+// panel's font has no CJK glyphs, so an id the author has to type is an id the
+// author cannot reliably type.
+std::string composedCameraId(const EditorState& state) {
+    using Kind = EditorState::NewCameraIdKind;
+    switch (state.cameraNewIdKind) {
+    case Kind::cube:
+        return smg::cubeCameraIdForArg(state.cameraNewCubeNumber);
+    case Kind::spawn:
+        return smg::spawnCameraIdFor(state.cameraNewSpawnSetId);
+    case Kind::event: {
+        const auto& events = smg::cameraKnownEvents();
+        if (events.empty()) {
+            return {};
+        }
+        const std::size_t picked = static_cast<std::size_t>(
+            std::clamp(state.cameraNewEvent, 0, static_cast<int>(events.size()) - 1));
+        const smg::KnownCameraEvent& entry = events[picked];
+        // The dictionary records per entry whether the game appends the set id
+        // and the sub-index, so the id shape is never guessed.
+        if (!entry.needsId) {
+            return "e:" + std::string(entry.jp);
+        }
+        if (!entry.needsSub) {
+            char tail[8];
+            std::snprintf(tail, sizeof(tail), ":%03d", state.cameraNewEventSetId);
+            return "e:" + std::string(entry.jp) + tail;
+        }
+        return smg::eventCameraIdFor(entry.jp, state.cameraNewEventSetId,
+                                     state.cameraNewEventSub);
+    }
+    case Kind::group:
+    case Kind::other: {
+        const std::string name(state.cameraNewName);
+        if (name.empty()) {
+            return {};
+        }
+        return std::string(state.cameraNewIdKind == Kind::group ? "g:" : "o:") + name;
+    }
+    case Kind::manual:
+        break;
+    }
+    return std::string(state.cameraNewId);
+}
+
+// Defined in order below; declared here because drawNewCameraIdEditor() calls
+// both and each is only reachable in one trigger mode.
+void drawNewCameraEventEditor(EditorState& state, const smg::CameraParamTable& table);
+void drawNewCameraNameEditor(EditorState& state);
+
+// The trigger half of the "Add camera" popover. Split out of drawCamerasPanel
+// so that function stays the filter/order routine the panel contract calls for.
+// Leaves the final id in state.cameraNewId, which is what the Add button reads.
+void drawNewCameraIdEditor(EditorState& state, const smg::CameraParamTable& table) {
+    using Kind = EditorState::NewCameraIdKind;
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Triggered by");
+    ImGui::SameLine(kCameraFieldLabelWidth);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    static constexpr const char* kKindLabels[] = {
+        "Camera area", "Spawn point", "Cutscene event", "Group", "Other", "Type it myself"};
+    static constexpr Kind kKinds[] = {Kind::cube, Kind::spawn, Kind::event,
+                                      Kind::group, Kind::other, Kind::manual};
+    const char* preview = "Camera area";
+    for (std::size_t i = 0; i < std::size(kKinds); ++i) {
+        if (kKinds[i] == state.cameraNewIdKind) {
+            preview = kKindLabels[i];
+        }
+    }
+    if (ImGui::BeginCombo("##triggerkind", preview)) {
+        for (std::size_t i = 0; i < std::size(kKinds); ++i) {
+            const bool selected = kKinds[i] == state.cameraNewIdKind;
+            if (ImGui::Selectable(kKindLabels[i], selected)) {
+                state.cameraNewIdKind = kKinds[i];
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip(
+        "What makes the game switch to this camera.\n"
+        "Camera area = a CameraCube object the player walks into.\n"
+        "Spawn point = a spawn point's camera set.\n"
+        "Cutscene event = a scenario or demo shot (the e: rows).\n"
+        "Group / Other = group cameras and the game's built-in defaults.");
+
+    if (state.cameraNewIdKind == Kind::cube) {
+        int value = state.cameraNewCubeNumber;
+        if (ImGui::InputInt("Area number (Obj_arg0)", &value, 1, 16)) {
+            // Clamped to the game's own %04x id space. A negative Obj_arg0 has no
+            // id at all (cubeCameraIdForArg returns empty), so the floor is 0.
+            state.cameraNewCubeNumber = std::clamp(value, 0, 0xFFFF);
+        }
+        ImGui::SetItemTooltip("The number a CameraCube object stores in Obj_arg0. "
+                              "Camera area 15 is what the game writes as c:000f.");
+    } else if (state.cameraNewIdKind == Kind::spawn) {
+        int value = state.cameraNewSpawnSetId;
+        if (ImGui::InputInt("Camera set id", &value, 1, 16)) {
+            state.cameraNewSpawnSetId = std::clamp(value, 0, 0xFFFF);
+        }
+        ImGui::SetItemTooltip("The CameraSetId a spawn point stores. Camera set 60 "
+                              "is what the game writes as s:003c.");
+        if (ImGui::Button("Use the next free one")) {
+            const int free = smg::parseCameraId(nextFreeSpawnCameraId(table)).number;
+            state.cameraNewSpawnSetId = free < 0 ? 0 : free;
+        }
+    }
+    drawNewCameraEventEditor(state, table);
+    drawNewCameraNameEditor(state);
+
+    // Hand the composed id to the Add button, which reads only this buffer. The
+    // manual mode is left alone: there the buffer IS the author's own text.
+    if (state.cameraNewIdKind != Kind::manual) {
+        const std::string composed = composedCameraId(state);
+        std::snprintf(state.cameraNewId, sizeof(state.cameraNewId), "%s", composed.c_str());
+    }
+}
+
 void drawCamerasPanel(EditorState& state) {
     if (!state.showCamerasPanel) {
         return;
@@ -3522,6 +3848,21 @@ void drawCamerasPanel(EditorState& state) {
 
     const float halfWidth = (ImGui::GetContentRegionAvail().x - 8.0F) * 0.5F;
     if (ImGui::Button("Add camera...", ImVec2(halfWidth, 0.0F))) {
+        // Seed the camera-area mode with the next unused id, the way the old
+        // free-text box opened. The other modes start from their own defaults.
+        state.cameraNewIdKind = EditorState::NewCameraIdKind::cube;
+        {
+            // The next unused camera-area number, so the dialog opens on an id
+            // that is not already in the zone, exactly as it used to.
+            const int number = smg::parseCameraId(nextFreeCubeCameraId(table)).number;
+            state.cameraNewCubeNumber = number < 0 ? 0 : number;
+        }
+        state.cameraNewSpawnSetId = 0;
+        state.cameraNewEvent = 0; // "Scenario Starter" is the first entry
+        state.cameraNewEventSetId = 1;
+        state.cameraNewEventSub = 0;
+        state.cameraNewName[0] = '\0';
+        state.cameraNewIdManual = false;
         std::snprintf(state.cameraNewId, sizeof(state.cameraNewId), "%s",
                       nextFreeCubeCameraId(table).c_str());
         state.cameraNewType = 0;
@@ -3550,10 +3891,30 @@ void drawCamerasPanel(EditorState& state) {
 
     if (ImGui::BeginPopup("##addcamera")) {
         ImGui::SeparatorText("New camera");
-        ImGui::SetNextItemWidth(260.0F);
-        ImGui::InputText("Trigger id", state.cameraNewId, sizeof(state.cameraNewId));
-        ImGui::SetItemTooltip("Which trigger uses this camera: c:000f = camera area 15, "
-                              "s:003c = spawn point 60, e: = cutscene, g: = group, o: = other");
+        // The trigger editor composes the id for every mode but "Type it
+        // myself", so the author picks an English name and the Japanese the game
+        // stores is written for them. The free-text box survives as the manual
+        // mode for custom events.
+        drawNewCameraIdEditor(state, table);
+        if (state.cameraNewIdKind != EditorState::NewCameraIdKind::manual) {
+            // Show what is about to be created, in English. The stored id itself
+            // is only reachable through "Copy id": the panel's font has no
+            // Japanese glyphs, so rendering it would only produce blank boxes.
+            const std::string composed(state.cameraNewId);
+            const smg::CameraId composedId = smg::parseCameraId(composed);
+            if (composed.empty()) {
+                ImGui::TextDisabled("Pick a name to build the id.");
+            } else {
+                ImGui::TextDisabled("Will be created as: %s",
+                                    smg::describeCameraId(composedId).c_str());
+                if (ImGui::SmallButton("Copy id")) {
+                    ImGui::SetClipboardText(composed.c_str());
+                    setStatus(state, "Camera id copied. Paste it into a text editor to "
+                                     "read the Japanese part.");
+                }
+            }
+        }
+        ImGui::Separator();
         const std::vector<const smg::CameraTypeInfo*> types =
             cameraTypesForVersion(table.defaultVersion());
         if (state.cameraNewType < 0 ||

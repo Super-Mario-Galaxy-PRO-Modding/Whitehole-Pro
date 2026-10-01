@@ -34,14 +34,14 @@ constexpr std::array<LayeredTable, 12> kLayeredTables{{
     {"ChildObj", "ChildObjInfo", "child", 1},
 }};
 
-std::string mapFilesystemPath(std::string_view stageName, int gameType) {
+} // namespace
+
+std::string stageMapFilesystemPath(std::string_view stageName, int gameType) {
     if (gameType == 1) {
         return "/StageData/" + std::string(stageName) + ".arc";
     }
     return "/StageData/" + std::string(stageName) + "/" + std::string(stageName) + "Map.arc";
 }
-
-} // namespace
 
 void StageArchive::loadTable(std::string_view path, std::string kind, std::string layer) {
     if (!archive_ || !archive_->fileExists(path)) {
@@ -224,7 +224,7 @@ StageArchive StageArchive::open(io::DirectoryFilesystem& filesystem, std::string
     stage.filesystem_ = &filesystem;
     stage.gameType_ = gameType;
     stage.stageName_ = std::string(stageName);
-    stage.filesystemPath_ = mapFilesystemPath(stageName, gameType);
+    stage.filesystemPath_ = stageMapFilesystemPath(stageName, gameType);
     if (!filesystem.fileExists(stage.filesystemPath_)) {
         throw std::runtime_error("Stage map archive is missing: " + stage.filesystemPath_);
     }

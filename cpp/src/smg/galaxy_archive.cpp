@@ -23,9 +23,30 @@ GalaxyArchive::GalaxyArchive(io::DirectoryFilesystem& filesystem, std::string na
     }
 }
 
+bool GalaxyArchive::hasMapZone() const {
+    return filesystem_->fileExists(stageMapFilesystemPath(name_, gameType_));
+}
+
+std::vector<std::string> GalaxyArchive::editableZones() const {
+    // A ZoneList is not supposed to name the galaxy itself, but a hand-made or
+    // template one can (the bundled SMG2 big-galaxy template does exactly that).
+    // Prepending unconditionally would then list the same file twice, so the map
+    // zone is only added when the ZoneList does not already carry it.
+    const bool zoneListHasGalaxy =
+        std::find(zones_.begin(), zones_.end(), name_) != zones_.end();
+    std::vector<std::string> list;
+    if (hasMapZone() && !zoneListHasGalaxy) {
+        // The galaxy map is not in ZoneList.bcsv, so without this the editor
+        // could never reach the galaxy map zone's objects or CameraParam.bcam.
+        list.push_back(name_);
+    }
+    list.insert(list.end(), zones_.begin(), zones_.end());
+    return list;
+}
+
 StageArchive GalaxyArchive::openZone(std::string_view zoneName) const {
-    const auto found = std::find(zones_.begin(), zones_.end(), zoneName);
-    if (found == zones_.end()) {
+    const bool isGalaxyMap = zoneName == name_;
+    if (!isGalaxyMap && std::find(zones_.begin(), zones_.end(), zoneName) == zones_.end()) {
         throw std::runtime_error("Zone is not part of this galaxy: " + std::string(zoneName));
     }
     return StageArchive::open(*filesystem_, zoneName, gameType_);

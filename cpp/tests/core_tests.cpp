@@ -981,6 +981,93 @@ void testCameraParam() {
            "area/spawn id builders changed");
     expect(cubeCameraIdForArg(-1).empty(), "negative area args must build no id");
 
+    // The id-authoring surface the "Add camera" dialog is built on. These ids
+    // carry Japanese the panel's font cannot draw, so the only way an author can
+    // make one is by picking it from the dictionary and having the core compose
+    // the text; that composition has to match what describeCameraId reads back.
+    {
+        const KnownCameraEvent* starter = cameraKnownEvent("シナリオスターター");
+        expect(starter != nullptr, "the scenario starter must be in the dictionary");
+        expect(starter != nullptr && starter->en == "Scenario Starter" &&
+                   starter->needsId && starter->needsSub,
+               "the scenario starter takes both a set id and a sub-index");
+        // Every entry must be named, or the picker would show a blank row.
+        for (const KnownCameraEvent& entry : cameraKnownEvents()) {
+            expect(!entry.jp.empty() && !entry.en.empty(),
+                   "a known event is missing its Japanese or English name");
+        }
+        expect(!cameraKnownOthers().empty(), "the o: dictionary must not be empty");
+        // The game-created cameras are never stored, so the editor must not be
+        // able to offer one as something to add; it only names them.
+        expect(!cameraGameCreatedEvents().empty(), "the game-created dictionary must exist");
+        for (const KnownCameraEvent& created : cameraGameCreatedEvents()) {
+            expect(cameraKnownEvent(created.jp) == nullptr,
+                   "a game-created camera must not also be an authorable event");
+        }
+
+        // The exact byte-for-byte form, pinned against the same string the
+        // describeCameraId() checks above parse.
+        const std::string composed = eventCameraIdFor("シナリオスターター", 5, 1);
+        expect(composed == "e:シナリオスターター:005:01番目",
+               "the composed scenario starter id must match the game's own format");
+        expect(describeCameraId(parseCameraId(composed)) == "Scenario Starter 005 camera 01",
+               "a composed id must read back as the same camera as a hand-written one");
+        // Both indices are zero padded by the game.
+        expect(eventCameraIdFor("シナリオスターター", 0, 0) ==
+                   "e:シナリオスターター:000:00番目",
+               "event indices must be zero padded");
+        expect(eventCameraIdFor("シナリオスターター", 999, 99) ==
+                   "e:シナリオスターター:999:99番目",
+               "the widest event indices must still pad to three and two digits");
+        // The longest real event name plus both indices has to fit the panel's id
+        // buffer, which is why that buffer is 160 bytes and not 64. Computed
+        // rather than hardcoded so adding a longer event keeps the test honest.
+        std::size_t widest = 0;
+        for (const KnownCameraEvent& entry : cameraKnownEvents()) {
+            widest = std::max(widest,
+                              eventCameraIdFor(entry.jp, 999, 99).size());
+        }
+        expect(widest > 64,
+               "some known event id is longer than a 64-byte buffer could hold");
+        expect(widest <= 160,
+               "a known event id must fit the panel's 160-byte id buffer");
+        expect(eventCameraIdFor("郵便屋さんキノピオ固有注目会話", 999, 99) ==
+                   "e:郵便屋さんキノピオ固有注目会話:999:99番目",
+               "a long event name must compose without truncation");
+    }
+
+    // Duplicate detection, which the dialog and the "next free" composer must
+    // agree on: it compares the parsed id, not the text.
+    {
+        CameraParamTable table = CameraParamTable::create(kCameraVersionSmg2);
+        (void)table.addCamera("c:000f", "CAM_TYPE_XZ_PARA", kCameraVersionSmg2);
+        expect(cameraIdExists(table, "c:000f"), "an existing id must be found");
+        expect(cameraIdExists(table, "c:000F"), "hex case must not hide a duplicate");
+        expect(!cameraIdExists(table, "c:0010"), "a different number is a different camera");
+        expect(!cameraIdExists(table, "bogus"), "an unparseable id is never a duplicate");
+        expect(!cameraIdExists(table, ""), "an empty id is never a duplicate");
+
+        // nextFreeEventCameraId walks the sub-index past whatever is stored.
+        CameraParamTable events = CameraParamTable::create(kCameraVersionSmg2);
+        expect(nextFreeEventCameraId(events, "シナリオスターター", 1) ==
+                   "e:シナリオスターター:001:00番目",
+               "the first free event id must be sub-index 0");
+        (void)events.addCamera("e:シナリオスターター:001:00番目", "CAM_TYPE_XZ_PARA",
+                               kCameraVersionSmg2);
+        expect(nextFreeEventCameraId(events, "シナリオスターター", 1) ==
+                   "e:シナリオスターター:001:01番目",
+               "the composer must skip a sub-index already in the table");
+        (void)events.addCamera("e:シナリオスターター:001:01番目", "CAM_TYPE_XZ_PARA",
+                               kCameraVersionSmg2);
+        expect(nextFreeEventCameraId(events, "シナリオスターター", 1) ==
+                   "e:シナリオスターター:001:02番目",
+               "the composer must keep walking past consecutive taken indices");
+        // A different set id is a different camera family, so it starts over.
+        expect(nextFreeEventCameraId(events, "シナリオスターター", 2) ==
+                   "e:シナリオスターター:002:00番目",
+               "a different camera set must not inherit the previous one's index");
+    }
+
     // In-game pose: all-zero parallel angles look along -X at the target,
     // the shared spherical convention of the decompiled translators.
     {
@@ -1624,6 +1711,73 @@ void testArchiveTableEdit() {
     const whitehole::smg::BcsvTable savedTable(saved.read(*savedEntry), saved.endian());
     expect(std::get<std::int32_t>(savedTable.rows()[0].values[0]) == 77,
            "edited BCSV value did not survive archive recompression");
+}
+
+// A galaxy's own map zone is NOT in its ZoneList.bcsv, but it is a real zone
+// with its own CameraParam.bcam, so the editor has to be able to reach it. This
+// builds a throwaway SMG2 workspace out of the bundled templates so the whole
+// GalaxyArchive path (not just a stub) is exercised.
+void testGalaxyMapZone() {
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    TemporaryDirectory temporary;
+    whitehole::io::DirectoryFilesystem project(temporary.path);
+
+    // SMG2 recognises a workspace by /SystemData/ObjNameTable.arc.
+    project.createDirectory("/SystemData");
+    project.write("/SystemData/ObjNameTable.arc", {0});
+    // The scenario template's internal root is RedBlueExGalaxy, so that is the
+    // galaxy name; the map template is that galaxy's own map zone.
+    project.createDirectory("/StageData/RedBlueExGalaxy");
+    const std::vector<std::uint8_t> scenario = whitehole::io::readFile(
+        templates / "SMG2BigGalaxyScenario.arc");
+    const std::vector<std::uint8_t> map = whitehole::io::readFile(
+        templates / "SMG2BigGalaxyMap.arc");
+    project.write("/StageData/RedBlueExGalaxy/RedBlueExGalaxyScenario.arc", scenario);
+    project.write("/StageData/RedBlueExGalaxy/RedBlueExGalaxyMap.arc", map);
+
+    whitehole::smg::GameArchive game(temporary.path);
+    expect(game.gameType() == 2, "the synthetic workspace must read as SMG2");
+    expect(game.galaxyExists("RedBlueExGalaxy"), "the galaxy was not discovered");
+
+    const whitehole::smg::GalaxyArchive galaxy = game.openGalaxy("RedBlueExGalaxy");
+    // zones() is the raw ZoneList and this work must not have touched it: area
+    // limit validation counts objects per scenario from that list, so quietly
+    // adding the galaxy map there would change those numbers.
+    expect(galaxy.zones().size() == 1, "the template ZoneList must hold one zone");
+    expect(galaxy.hasMapZone(), "the galaxy's own map archive must be detected");
+
+    // editableZones() leads with the galaxy's own map zone, and never lists the
+    // same zone twice. The bundled big-galaxy template is the awkward case that
+    // proves the dedupe: its ZoneList already names the galaxy itself, so a naive
+    // prepend would show the same file on two rows of the Project panel.
+    const std::vector<std::string> editable = galaxy.editableZones();
+    expect(!editable.empty() && editable.front() == "RedBlueExGalaxy",
+           "editableZones must lead with the galaxy's own map zone");
+    const auto repeats = std::adjacent_find(editable.begin(), editable.end());
+    expect(repeats == editable.end(),
+           "editableZones must not list a zone twice when the ZoneList names the galaxy");
+    expect(editable.size() == galaxy.zones().size(),
+           "editableZones must not grow when the ZoneList already names the galaxy");
+
+    // Openable because it is listed: this is the invariant Document::openZone
+    // relies on. Before, the galaxy map was unopenable and its camera table
+    // unreachable.
+    whitehole::smg::StageArchive stage = galaxy.openZone("RedBlueExGalaxy");
+    expect(stage.stageName() == "RedBlueExGalaxy", "the wrong zone came back");
+    expect(!stage.cameraParams().empty(),
+           "the galaxy map zone's own camera table must be editable");
+    // And the same table survives a save back into the workspace.
+    const std::size_t before = stage.cameraParams().cameras().size();
+    const std::size_t added = stage.cameraParams().addCamera(
+        "e:シナリオスターター:001:00番目", "CAM_TYPE_XZ_PARA", whitehole::smg::kCameraVersionSmg2);
+    expect(added == before, "the new camera must append after the existing rows");
+    stage.save();
+    const whitehole::smg::StageArchive reopened =
+        whitehole::smg::StageArchive::open(project, "RedBlueExGalaxy", 2);
+    expect(reopened.cameraParams().cameras().size() == before + 1,
+           "a camera added to the galaxy map must survive a workspace save");
+    expect(reopened.cameraParams().cameras().back().id == "e:シナリオスターター:001:00番目",
+           "the composed event id must be stored byte for byte");
 }
 
 void testUndoStack() {
@@ -4519,6 +4673,7 @@ int main() {
         testBcsvEndianness();
         testBcsvMutation();
         testUndoStack();
+        testGalaxyMapZone();
         testGizmoMath();
         testStageEditCommands();
         testObjectAuthoring();

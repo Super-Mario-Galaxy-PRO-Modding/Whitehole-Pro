@@ -1,6 +1,8 @@
 #include "whitehole/io/binary_file.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -31,6 +33,28 @@ std::vector<std::uint8_t> readFile(const std::filesystem::path& path) {
     return result;
 }
 
+// A temp name unique to this writer. A fixed ".tmp" suffix looks safe but is a
+// race: two writers saving the same archive both open the SAME temporary, and
+// whichever renames first deletes it out from under the other -- which is how a
+// save could fail with a missing-file error naming a file the caller never
+// created. The address of a local plus the counter is enough entropy here: two
+// concurrent writers in one process are separated by the counter, and two
+// processes never share an address space.
+//
+// Deliberately portable -- no Win32 PID and no clock. This file is core code
+// that has to build on every platform (roadmap item 8), so the uniqueness comes
+// from C++ only.
+std::filesystem::path temporaryPathFor(const std::filesystem::path& path) {
+    static std::atomic<unsigned long long> counter{0};
+    auto temporary = path;
+    temporary += ".tmp";
+    const auto local = static_cast<unsigned long long>(
+        reinterpret_cast<std::uintptr_t>(&path));
+    temporary += std::to_string(local) + "-" +
+                 std::to_string(counter.fetch_add(1) + 1);
+    return temporary;
+}
+
 void writeFile(const std::filesystem::path& path, std::span<const std::uint8_t> data) {
     if (const auto parent = path.parent_path(); !parent.empty()) {
         std::filesystem::create_directories(parent);
@@ -38,8 +62,7 @@ void writeFile(const std::filesystem::path& path, std::span<const std::uint8_t> 
 
     // Write to a sibling temporary file first: an interrupted or failed save can
     // then never destroy the user's existing archive.
-    auto temporary = path;
-    temporary += ".tmp";
+    const auto temporary = temporaryPathFor(path);
     {
         std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
         if (!stream) {
@@ -56,6 +79,10 @@ void writeFile(const std::filesystem::path& path, std::span<const std::uint8_t> 
         }
     }
 
+    // Best effort only: a backup that cannot be taken must not stop the save.
+    // Clearing `error` afterwards is deliberate -- the rename below reports the
+    // outcome that matters, and a stale code here would be misread as its
+    // failure.
     std::error_code error;
     if (std::filesystem::is_regular_file(path)) {
         auto backup = path;
@@ -65,12 +92,37 @@ void writeFile(const std::filesystem::path& path, std::span<const std::uint8_t> 
     }
 
     std::filesystem::rename(temporary, path, error);
-    if (error) {
-        // Fall back to an in-place copy when the destination is held open by
-        // another process (for example a hex editor or an open archive view).
-        std::filesystem::copy_file(temporary, path, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::remove(temporary, error);
+    if (!error) {
+        return;
     }
+
+    // The rename failed, most often because the destination is held open by
+    // another process (a hex editor, or a second Whitehole Pro saving the same
+    // archive). Fall back to an in-place copy.
+    //
+    // This used to call the THROWING copy_file overload, which was a real bug:
+    // it discarded the error_code discipline the rest of the function is built
+    // on, and reported a bare "cannot copy file" that named neither the cause
+    // nor the destination. Worse, when the failure was a race for the .tmp (two
+    // writers, one temp name) the copy then failed because the temporary had
+    // already been consumed -- surfacing as a missing-file error pointing at a
+    // file the caller never knew existed.
+    const auto renameReason = error.message();
+    error.clear();
+    std::filesystem::copy_file(temporary, path,
+                               std::filesystem::copy_options::overwrite_existing, error);
+    if (error) {
+        // Leave nothing behind, and say what actually went wrong: the first
+        // failure (the rename) is the cause, the second only the symptom.
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        throw std::runtime_error("Could not save " + path.string() +
+                                 ": rename failed (" + renameReason +
+                                 ") and the in-place copy failed (" + error.message() +
+                                 ")");
+    }
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
 }
 
 void writeFile(const std::filesystem::path& path, const std::vector<std::uint8_t>& data) {

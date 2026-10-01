@@ -113,6 +113,41 @@ public:
     std::filesystem::path path;
 };
 
+// writeFile() is the app's only save path, so its failure modes are worth
+// pinning: it must never leave a temporary behind, and two saves to the same
+// path must not collide on one.
+void testWriteFileLeavesNoTemporaries() {
+    TemporaryDirectory temporary;
+    const auto path = temporary.path / "save.bin";
+
+    whitehole::io::writeFile(path, {1, 2, 3});
+    expect(whitehole::io::readFile(path) == std::vector<std::uint8_t>({1, 2, 3}),
+           "writeFile must write the bytes it was given");
+
+    // Two saves in a row to the same path: the second must fully replace the
+    // first, and must not trip over a leftover temporary.
+    whitehole::io::writeFile(path, {4, 5});
+    expect(whitehole::io::readFile(path) == std::vector<std::uint8_t>({4, 5}),
+           "a second save must replace the file");
+
+    // Nothing with a temporary suffix may survive a successful save. A fixed
+    // ".tmp" name also made two concurrent writers race -- one renaming the
+    // shared temporary out from under the other -- so the names are unique now.
+    std::vector<std::filesystem::path> strays;
+    for (const auto& entry : std::filesystem::directory_iterator(temporary.path)) {
+        if (entry.path().string().find(".tmp") != std::string::npos) {
+            strays.push_back(entry.path());
+        }
+    }
+    expect(strays.empty(), "a successful save must not leave a temporary file behind");
+
+    // A save into a directory that does not exist creates it.
+    const auto nested = temporary.path / "a" / "b" / "save.bin";
+    whitehole::io::writeFile(nested, {7});
+    expect(whitehole::io::readFile(nested) == std::vector<std::uint8_t>({7}),
+           "writeFile must create missing parent directories");
+}
+
 void testDirectoryFilesystem() {
     TemporaryDirectory temporary;
     whitehole::io::DirectoryFilesystem project(temporary.path);
@@ -5171,6 +5206,7 @@ void testCameraPreviewChain() {
 int main() {
     try {
         testBinaryData();
+        testWriteFileLeavesNoTemporaries();
         testDirectoryFilesystem();
         testYaz0();
         testMath();

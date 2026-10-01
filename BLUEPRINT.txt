@@ -753,6 +753,13 @@
           with the galaxy's own map zone (labelled "(galaxy map)"). Open it, edit
           a camera, save, reload: the edit must still be there. A galaxy map must
           appear ONCE even when its ZoneList also names the galaxy.
+        8. View > Scenarios: pick a galaxy, confirm the mission cards populate.
+           Add a mission, tick a layer, Ctrl+Z, and confirm BOTH revert. Ctrl+S,
+           reopen the workspace, confirm it stuck. Two documents share one Ctrl+Z
+           (see section 13) -- check the panel's own undo label says which.
+        9. Save twice in a row and confirm no `*.tmp*` file is left beside the
+           archive (a `.bak` IS expected -- that is the backup). Two Whitehole
+           instances saving one archive must not interfere.
      If 3 or 4 fails, the bug is in camera.cpp, not the panel.
 
 
@@ -788,7 +795,11 @@
  gui_win32.cpp:645; refreshViewport rebuilds ViewportScene from it at :736).
  Resolve names through db/name_table + db/object_db before string matching.
 
- Still open (do not "fix" these without asking):
+ Still open (do not "fix" these without asking), and none of them is
+   documentation debt -- each is either a feature or needs hardware:
+    - CREATE ZONE / CREATE GALAXY is roadmap 5, not a camera concern. The
+      enabling piece shipped (section 14); the builder, the template loader and
+      the GUI's layer picker are still to come.
    - The cutscene/scenario-starter types are now AUTHORABLE, but a row added that
      way will usually land on a camtype the solver reports PoseSupport::none for
      (CAM_TYPE_ANIM / RAIL_DEMO are keyframed over time in game). The badge says
@@ -871,10 +882,15 @@
   5600e5c  chore(repo): stop tracking build-check output, document Cameras
   bd82516  feat(cameras): make the Cameras panel readable
   9bf7da8  feat(cameras): hide the last raw BCAM strings from the panel
-  this     feat(cameras): author e: cameras, and open a galaxy's own map zone
-  this     feat(galaxy): keep and save the scenario tables (ScenarioModel)
- 8b93ea6  feat(galaxy): undo and dirty tracking for the scenario tables
-  this     feat(gui): the Scenarios panel (missions, layers, zone list)  <- HEAD
+  a093fbe  feat(cameras): author e: cameras, and open a galaxy's own map zone
+  604b557  feat(galaxy): keep and save the scenario tables (ScenarioModel)
+  8b93ea6  feat(galaxy): undo and dirty tracking for the scenario tables
+  f8c0da2  feat(gui): the Scenarios panel (missions, layers, zone list)
+  7e96c30  feat(docs): document the Scenarios panel and its two invariants
+  9837f34  feat(cli): reach the scenario tables from the command line
+  d51b851  feat(rarc): create archives from nothing                 <- section 14
+  ca0e0cd  refactor(smg): share the layered-table list with the loader
+  this     fix(io): unique save temporaries, and no throwing fallback <- HEAD
 
  Six of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
@@ -901,7 +917,8 @@
  4) Builds clean with /W4 AND -Wall -Wextra -Wpedantic -Wconversion; ctest green;
     the five manual checks in 8.5 pass. DONE except 8.5: MinGW Release + MSVC
     Release both built with zero NEW warnings (only pre-existing ones remain)
-    and ctest passed on both. 8.5 is unrunnable from a shell and still open.
+    and ctest passed on both. 8.5 is unrunnable from a shell and still open --
+    it now has NINE checks, three added for the Scenarios panel and the save path.
  5) This file updated in the same commit as the code it describes. Done just
     below this line.
  6) The panel must not require LaunchCamPlus literacy to read. The wording pass
@@ -983,6 +1000,72 @@
      checkbox would be a lie the save would not honour.
    * An SMG1 galaxy has no PowerStarType column. The panel says so instead of
      offering a picker that would ADD a column the game never asked for.
+
+[done]  CREATING ARCHIVES FROM NOTHING. RarcArchive::create(rootName) +
+            createDirectory(). The enabling piece for create zone / create galaxy
+            (roadmap 5). See section 14 for the three invariants, none of which
+            are obvious and all three of which the test caught.
+
+   [done]  THE SAVE PATH'S FAILURE MODES. writeFile()'s in-place fallback threw
+            instead of using the error_code it was written around, and its
+            temporary name was a FIXED ".tmp", so two writers saving the same
+            archive raced on it. Fixed and pinned by
+            testWriteFileLeavesNoTemporaries.
+
+================================================================================
+14. CREATING ARCHIVES FROM NOTHING (cpp/include/whitehole/io/rarc.hpp)
+================================================================================
+
+  Until d51b851, every RarcArchive entry point PARSED bytes that already existed.
+  That is a hard floor on what the app can do: a zone cannot be created, because
+  there is no archive to write into before it holds a single file.
+
+  RarcArchive::create(rootName, metadata = 0) returns an empty archive with a
+  root node and no entries; createDirectory() and the existing insert() fill it
+  like any other archive. It reuses the EXISTING serializer, which already built
+  its whole node/entry/string table from rootName_ + entries_ -- so there is no
+  second writer to keep in step with the first.
+
+  THREE INVARIANTS, all found by the test, all invisible until violated:
+
+   1. THE ROOT NODE IS IMPLICIT. parse() builds it without ever putting it in
+      entries_, and serialize() re-creates it from rootName_. So find() alone can
+      NEVER resolve it, and any code that validates a parent with find() rejects
+      the first directory a new archive needs. Parent checks go through the
+      file-local hasDirectory(), which also matches rootName_ directly.
+
+   2. ENTRY PATHS ARE STORED ROOT-PREFIXED, WITH THEIR ORIGINAL CASING
+      ("Stage/jmp", not "/stage/jmp"). serialize() looks each entry's parent up
+      in a map keyed by rootName_ and by the paths earlier entries were stored
+      under -- an exact, case-sensitive lookup. Storing the normalized form from
+      normalizePath() (which lowercases) fails with "directory has no serialized
+      parent" on an archive that is perfectly well formed. insert() already did
+      this correctly; createDirectory() has to match it.
+
+   3. APPLY THE ROOT PREFIX BEFORE CHECKING THE PARENT. "/jmp" is a TOP-LEVEL
+      directory, so its parent IS the root. Checking first sees an empty parent
+      and throws "cannot create the root directory".
+
+  WHAT IS PROVEN, AND WHAT IS NOT: the test builds an archive, writes it,
+  re-parses it, and reopens it through StageArchive::openMapFile -- the same
+  loader the editor uses for every zone -- then reads a placement object out of
+  it. That establishes an archive built this way is indistinguishable from a
+  parsed one to all of Whitehole Pro. It does NOT establish that a retail copy of
+  SMG1/SMG2 would accept it: no game was run. Treat "the game reads this" as
+  unverified until someone opens a created zone on hardware.
+
+  createDirectory() is idempotent (creating an existing directory returns quietly,
+  because the zone builder asks for the same folder from more than one layer) and
+  refuses a missing parent. create() refuses an unsafe root name. Temporary names
+  for saves are unique per writer -- see section 10 for why a fixed ".tmp" is a
+  race.
+
+  STILL TO BUILD ON THIS: roadmap item 5's create zone / create galaxy, the
+  template loader (data/templates/*.json ships with the repo and NOTHING in the
+  C++ reads it yet), and the GUI's layer picker. Derive each layer's JMP schemas
+  from the shipped template archive rather than transcribing Java's thirteen
+  populateJMapFields* functions -- SMG2StandardZoneMap.arc is already a correct
+  bare zone with the exact layout and the one StartInfo row Java adds.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

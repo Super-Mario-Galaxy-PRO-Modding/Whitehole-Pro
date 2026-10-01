@@ -364,7 +364,7 @@ editor's core · full test suite.
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. 🚧 Layer filtering & hierarchical object tree
 4. 🚧 BCSV spreadsheet editor
-5. 🚧 Galaxy & zone management — scenario editor shipped (View > Scenarios); creating a galaxy and adding brand-new zones still to do
+5. 🚧 Galaxy & zone management — scenario editor shipped (View > Scenarios) and the CLI reaches the scenario tables; archives can now be created from nothing, which is what "create a galaxy / create a zone" needs — the builder and the GUI's layer picker are still to do
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)
 7. 🚧 Model/texture browser inside the app
 8. ⏳ Cross-platform GUI (the core already builds anywhere)

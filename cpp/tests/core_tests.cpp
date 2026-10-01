@@ -1,4 +1,4 @@
-﻿#include "whitehole/app/settings.hpp"
+#include "whitehole/app/settings.hpp"
 #include "whitehole/app/theme_palette.hpp"
 #include "whitehole/db/data_holder.hpp"
 #include "whitehole/db/name_table.hpp"
@@ -37,6 +37,7 @@
 #include "whitehole/smg/path.hpp"
 #include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
+#include "whitehole/smg/stage_builder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -112,6 +113,215 @@ public:
 
     std::filesystem::path path;
 };
+
+// Creating zones and galaxies. The claim under test is that a created zone is
+// indistinguishable from a real one TO WHITEHOLE PRO -- it reopens through the
+// same loaders the editor uses. It is NOT a claim that a retail game accepts it;
+// no game has been run against this.
+void testStageBuilder() {
+    using namespace whitehole::smg;
+    const auto templates =
+        std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    const auto readTemplate = [&templates](const char* name) {
+        return whitehole::io::readFile(templates / name);
+    };
+    const auto smg2ZoneTemplate = readTemplate("SMG2StandardZoneMap.arc");
+    const auto smg1ZoneTemplate = readTemplate("SMG1OneStarGalaxy.arc");
+
+    // ---- a bare SMG2 zone ---------------------------------------------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        CreatedZone created;
+        createStageZone(project, "BareZone", {"Common"}, smg2ZoneTemplate, 2, &created);
+        expect(created.mapPath == "/StageData/BareZone/BareZoneMap.arc",
+               "an SMG2 zone must live in its own folder");
+        expect(project.fileExists(created.mapPath), "the zone's map archive was not written");
+
+        // It must open through the ordinary loader the editor uses.
+        auto stage = StageArchive::open(project, "BareZone", 2);
+        expect(stage.stageName() == "BareZone", "the created zone must open by name");
+        // A bare zone has no objects but DOES have a spawn point: without one the
+        // game cannot start the stage.
+        expect(stage.objects().size() == 1,
+               "a created zone must carry exactly its spawn point");
+        expect(stage.objects().front().name == "StartObj",
+               "the spawn point must be named StartObj");
+        expect(stage.objects().front().layer == "Common",
+               "the spawn point must live in the Common layer");
+        // Every table the loader knows about should be there, so the zone is not
+        // a shell that quietly loses objects.
+        expect(stage.tables().size() >= 8,
+               "a created zone must have the full set of placement tables");
+        for (const auto& table : stage.tables()) {
+            expect(table.layer == "Common",
+                   "a bare zone must only have Common tables, found: " + table.layer);
+        }
+    }
+
+    // ---- extra layers, and the SMG1-only files ------------------------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        CreatedZone created;
+        createStageZone(project, "Layered", {"Common", "LayerA", "LayerC"},
+                        smg2ZoneTemplate, 2, &created);
+        expect(created.layers.size() == 3, "all three requested layers must be created");
+        expect(created.layers.front() == "Common", "Common must come first");
+        auto stage = StageArchive::open(project, "Layered", 2);
+        bool sawLayerA = false;
+        bool sawLayerC = false;
+        for (const auto& table : stage.tables()) {
+            sawLayerA = sawLayerA || table.layer == "LayerA";
+            sawLayerC = sawLayerC || table.layer == "LayerC";
+            // SoundInfo/ChildObjInfo are SMG1-only. Creating them for SMG2 would
+            // add files the game does not expect to find.
+            expect(table.kind != "sound" && table.kind != "child",
+                   "an SMG2 zone must not carry the SMG1-only tables");
+        }
+        expect(sawLayerA, "LayerA's tables must be created");
+        expect(sawLayerC, "LayerC's tables must be created");
+        // Every LAYER must have its OWN copy of the shared table names. The
+        // bare-filename bug this guards against left the layer directories in
+        // place but stored only Common's file, so the archive looked complete and
+        // a layer silently lost every table.
+        for (const auto& table : stage.tables()) {
+            if (table.kind == "start" && table.layer != "Common") {
+                expect(table.table.rows().empty(),
+                       "a non-Common layer must have its own empty StartInfo, not "
+                       "Common's row");
+            }
+        }
+        int startTables = 0;
+        for (const auto& table : stage.tables()) {
+            startTables = startTables + (table.kind == "start" ? 1 : 0);
+        }
+        expect(startTables == 3, "Common, LayerA and LayerC must each have a StartInfo");
+        // The spawn point stays in Common only, whatever else was asked for.
+        for (const auto& object : stage.objects()) {
+            expect(object.layer == "Common",
+                   "a created zone's only object is its Common spawn point");
+        }
+    }
+
+    // ---- an SMG1 zone, whose whole path layout is lowercased ----------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        CreatedZone created;
+        createStageZone(project, "OneStarZone", {"Common"}, smg1ZoneTemplate, 1, &created);
+        // SMG1 flattens zones into /StageData/<zone>.arc.
+        expect(created.mapPath == "/StageData/OneStarZone.arc",
+               "an SMG1 zone must be a flat file, found: " + created.mapPath);
+        auto stage = StageArchive::open(project, "OneStarZone", 1);
+        expect(stage.objects().size() == 1,
+               "a created SMG1 zone must carry its spawn point");
+        bool sawSound = false;
+        for (const auto& table : stage.tables()) {
+            sawSound = sawSound || table.kind == "sound";
+        }
+        expect(sawSound, "an SMG1 zone must carry its SMG1-only tables");
+    }
+
+    // ---- a galaxy -----------------------------------------------------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        const auto before = smg2ZoneTemplate;
+        createGalaxy(project, "TestGalaxy", {"TestZoneOne", "TestZoneTwo"},
+                     {"Common"}, smg2ZoneTemplate, 2);
+        expect(project.fileExists("/StageData/TestGalaxy/TestGalaxyMap.arc"),
+               "a galaxy must have its map zone");
+        expect(project.fileExists("/StageData/TestGalaxy/TestGalaxyScenario.arc"),
+               "a galaxy must have a scenario archive");
+
+        // It must open as a galaxy, with the galaxy map reachable.
+        GalaxyArchive galaxy(project, "TestGalaxy", 2);
+        expect(galaxy.hasMapZone(), "a created galaxy must have a map zone");
+        expect(galaxy.galaxyInfo().hasField("WorldNo"),
+               "an SMG2 galaxy must have a GalaxyInfo the panel can read");
+        // editableZones() leads with the map zone; zones() is the ZoneList only.
+        expect(galaxy.editableZones().front() == "TestGalaxy",
+               "the galaxy map zone must lead the editable zone list");
+        ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(), galaxy.zones(), 0);
+        expect(model.scenarioCount() == 1, "a created galaxy must start with one mission");
+        expect(model.scenarios().front().awardsStar(),
+               "the starting mission must award a star");
+        expect(model.scenarios().front().powerStarType == "Normal",
+               "an SMG2 starting mission must record a Normal star");
+        // Every zone the galaxy was told about has its own column.
+        expect(model.layerMask(0, "TestZoneOne") == 0,
+               "an extra zone must have a ScenarioData column of its own");
+
+        // The template must not have been touched by any of this.
+        expect(readTemplate("SMG2StandardZoneMap.arc") == before,
+               "creating a zone must never modify the template it read");
+    }
+
+    // ---- an SMG1 galaxy: lowercased scenario root, no GalaxyInfo ------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        createGalaxy(project, "SmallOne", {}, {"Common"}, smg1ZoneTemplate, 1);
+        expect(project.fileExists("/StageData/SmallOne/SmallOneScenario.arc"),
+               "an SMG1 galaxy's scenario archive keeps its mixed-case file name");
+        auto archive = whitehole::io::RarcArchive::open(temporary.path / "StageData" / "SmallOne" /
+                                             "SmallOneScenario.arc");
+        // SMG1 lowercases the ROOT (StageHelper.java:293) and writes NO
+        // GalaxyInfo -- the panel treats that absence as meaningful.
+        expect(archive.rootName() == "smallonescenario",
+               "an SMG1 scenario archive's root must be lowercase, found: " +
+                   std::string(archive.rootName()));
+        expect(!archive.fileExists("/smallonescenario/GalaxyInfo.bcsv"),
+               "an SMG1 galaxy must not be given a GalaxyInfo");
+        expect(archive.fileExists("/smallonescenario/ScenarioData.bcsv"),
+               "an SMG1 galaxy must have ScenarioData");
+        GalaxyArchive galaxy(project, "SmallOne", 1);
+        ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(), galaxy.zones(), 0);
+        // SMG1 stores IsHidden, not PowerStarType: the model's empty type is how
+        // the panel shows "this galaxy records no star type".
+        expect(model.scenarios().front().powerStarType.empty(),
+               "an SMG1 mission must not be given a PowerStarType");
+        expect(galaxy.scenarioData().hasField("IsHidden"),
+               "an SMG1 ScenarioData must have IsHidden");
+    }
+
+    // ---- refusals -----------------------------------------------------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        createStageZone(project, "Once", {"Common"}, smg2ZoneTemplate, 2);
+        const auto refuses = [&project, &smg2ZoneTemplate](auto&& call) {
+            try {
+                call();
+            } catch (const std::runtime_error&) {
+                return true;
+            }
+            return false;
+        };
+        expect(refuses([&] { createStageZone(project, "Once", {"Common"}, smg2ZoneTemplate, 2); }),
+               "creating a zone that already exists must be refused");
+        expect(refuses([&] { createStageZone(project, "Bad/Name", {"Common"}, smg2ZoneTemplate, 2); }),
+               "an unsafe zone name must be refused");
+        expect(refuses([&] { createStageZone(project, "NoLayers", {}, smg2ZoneTemplate, 2); }),
+               "a zone with no layers must be refused");
+        expect(refuses([&] {
+                   createStageZone(project, "BadLayer", {"Common", "LayerZ"},
+                                   smg2ZoneTemplate, 2);
+               }),
+               "a layer name that is not a layer must be refused");
+        // A zone with no template has no trustworthy schema, so it is refused
+        // rather than guessed at.
+        expect(refuses([&] { createStageZone(project, "NoTemplate", {"Common"}, {}, 2); }),
+               "a zone with no template must be refused, not guessed at");
+    }
+}
 
 // writeFile() is the app's only save path, so its failure modes are worth
 // pinning: it must never leave a temporary behind, and two saves to the same
@@ -2846,6 +3056,37 @@ void testRarcCreation() {
     expect(reparsed.directories("/jmp").size() == 1,
            "a created directory must list after re-parsing");
 
+    // The trap that cost the most time: every layer's tables have the SAME file
+    // names (Common/StartInfo, LayerA/StartInfo, ...). find() falls back to a
+    // bare-filename match, so an insert of LayerA's table used to find Common's
+    // file and REPLACE it -- losing the Common layer and leaving LayerA empty,
+    // while every layer directory still looked correct.
+    archive.createDirectory("/jmp/Start");
+    archive.createDirectory("/jmp/Start/Common");
+    archive.createDirectory("/jmp/Start/LayerA");
+    archive.insert("/jmp/Start/Common/StartInfo", {1, 1, 1, 1});
+    archive.insert("/jmp/Start/LayerA/StartInfo", {2, 2, 2, 2});
+    expect(archive.fileExists("/jmp/Start/Common/StartInfo"),
+           "inserting a second layer's table must not displace the first");
+    expect(archive.fileExists("/jmp/Start/LayerA/StartInfo"),
+           "the second layer's table must be stored in its own right");
+    expect(archive.read("/jmp/Start/Common/StartInfo")
+               == std::vector<std::uint8_t>({1, 1, 1, 1}),
+           "the Common layer's table must keep its own contents");
+    expect(archive.read("/jmp/Start/LayerA/StartInfo")
+               == std::vector<std::uint8_t>({2, 2, 2, 2}),
+           "the LayerA table must keep its own contents");
+    // Both must survive the round trip as two distinct files.
+    const auto twoLayers = temporary.path / "two-layers.arc";
+    whitehole::io::writeFile(twoLayers, archive.serialize(false));
+    RarcArchive reparsedLayers{whitehole::io::readFile(twoLayers)};
+    expect(reparsedLayers.read("/jmp/Start/Common/StartInfo")
+               == std::vector<std::uint8_t>({1, 1, 1, 1}),
+           "both layers must survive serialization distinctly");
+    expect(reparsedLayers.read("/jmp/Start/LayerA/StartInfo")
+               == std::vector<std::uint8_t>({2, 2, 2, 2}),
+           "the second layer must survive serialization distinctly");
+
     // The strongest check available here: the app's OWN stage loader must open an
     // archive built this way. Everything downstream (objects, the object tree,
     // saving) goes through StageArchive, so if this passes the created zone is
@@ -5206,6 +5447,7 @@ void testCameraPreviewChain() {
 int main() {
     try {
         testBinaryData();
+        testStageBuilder();
         testWriteFileLeavesNoTemporaries();
         testDirectoryFilesystem();
         testYaz0();

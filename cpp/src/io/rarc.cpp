@@ -110,8 +110,33 @@ bool hasDirectory(const RarcArchive& archive, std::string_view path) {
     if (!root.empty() && wanted == root) {
         return true;
     }
-    const auto* entry = archive.find(wanted);
-    return entry != nullptr && entry->directory;
+    // EXACT path comparison against the entry list, NOT archive.find(). find()
+    // deliberately falls back to a bare-file-name and a path-suffix match, so
+    // find("stage/jmp/mapparts/common") is answered by the FILE
+    // ".../MapParts/Common/MapPartsInfo" -- a suffix match, and not a directory at
+    // all. Using it here made createDirectory() believe a per-layer directory
+    // already existed, skip creating it, and left every file inside it without a
+    // parent. The root case is handled above because the root is never in entries_.
+    for (const auto& entry : archive.entries()) {
+        if (entry.directory && whitehole::util::equalIgnoreCase(entry.path, wanted)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Exact-path lookup, for the callers that must NOT be fooled by find()'s
+// suffix / bare-filename fallback. find() answering "StartInfo" for
+// ".../LayerA/StartInfo" is a convenience for a human; for a writer it is a
+// silent data-loss bug.
+const RarcEntry* findExact(const RarcArchive& archive, std::string_view path) {
+    const std::string wanted(whitehole::util::toLower(path));
+    for (const auto& entry : archive.entries()) {
+        if (whitehole::util::equalIgnoreCase(entry.path, wanted)) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 RarcArchive::RarcArchive(std::vector<std::uint8_t> bytes)
@@ -140,7 +165,14 @@ void RarcArchive::createDirectory(std::string_view path) {
     if (wanted.empty()) {
         throw std::runtime_error("RARC directory path is empty");
     }
-    if (find(wanted) != nullptr) {
+    // Idempotence, checked with the EXACT path -- NOT find(). find() deliberately
+    // falls back to matching a bare file name or a path suffix, so asking it
+    // whether "Stage/jmp/MapParts/Common" exists can be answered by the FILE
+    // "Stage/jmp/MapParts/Common/MapPartsInfo". When that happened this returned
+    // early, the per-layer directory was never created, and every file inside it
+    // failed to serialize for having no parent. The early-out has to mean "this
+    // exact directory is already there".
+    if (hasDirectory(*this, wanted)) {
         return; // already there; creating a zone twice must not fail on this
     }
     // Stored exactly the way insert() stores a file: root-PREFIXED ("Stage/jmp"),
@@ -483,7 +515,13 @@ void RarcArchive::insert(std::string_view path, std::vector<std::uint8_t> data) 
     if (wanted.empty()) {
         throw std::runtime_error("RARC insert path is empty");
     }
-    if (find(wanted) != nullptr) {
+    // EXACT match only. find() falls back to a bare-file-name / path-suffix match,
+    // so asking it about ".../LayerA/StartInfo" can be answered by Common's
+    // "StartInfo" -- and insert() would then REPLACE the Common layer's file with
+    // the LayerA one, losing it. Every layer's tables are named identically by
+    // design (Common/StartInfo, LayerA/StartInfo, ...), so the loose match is not
+    // a near miss here, it is the common case.
+    if (findExact(*this, wanted) != nullptr) {
         replace(wanted, std::move(data));
         return;
     }

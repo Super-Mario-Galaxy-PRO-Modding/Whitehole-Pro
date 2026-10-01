@@ -245,6 +245,14 @@ std::int32_t ScenarioModel::nextFreeScenarioNumber() const {
 // A row that lists every column the game can store, so a brand-new scenario is
 // the same shape as an existing one. ensureField() appends without disturbing the
 // columns already there, which is what keeps the untouched table byte-exact.
+//
+// The PowerStarType / CometLimitTimer pair is SMG2-ONLY, and adding it to an
+// SMG1 galaxy would put a column in the file the game has never seen -- the same
+// mistake the Scenarios panel refuses to make when it offers a star-type picker.
+// So they are created only when the table is ALREADY an SMG2 one, judged by
+// whether the galaxy carries the SMG1 marker instead. A brand-new table (no
+// columns at all) is taken as SMG2, which is the common case and matches
+// populateScenarioFieldsScenarioData's own default.
 void ensureScenarioColumns(BcsvTable& table) {
     table.ensureField(kScenarioNo, BcsvType::integer);
     table.ensureField(kScenarioName, BcsvType::stringOffset);
@@ -255,8 +263,12 @@ void ensureScenarioColumns(BcsvTable& table) {
     table.ensureField(kAppearPowerStarObj, BcsvType::stringOffset);
     table.ensureField(kComet, BcsvType::stringOffset);
     table.ensureField(kLuigiModeTimer, BcsvType::integer);
-    table.ensureField(kPowerStarType, BcsvType::stringOffset);
-    table.ensureField(kCometLimitTimer, BcsvType::integer);
+    // SMG1 stores IsHidden instead of the SMG2 pair. Its presence is the signal.
+    const bool smg1 = table.hasField("IsHidden");
+    if (!smg1) {
+        table.ensureField(kPowerStarType, BcsvType::stringOffset);
+        table.ensureField(kCometLimitTimer, BcsvType::integer);
+    }
 }
 
 std::size_t ScenarioModel::addScenario(std::string_view name,

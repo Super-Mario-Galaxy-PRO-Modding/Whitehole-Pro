@@ -86,6 +86,34 @@ bool matchesSuffix(std::string_view path, std::string_view suffix) {
 
 } // namespace
 
+// Whether `path` names a directory that exists, counting the ROOT itself.
+// The root node is implicit in this class -- parse() builds it without ever
+// putting it in entries_, and serialize() re-creates it from rootName_ -- so
+// find() alone can never resolve it. Without this, creating or inserting the
+// first top-level directory reports "directory does not exist" on an archive
+// that plainly has a root.
+bool hasDirectory(const RarcArchive& archive, std::string_view path) {
+    const std::string lowered(whitehole::util::toLower(path));
+    if (lowered.empty() || lowered == "/" || lowered == "\\") {
+        return false;
+    }
+    // Compare the caller's path against the root directly, in a form both sides
+    // agree on: "/Stage", "Stage" and "stage/" all name the root.
+    std::string wanted(lowered);
+    while (wanted.size() > 1 && wanted.back() == '/') {
+        wanted.pop_back();
+    }
+    while (!wanted.empty() && wanted.front() == '/') {
+        wanted.erase(wanted.begin());
+    }
+    const std::string root(whitehole::util::toLower(archive.rootName()));
+    if (!root.empty() && wanted == root) {
+        return true;
+    }
+    const auto* entry = archive.find(wanted);
+    return entry != nullptr && entry->directory;
+}
+
 RarcArchive::RarcArchive(std::vector<std::uint8_t> bytes)
     : bytes_(yaz0::decompress(bytes)), wasCompressed_(yaz0::isCompressed(bytes)) {
     parse();
@@ -93,6 +121,62 @@ RarcArchive::RarcArchive(std::vector<std::uint8_t> bytes)
 
 RarcArchive RarcArchive::open(const std::filesystem::path& path) {
     return RarcArchive(readFile(path));
+}
+
+RarcArchive RarcArchive::create(std::string_view rootName, std::uint32_t metadata) {
+    RarcArchive archive{CreateTag{}};
+    archive.rootName_ = safeComponent(rootName);
+    archive.metadata_ = metadata;
+    // Big-endian, because that is what retail SMG1/SMG2 archives use and what the
+    // stage/scenario writers below assume. Serializing and re-parsing through
+    // this same value is what keeps a created archive readable by the game.
+    archive.endian_ = Endian::big;
+    archive.wasCompressed_ = false;
+    return archive;
+}
+
+void RarcArchive::createDirectory(std::string_view path) {
+    const auto wanted = normalizePath(path);
+    if (wanted.empty()) {
+        throw std::runtime_error("RARC directory path is empty");
+    }
+    if (find(wanted) != nullptr) {
+        return; // already there; creating a zone twice must not fail on this
+    }
+    // Stored exactly the way insert() stores a file: root-PREFIXED ("Stage/jmp"),
+    // keeping the caller's casing. Both details matter and neither is cosmetic.
+    // serialize() looks each entry's parent up in a map keyed by rootName_ and
+    // by the paths earlier entries were stored under, so a lowercase or
+    // root-relative path fails to match and serialize() reports "directory has no
+    // serialized parent" on an archive that is perfectly well-formed.
+    std::string stored(path);
+    for (auto& character : stored) {
+        if (character == '\\') {
+            character = '/';
+        }
+    }
+    while (stored.size() > 1 && stored.front() == '/') {
+        stored.erase(stored.begin());
+    }
+    // Prefix with the root BEFORE checking the parent: "/jmp" is a top-level
+    // directory, so its parent is the root itself. Checking first would see an
+    // empty parent and reject the very first directory a new archive needs.
+    if (!rootName_.empty() && !whitehole::util::equalIgnoreCase(stored, rootName_)
+        && !whitehole::util::equalIgnoreCase(stored.substr(0, rootName_.size() + 1),
+                                             rootName_ + "/")) {
+        stored.insert(0, rootName_ + "/");
+    }
+    if (parentPath(stored).empty()) {
+        throw std::runtime_error("RARC cannot create the root directory: " + stored);
+    }
+    if (!hasDirectory(*this, parentPath(stored))) {
+        throw std::runtime_error("RARC directory does not exist: " + parentPath(stored));
+    }
+    entries_.push_back({stored, true, 0, 0});
+    // A directory has no payload, and insert() keeps replacements_ parallel to
+    // entries_, so push an empty slot rather than letting the two drift.
+    replacements_.emplace_back();
+    buildLookup();
 }
 
 const RarcEntry* RarcArchive::find(std::string_view path) const {
@@ -422,9 +506,10 @@ void RarcArchive::insert(std::string_view path, std::vector<std::uint8_t> data) 
         stored.insert(0, rootName_);
     }
 
-    const auto* parent = find(parentPath(stored));
-    if (parent == nullptr || !parent->directory
-        || !whitehole::util::equalIgnoreCase(parent->path, parentPath(wanted))) {
+    // hasDirectory(), not find(): the root is an implicit node that is never in
+    // entries_, so inserting the first top-level directory would otherwise be
+    // rejected on an archive that plainly has a root.
+    if (!hasDirectory(*this, parentPath(stored))) {
         throw std::runtime_error("RARC directory does not exist: " + parentPath(wanted));
     }
 

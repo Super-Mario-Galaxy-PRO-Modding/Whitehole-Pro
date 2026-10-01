@@ -2747,6 +2747,98 @@ void testStageCameras() {
            "SMG1 camera defaults must stay on the SMG1 set");
 }
 
+// Creating an archive from nothing. Every other RarcArchive entry point parses
+// bytes that already exist, so before this there was no way to make a zone or a
+// galaxy -- the editor could only edit what the game already shipped.
+void testRarcCreation() {
+    using whitehole::io::RarcArchive;
+
+    RarcArchive archive = RarcArchive::create("Stage");
+    expect(archive.entries().empty(), "a created archive must start with no entries");
+    expect(archive.rootName() == "Stage", "a created archive must keep its root name");
+    expect(archive.endian() == whitehole::io::Endian::big,
+           "a created archive must be big-endian, like the retail ones");
+
+    // An unsafe root name is refused rather than producing an archive the game
+    // would never read.
+    bool refused = false;
+    try {
+        (void)RarcArchive::create("../escape");
+    } catch (const std::runtime_error&) {
+        refused = true;
+    }
+    expect(refused, "an unsafe RARC root name must be rejected");
+
+    // The /Stage/jmp skeleton every zone needs, plus a payload.
+    archive.createDirectory("/jmp");
+    archive.createDirectory("/jmp/Placement");
+    archive.createDirectory("/jmp/Placement/Common");
+    archive.insert("/jmp/Placement/Common/StageObjInfo", {1, 2, 3, 4});
+    archive.insert("/jmp/Placement/Common/AreaObjInfo", {5, 6});
+    expect(archive.fileExists("/jmp/Placement/Common/StageObjInfo"),
+           "insert must find the file it just wrote");
+
+    // Creating a directory twice is a no-op, not a failure: the zone builder asks
+    // for the same folder from more than one layer.
+    archive.createDirectory("/jmp/Placement/Common");
+    // ...but its parent has to exist.
+    bool parentRefused = false;
+    try {
+        archive.createDirectory("/jmp/Missing/Child");
+    } catch (const std::runtime_error&) {
+        parentRefused = true;
+    }
+    expect(parentRefused, "creating a directory under a missing parent must be rejected");
+
+    // Write it out, then read it back through the ordinary parse path. This is the
+    // claim that matters: an archive built by hand is indistinguishable from a
+    // parsed one to everything downstream.
+    TemporaryDirectory temporary;
+    const auto path = temporary.path / "created.arc";
+    whitehole::io::writeFile(path, archive.serialize(false));
+    RarcArchive reparsed{whitehole::io::readFile(path)};
+    expect(reparsed.rootName() == "Stage", "the root name must survive the round trip");
+    expect(reparsed.endian() == whitehole::io::Endian::big,
+           "the endianness must survive the round trip");
+    expect(reparsed.fileExists("/jmp/Placement/Common/StageObjInfo"),
+           "a created file must be found after re-parsing");
+    expect(reparsed.read("/jmp/Placement/Common/StageObjInfo")
+               == std::vector<std::uint8_t>({1, 2, 3, 4}),
+           "a created file's bytes must survive the round trip");
+    expect(reparsed.files("/jmp/Placement/Common")
+               == std::vector<std::string>({"AreaObjInfo", "StageObjInfo"}),
+           "created files must list under their directory after re-parsing");
+    expect(reparsed.directories("/jmp").size() == 1,
+           "a created directory must list after re-parsing");
+
+    // The strongest check available here: the app's OWN stage loader must open an
+    // archive built this way. Everything downstream (objects, the object tree,
+    // saving) goes through StageArchive, so if this passes the created zone is
+    // real rather than merely well-formed.
+    whitehole::smg::BcsvTable stageObjInfo;
+    stageObjInfo.ensureField("name", whitehole::smg::BcsvType::stringOffset);
+    stageObjInfo.ensureField("l_id", whitehole::smg::BcsvType::integer);
+    const std::size_t row = stageObjInfo.addRow();
+    stageObjInfo.setString(stageObjInfo.rows()[row], "name", "FirstThing");
+    stageObjInfo.setInt(stageObjInfo.rows()[row], "l_id", 0);
+
+    RarcArchive loadable = RarcArchive::create("Stage");
+    loadable.createDirectory("/jmp");
+    loadable.createDirectory("/jmp/Placement");
+    loadable.createDirectory("/jmp/Placement/Common");
+    loadable.insert("/jmp/Placement/Common/StageObjInfo", stageObjInfo.serialize());
+    const auto loadablePath = temporary.path / "created-stage.arc";
+    whitehole::io::writeFile(loadablePath, loadable.serialize(false));
+
+    auto stage = whitehole::smg::StageArchive::openMapFile(loadablePath);
+    expect(!stage.tables().empty(),
+           "StageArchive must load a table out of an archive built from nothing");
+    expect(stage.objects().size() == 1,
+           "StageArchive must read the object out of a created archive");
+    expect(stage.objects().front().name == "FirstThing",
+           "the object's name must survive creation");
+}
+
 void testStageAndGameModels() {
     const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
     auto stage = whitehole::smg::StageArchive::openMapFile(templates / "SMG2BigGalaxyMap.arc");
@@ -5110,6 +5202,7 @@ int main() {
         testArchiveTableEdit();
         testNameTables();
         testStageCameras();
+        testRarcCreation();
         testStageAndGameModels();
         testBtiDecoding();
         testBmdMaterialTextureRouting();

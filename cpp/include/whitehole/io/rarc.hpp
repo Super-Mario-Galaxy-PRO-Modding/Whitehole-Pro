@@ -23,6 +23,25 @@ class RarcArchive {
 public:
     explicit RarcArchive(std::vector<std::uint8_t> bytes);
 
+    // A brand-new, EMPTY archive with the given root name -- the entry point for
+    // creating a zone or galaxy from nothing, which nothing could do before:
+    // every other constructor has to parse bytes that already exist.
+    //
+    // It shares only the SERIALIZING side of the class with a parsed archive.
+    // parse() is never called, so no read()/find()/serialize() path changes for
+    // existing archives; the round trip is pinned by a test that builds an
+    // archive this way, writes it out, re-parses it, and reopens it through the
+    // same StageArchive the editor uses.
+    //
+    // `metadata` is the 4-byte value a retail archive carries at 0x38 (the game
+    // stamps a build number there); 0 is the neutral choice.
+    [[nodiscard]] static RarcArchive create(std::string_view rootName, std::uint32_t metadata = 0);
+
+    // Creates a directory inside the archive. Like insert(), this is only
+    // meaningful on an archive made by create(): a parsed one already has every
+    // directory its file tree implies.
+    void createDirectory(std::string_view path);
+
     [[nodiscard]] static RarcArchive open(const std::filesystem::path& path);
     [[nodiscard]] Endian endian() const noexcept { return endian_; }
     [[nodiscard]] bool wasCompressed() const noexcept { return wasCompressed_; }
@@ -44,6 +63,12 @@ public:
     void extractAll(const std::filesystem::path& destination) const;
 
 private:
+    // The non-parsing constructor, used only by create(). It exists because the
+    // public constructor has to parse, and there are no bytes to parse when an
+    // archive is being built from scratch.
+    struct CreateTag {};
+    explicit RarcArchive(CreateTag) noexcept {}
+
     void parse();
     void parseNode(std::uint32_t index, const std::string& path, std::vector<bool>& visited,
                    std::size_t nodeOffset, std::size_t entryOffset, std::size_t stringOffset,

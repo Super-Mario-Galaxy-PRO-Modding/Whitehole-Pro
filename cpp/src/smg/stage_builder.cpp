@@ -130,33 +130,9 @@ std::vector<std::string> allStageLayerNames() {
     return layers;
 }
 
-std::string zoneScenarioPath(std::string_view galaxyName, int gameType) {
-    // Java's createGalaxy always uses the SMG2 folder shape for the scenario
-    // archive; only the ROOT name is lowercased for SMG1 (StageHelper.java:293).
-    (void)gameType;
-    return "/StageData/" + std::string(galaxyName) + "/" + std::string(galaxyName) +
-           "Scenario.arc";
-}
-
-std::string galaxyScenarioPath(std::string_view galaxyName) {
-    return zoneScenarioPath(galaxyName, 2);
-}
-
-void createStageZone(io::DirectoryFilesystem& filesystem, std::string_view name,
-                     const std::vector<std::string>& layers,
-                     const std::vector<std::uint8_t>& schemaTemplate, int gameType,
-                     CreatedZone* report) {
-    requireSafeName(name, "zone");
-    if (schemaTemplate.empty()) {
-        throw std::runtime_error(
-            "A zone needs a template: it is where the JMap schemas come from "
-            "(use \"Bare minimum\", which is the bundled standard-zone template)");
-    }
-    if (layers.empty()) {
-        throw std::runtime_error("A zone needs at least the Common layer");
-    }
-    // "Common" is not a choice: it owns no bit and every zone has it, so asking
-    // for it twice (or not at all) is the same zone.
+std::vector<std::string> normalizeStageLayers(const std::vector<std::string>& layers) {
+    // "Common" is not optional and not optional twice: it owns no bit and every
+    // zone has it, so asking for it twice (or not at all) is the same zone.
     std::vector<std::string> wanted{"Common"};
     for (const auto& layer : layers) {
         if (layer == "Common") {
@@ -169,20 +145,28 @@ void createStageZone(io::DirectoryFilesystem& filesystem, std::string_view name,
             wanted.push_back(layer);
         }
     }
+    return wanted;
+}
 
-    const auto path = stageMapFilesystemPath(name, gameType);
-    if (filesystem.fileExists(path)) {
-        throw std::runtime_error("A zone named " + std::string(name) + " already exists: " + path);
-    }
+namespace {
 
-    io::RarcArchive tmpl{schemaTemplate};
-    io::RarcArchive archive = io::RarcArchive::create(forGame("Stage", gameType));
+// One file the create will put inside the map archive: where it goes and the
+// table that goes there (already reduced to a schema -- rows cleared).
+//
+// This is the single source of BOTH halves of the split. planStageZone keeps only
+// the paths; createStageZone keeps paths and tables. Neither recomputes the list,
+// so a dry run cannot describe a different zone from the one that gets written.
+struct PlannedZoneFile {
+    std::string path;
+    BcsvTable table;
+};
 
-    CreatedZone created;
-    created.name = std::string(name);
-    created.mapPath = path;
-
-    for (const auto& layer : wanted) {
+std::vector<PlannedZoneFile> planZoneFiles(const io::RarcArchive& tmpl,
+                                           std::string_view root,
+                                           const std::vector<std::string>& layers,
+                                           int gameType) {
+    std::vector<PlannedZoneFile> files;
+    for (const auto& layer : layers) {
         for (const auto& spec : stageLayeredTables()) {
             if (spec.gameType != 0 && spec.gameType != gameType) {
                 continue; // SoundInfo / ChildObjInfo are SMG1-only
@@ -196,27 +180,122 @@ void createStageZone(io::DirectoryFilesystem& filesystem, std::string_view name,
             if (layer == "Common" && spec.file == "StartInfo") {
                 table = spawnPointSchema(tmpl, gameType);
             }
-            const auto filePath = "/" + std::string(archive.rootName()) + "/jmp/" +
-                                  forGame(spec.folder, gameType) + "/" + forGame(layer, gameType) +
-                                  "/" + forGame(spec.file, gameType);
-            makeParentDirectories(archive, filePath);
-            archive.insert(filePath, table->serialize());
-            created.layerFiles.push_back(filePath);
+            files.push_back({"/" + std::string(root) + "/jmp/" +
+                                 forGame(spec.folder, gameType) + "/" +
+                                 forGame(layer, gameType) + "/" + forGame(spec.file, gameType),
+                             std::move(*table)});
         }
     }
-    created.layers = wanted;
-
     // A zone with no path table loads its rails as an empty list either way, but
     // the game's own zones all have one, and a missing file is a difference
     // nothing else would explain. Copied from the template when it has one.
     if (const auto pathSchema = schemaFromTemplate(tmpl, "Path", "CommonPathInfo", gameType);
         pathSchema.has_value()) {
-        const auto filePath = "/" + std::string(archive.rootName()) + "/jmp/" +
-                              forGame("Path", gameType) + "/" + forGame("CommonPathInfo", gameType);
-        makeParentDirectories(archive, filePath);
-        archive.insert(filePath, pathSchema->serialize());
-        created.layerFiles.push_back(filePath);
+        files.push_back({"/" + std::string(root) + "/jmp/" + forGame("Path", gameType) +
+                             "/" + forGame("CommonPathInfo", gameType),
+                         std::move(*pathSchema)});
     }
+    return files;
+}
+
+// Builds the map archive a plan describes. Pure: no filesystem, no writes.
+io::RarcArchive buildZoneArchive(const std::vector<PlannedZoneFile>& files, int gameType) {
+    io::RarcArchive archive = io::RarcArchive::create(forGame("Stage", gameType));
+    for (const auto& file : files) {
+        makeParentDirectories(archive, file.path);
+        archive.insert(file.path, file.table.serialize());
+    }
+    return archive;
+}
+
+} // namespace
+
+std::string scenarioArchivePath(std::string_view galaxyName) {
+    // Java's createGalaxy always uses the SMG2 folder shape for the scenario
+    // archive; only the ROOT name is lowercased for SMG1 (StageHelper.java:293).
+    // There is deliberately no gameType parameter: this path does not vary, and
+    // a parameter that is accepted and ignored invites callers to believe it
+    // does. See the header comment.
+    return "/StageData/" + std::string(galaxyName) + "/" + std::string(galaxyName) +
+           "Scenario.arc";
+}
+
+std::vector<std::string> StageCreatePlan::filesWritten() const {
+    // The map archive first, then -- for a galaxy -- the scenario archive. This is
+    // the order create* writes them in, so a dry run reads as a sequence rather
+    // than an alphabetical jumble.
+    std::vector<std::string> files{mapPath};
+    if (forGalaxy()) {
+        files.push_back(scenarioPath);
+    }
+    return files;
+}
+
+StageCreatePlan planStageZone(std::string_view name, const std::vector<std::string>& layers,
+                              const std::vector<std::uint8_t>& schemaTemplate, int gameType) {
+    requireSafeName(name, "zone");
+    if (schemaTemplate.empty()) {
+        throw std::runtime_error(
+            "A zone needs a template: it is where the JMap schemas come from "
+            "(use \"Bare minimum\", which is the bundled standard-zone template)");
+    }
+    if (layers.empty()) {
+        throw std::runtime_error("A zone needs at least the Common layer");
+    }
+
+    StageCreatePlan plan;
+    plan.name = std::string(name);
+    plan.mapPath = stageMapFilesystemPath(name, gameType);
+    plan.layers = normalizeStageLayers(layers);
+
+    // The template is read here to learn WHICH tables it carries -- a template
+    // that lacks a file contributes nothing, and that is a property of the
+    // template, not of the destination, so it belongs in the plan.
+    const io::RarcArchive tmpl{schemaTemplate};
+    const std::string root = forGame("Stage", gameType);
+    for (const auto& file : planZoneFiles(tmpl, root, plan.layers, gameType)) {
+        plan.layerFiles.push_back(file.path);
+    }
+    return plan;
+}
+
+StageCreatePlan planGalaxy(std::string_view name, const std::vector<std::string>& extraZones,
+                           const std::vector<std::string>& layers,
+                           const std::vector<std::uint8_t>& schemaTemplate, int gameType) {
+    requireSafeName(name, "galaxy");
+    StageCreatePlan plan = planStageZone(name, layers, schemaTemplate, gameType);
+    for (const auto& zoneName : extraZones) {
+        requireSafeName(zoneName, "zone");
+    }
+    plan.extraZones = extraZones;
+    plan.scenarioPath = scenarioArchivePath(name);
+    return plan;
+}
+
+void createStageZone(io::DirectoryFilesystem& filesystem, std::string_view name,
+                     const std::vector<std::string>& layers,
+                     const std::vector<std::uint8_t>& schemaTemplate, int gameType,
+                     CreatedZone* report) {
+    // Every validation the old code did inline now happens in the plan, so a dry
+    // run rejects exactly what the real create rejects -- including the case that
+    // matters most, an already-existing zone, which is a question about the
+    // DESTINATION and so cannot be answered by the plan alone.
+    const StageCreatePlan plan = planStageZone(name, layers, schemaTemplate, gameType);
+    if (filesystem.fileExists(plan.mapPath)) {
+        throw std::runtime_error("A zone named " + std::string(name) + " already exists: " +
+                                 plan.mapPath);
+    }
+
+    const io::RarcArchive tmpl{schemaTemplate};
+    const io::RarcArchive archive =
+        buildZoneArchive(planZoneFiles(tmpl, forGame("Stage", gameType), plan.layers, gameType),
+                         gameType);
+
+    CreatedZone created;
+    created.name = plan.name;
+    created.mapPath = plan.mapPath;
+    created.layers = plan.layers;
+    created.layerFiles = plan.layerFiles;
 
     // Not compressed: retail archives are Yaz0, but a fresh uncompressed one is
     // valid and the editor reads it. Compression is the game's packaging, not a
@@ -227,7 +306,7 @@ void createStageZone(io::DirectoryFilesystem& filesystem, std::string_view name,
     if (gameType != 1) {
         filesystem.createDirectory("/StageData/" + std::string(name));
     }
-    filesystem.write(path, archive.serialize(false));
+    filesystem.write(plan.mapPath, archive.serialize(false));
     if (report != nullptr) {
         *report = std::move(created);
     }
@@ -237,9 +316,11 @@ void createGalaxy(io::DirectoryFilesystem& filesystem, std::string_view name,
                   const std::vector<std::string>& extraZones,
                   const std::vector<std::string>& layers,
                   const std::vector<std::uint8_t>& schemaTemplate, int gameType) {
-    requireSafeName(name, "galaxy");
-    const auto scenarioPath = zoneScenarioPath(name, gameType);
-    if (filesystem.fileExists(scenarioPath)) {
+    // The plan carries every name check the old code did inline, plus the layer
+    // and template checks, so `galaxy create --dry-run` refuses exactly what the
+    // real command refuses.
+    const StageCreatePlan plan = planGalaxy(name, extraZones, layers, schemaTemplate, gameType);
+    if (filesystem.fileExists(plan.scenarioPath)) {
         throw std::runtime_error("A galaxy named " + std::string(name) + " already exists");
     }
 
@@ -257,7 +338,6 @@ void createGalaxy(io::DirectoryFilesystem& filesystem, std::string_view name,
     links.rows().clear();
     std::int32_t nextLinkId = 0;
     for (const auto& zoneName : extraZones) {
-        requireSafeName(zoneName, "zone");
         const std::size_t row = links.addRow();
         auto& cells = links.rows()[row];
         links.setString(cells, "name", zoneName);
@@ -330,7 +410,7 @@ void createGalaxy(io::DirectoryFilesystem& filesystem, std::string_view name,
     // zone was already created above -- but an SMG1 zone is a flat file, so its
     // folder has never been made. DirectoryFilesystem::write will not make it.
     filesystem.createDirectory("/StageData/" + std::string(name));
-    filesystem.write(scenarioPath, scenario.serialize(false));
+    filesystem.write(plan.scenarioPath, scenario.serialize(false));
 }
 
 } // namespace whitehole::smg

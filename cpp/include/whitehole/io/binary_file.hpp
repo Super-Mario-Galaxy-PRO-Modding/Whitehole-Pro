@@ -19,6 +19,17 @@ std::vector<std::uint8_t> readFile(const std::filesystem::path& path);
 void writeFile(const std::filesystem::path& path, std::span<const std::uint8_t> data);
 void writeFile(const std::filesystem::path& path, const std::vector<std::uint8_t>& data);
 
+// A sibling temporary path unique to THIS writer -- "<path>.tmp<addr>-<n>".
+//
+// Exposed because the rule is that every writer goes through writeFile(), and a
+// caller that cannot (it streams, or it wants to stage bytes before committing)
+// still must not invent a FIXED suffix. A fixed ".tmp" is a race: two writers
+// saving the same file open the SAME temporary, and whichever commits first
+// deletes it out from under the other. That is a bug this repo has already
+// shipped once in writeFile() and once again in the object-database download,
+// so the helper is public: there is exactly one naming scheme.
+[[nodiscard]] std::filesystem::path temporaryPathFor(const std::filesystem::path& path);
+
 // ----------------------------------------------------------------------------
 
 class BinaryReader {

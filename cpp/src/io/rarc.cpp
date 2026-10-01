@@ -129,6 +129,12 @@ bool hasDirectory(const RarcArchive& archive, std::string_view path) {
 // suffix / bare-filename fallback. find() answering "StartInfo" for
 // ".../LayerA/StartInfo" is a convenience for a human; for a writer it is a
 // silent data-loss bug.
+//
+// THIS IS THE WRITER'S LOOKUP. Every code path that modifies the archive --
+// insert(), replace(), createDirectory(), and anything added later -- resolves
+// paths through this function or through hasDirectory(), never through find().
+// The rarc.hpp header comment states the rule; this comment marks the two
+// places that obey it.
 const RarcEntry* findExact(const RarcArchive& archive, std::string_view path) {
     const std::string wanted(whitehole::util::toLower(path));
     for (const auto& entry : archive.entries()) {
@@ -211,6 +217,12 @@ void RarcArchive::createDirectory(std::string_view path) {
     buildLookup();
 }
 
+// The CONVENIENCE lookup, for readers only. This deliberately falls back to a
+// bare-file-name and a path-suffix match, which is right for a human reading a
+// path and catastrophic for a writer -- see the rule at the top of rarc.hpp.
+//
+// NEVER call this from anything that modifies the archive. Use findExact() (or
+// hasDirectory() for a directory) instead.
 const RarcEntry* RarcArchive::find(std::string_view path) const {
     const auto wanted = normalizePath(path);
     if (wanted.empty()) {
@@ -495,19 +507,40 @@ std::vector<std::uint8_t> RarcArchive::read(const RarcEntry& entry) const {
     return {begin, begin + static_cast<std::ptrdiff_t>(entry.size)};
 }
 
-void RarcArchive::replace(std::string_view path, std::vector<std::uint8_t> data) {
-    const auto* entry = find(path);
-    if (entry == nullptr) {
-        throw std::runtime_error("RARC file does not exist: " + std::string(path));
+void RarcArchive::replace(const RarcEntry& entry, std::vector<std::uint8_t> data) {
+    if (entry.directory) {
+        throw std::runtime_error("RARC cannot replace a directory: " + entry.path);
     }
     for (std::size_t index = 0; index < entries_.size(); ++index) {
-        if (&entries_[index] == entry) {
+        if (&entries_[index] == &entry) {
             replacements_[index] = std::move(data);
             entries_[index].size = replacements_[index]->size();
             return;
         }
     }
-    throw std::runtime_error("RARC file does not exist: " + std::string(path));
+    throw std::runtime_error("RARC entry does not belong to this archive");
+}
+
+void RarcArchive::replace(std::string_view path, std::vector<std::uint8_t> data) {
+    // EXACT match only, like insert() and createDirectory(). This used to resolve
+    // through the loose find(), which made it the one remaining writer in this
+    // file that could be fooled by a bare-file-name or path-suffix fallback:
+    // replacing ".../LayerA/StageObjInfo" could land on Common's file instead.
+    // The bug never fired here because every caller passes a full path, but a
+    // writer that is only accidentally safe is one edit away from silently
+    // destroying a layer.
+    //
+    // normalizePath() FIRST, exactly as insert() does. Entries are stored
+    // WITHOUT a leading slash ("Stage/jmp/...") while callers address archives
+    // root-relative ("/Stage/jmp/..."), and findExact() compares raw strings, so
+    // skipping this step makes every leading-slash path miss. insert() hides
+    // this because it normalizes before calling findExact().
+    const auto wanted = normalizePath(path);
+    const auto* entry = findExact(*this, wanted);
+    if (entry == nullptr) {
+        throw std::runtime_error("RARC file does not exist: " + std::string(path));
+    }
+    replace(*entry, std::move(data));
 }
 
 void RarcArchive::insert(std::string_view path, std::vector<std::uint8_t> data) {

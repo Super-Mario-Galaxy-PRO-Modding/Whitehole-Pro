@@ -1,6 +1,7 @@
 #include "whitehole/db/custom_obj_db.hpp"
 
 #include "whitehole/db/object_db.hpp"
+#include "whitehole/io/binary_file.hpp"
 #include "whitehole/util/json.hpp"
 
 #include <algorithm>
@@ -91,13 +92,19 @@ void CustomObjDatabase::save(const std::filesystem::path& path) {
     if (path.has_parent_path()) {
         std::filesystem::create_directories(path.parent_path(), ec);
     }
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-    if (!stream) {
-        throw std::runtime_error("Cannot write custom object database: " + path.string());
-    }
-    stream << text;
-    if (!stream) {
-        throw std::runtime_error("Failed while writing custom object database: " + path.string());
+    // Through writeFile(), not a bare ofstream with trunc. This file holds the
+    // modder's OWN object definitions -- work that exists nowhere else -- and a
+    // direct truncating write loses all of it if the write is interrupted (a
+    // crash, a full disk, the process being killed). writeFile() stages into a
+    // per-writer temporary and renames, so the previous contents survive any
+    // failure, and it leaves a .bak. It throws, which is this function's
+    // existing contract, so the error text just gets more specific.
+    const auto bytes = std::vector<std::uint8_t>(text.begin(), text.end());
+    try {
+        io::writeFile(path, bytes);
+    } catch (const std::exception& failure) {
+        throw std::runtime_error(std::string("Cannot write custom object database: ") +
+                                 failure.what());
     }
     lastSavedJson_ = text;
     loaded_ = true;

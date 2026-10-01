@@ -123,6 +123,114 @@ public:
     std::filesystem::path path;
 };
 
+// THE PLAN MUST DESCRIBE THE WRITE, NOT DESCRIBE A WRITE. --dry-run and the
+// GUI's confirm step are only worth anything if they list the files create*
+// actually produces, so this test is about AGREEMENT rather than about the
+// plan's contents: plan a create, then really create it, and compare. A plan
+// that drifted from the writer would make the preview a lie -- exactly the gap
+// the Scenarios panel's "show what will happen, then happen it" rule prevents.
+void testStageCreatePlans() {
+    using namespace whitehole::smg;
+    const auto templates =
+        std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    const auto smg2ZoneTemplate =
+        whitehole::io::readFile(templates / "SMG2StandardZoneMap.arc");
+    const auto smg1ZoneTemplate =
+        whitehole::io::readFile(templates / "SMG1OneStarGalaxy.arc");
+
+    // ---- a plan writes nothing ---------------------------------------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        const auto plan = planStageZone("DryRun", {"Common", "LayerA"}, smg2ZoneTemplate, 2);
+        expect(!plan.mapPath.empty(), "a plan must name the map archive it would write");
+        expect(plan.layers.size() == 2 && plan.layers.front() == "Common",
+               "a plan must record the resolved layers, Common first");
+        expect(!plan.layerFiles.empty(), "a plan must list the tables it would create");
+        expect(!plan.forGalaxy(), "a plain zone plan must not claim to be a galaxy");
+
+        // The whole point: nothing is on disk.
+        expect(!project.fileExists(plan.mapPath),
+               "planning a zone must not write its map archive");
+        expect(!project.directoryExists("/StageData/DryRun"),
+               "planning a zone must not create its folder");
+
+        // Applying the plan produces exactly the files it promised.
+        CreatedZone created;
+        createStageZone(project, "DryRun", {"Common", "LayerA"}, smg2ZoneTemplate, 2, &created);
+        expect(created.mapPath == plan.mapPath,
+               "the created zone's map path must match the planned one");
+        expect(created.layers == plan.layers,
+               "the created zone's layers must match the planned ones");
+        expect(created.layerFiles == plan.layerFiles,
+               "the created zone's table list must match the planned one");
+        expect(project.fileExists(plan.mapPath), "the apply must write what it planned");
+    }
+
+    // ---- filesWritten() is what a dry run prints ---------------------------
+    {
+        const auto zone = planStageZone("Cave", {"Common"}, smg2ZoneTemplate, 2);
+        const auto zoneFiles = zone.filesWritten();
+        expect(zoneFiles.size() == 1 && zoneFiles.front() == zone.mapPath,
+               "a zone writes exactly its map archive");
+
+        const auto galaxy = planGalaxy("TestGal", {"Cave"}, {"Common"}, smg2ZoneTemplate, 2);
+        expect(galaxy.forGalaxy(), "a galaxy plan must report itself as one");
+        const auto galaxyFiles = galaxy.filesWritten();
+        expect(galaxyFiles.size() == 2,
+               "a galaxy writes its map archive and its scenario archive");
+        expect(galaxyFiles.front() == galaxy.mapPath,
+               "the map archive is written before the scenario archive");
+        expect(galaxy.scenarioPath == "/StageData/TestGal/TestGalScenario.arc",
+               "the planned scenario path must be the game's expected one");
+        expect(galaxy.extraZones.size() == 1 && galaxy.extraZones.front() == "Cave",
+               "a galaxy plan must record the zones it will link");
+    }
+
+    // ---- the plan refuses exactly what create* refuses ---------------------
+    // This is what makes a dry run trustworthy: it must not happily preview a
+    // create that would then be rejected. The already-exists check is the one
+    // case it CANNOT cover, because that is a fact about the destination and
+    // planning never looks at it -- which is why the CLI re-checks it.
+    const auto refuses = [](const auto& call) {
+        try {
+            call();
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    expect(refuses([&] { planStageZone("NoLayers", {}, smg2ZoneTemplate, 2); }),
+           "a plan with no layers must be refused, like the create is");
+    expect(refuses([&] { planStageZone("BadLayer", {"Common", "LayerZ"}, smg2ZoneTemplate, 2); }),
+           "a plan naming something that is not a layer must be refused");
+    expect(refuses([&] { planStageZone("NoTemplate", {"Common"}, {}, 2); }),
+           "a plan with no template must be refused, not guessed at");
+    expect(refuses([&] { planStageZone("Bad/Name", {"Common"}, smg2ZoneTemplate, 2); }),
+           "a plan with an unsafe name must be refused");
+    expect(refuses([&] { planGalaxy("Gal", {"Bad/Zone"}, {"Common"}, smg2ZoneTemplate, 2); }),
+           "a galaxy plan with an unsafe zone name must be refused");
+
+    // ---- SMG1's layout, which differs from SMG2's --------------------------
+    {
+        TemporaryDirectory temporary;
+        whitehole::io::DirectoryFilesystem project(temporary.path);
+        project.createDirectory("/StageData");
+        const auto smg1 = planStageZone("Flat", {"Common"}, smg1ZoneTemplate, 1);
+        expect(smg1.mapPath == "/StageData/Flat.arc",
+               "an SMG1 zone plan must use the flat path");
+        CreatedZone created;
+        createStageZone(project, "Flat", {"Common"}, smg1ZoneTemplate, 1, &created);
+        expect(created.mapPath == smg1.mapPath,
+               "the created SMG1 zone must land where it was planned to");
+        expect(project.fileExists(smg1.mapPath), "the SMG1 zone must be written");
+        // SMG1 needs no folder of its own, so promising one would be a lie.
+        expect(!project.directoryExists("/StageData/Flat"),
+               "an SMG1 zone must not create a folder for itself");
+    }
+}
+
 // Creating zones and galaxies. The claim under test is that a created zone is
 // indistinguishable from a real one TO WHITEHOLE PRO -- it reopens through the
 // same loaders the editor uses. It is NOT a claim that a retail game accepts it;
@@ -365,6 +473,65 @@ void testWriteFileLeavesNoTemporaries() {
     whitehole::io::writeFile(nested, {7});
     expect(whitehole::io::readFile(nested) == std::vector<std::uint8_t>({7}),
            "writeFile must create missing parent directories");
+
+    // ---- THE APP-LAYER WRITERS MUST ROUTE THROUGH writeFile() --------------
+    // This used to be a comment about writeFile alone, while three writers
+    // bypassed it with a raw ofstream. Two of them hold data a modder cannot
+    // regenerate, so a truncating write interrupted by a crash destroys real
+    // work:
+    //
+    //   CustomObjDatabase::save()  the modder's own object registry
+    //   Settings::save()           preferences (low stakes, same hole)
+    //   downloadObjectDatabase()   used a FIXED ".download" temporary, which is
+    //                              the same race writeFile() was fixed for, and
+    //                              removed the destination BEFORE renaming it --
+    //                              so a failed rename left the user with no
+    //                              database at all instead of the old one.
+    //
+    // The download path is WinHTTP-only and cannot run in a test, so what is
+    // asserted here is the property that made its bug possible: nothing in the
+    // app layer stages into a fixed suffix of its own any more. That is a
+    // naming-convention pin, and it only stays true while temporaryPathFor is
+    // the single scheme -- which is why it is public.
+    const auto fixedSuffixes = std::vector<std::string>{".download", ".tmp"};
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(temporary.path)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto name = entry.path().string();
+        // A ".bak" is EXPECTED -- that is the backup writeFile deliberately
+        // keeps. Only the staging names must not survive.
+        for (const auto& suffix : fixedSuffixes) {
+            expect(name.find(suffix) == std::string::npos,
+                   "a save left a staging file behind: " + name);
+        }
+    }
+
+    // temporaryPathFor() is what makes that true, so pin its contract: it is a
+    // sibling of the target, and two calls in a row never collide.
+    const auto first = whitehole::io::temporaryPathFor(path);
+    const auto second = whitehole::io::temporaryPathFor(path);
+    expect(first.parent_path() == path.parent_path(),
+           "a temporary must be a sibling of the file it stages for");
+    expect(first != second,
+           "two writers must never be handed the same temporary name");
+    expect(first.string().find(".tmp") != std::string::npos,
+           "a staging name must be recognisable as one");
+
+    // The custom-object registry in particular: writing it twice must leave the
+    // second one's bytes and keep the first as a .bak, which is the difference
+    // between "recoverable" and "gone".
+    const auto registry = temporary.path / "customobjdb.json";
+    whitehole::io::writeFile(registry, {'a'});
+    whitehole::io::writeFile(registry, {'b'});
+    expect(whitehole::io::readFile(registry) == std::vector<std::uint8_t>({'b'}),
+           "the registry must hold the newest contents");
+    auto backup = registry;
+    backup += ".bak";
+    expect(std::filesystem::exists(backup),
+           "overwriting the registry must keep the previous copy as a .bak");
+    expect(whitehole::io::readFile(backup) == std::vector<std::uint8_t>({'a'}),
+           "the .bak must hold what the file held before");
 }
 
 // The creation templates, which shipped in data/templates since before the port
@@ -649,6 +816,156 @@ void testRarcEndianness() {
         expect(rewritten.read(rewritten.entries().front()) == std::vector<std::uint8_t>({9, 8, 7, 6}),
                "RARC replacement was not serialized");
     }
+}
+
+// THE WRITER MUST NEVER USE THE LOOSE LOOKUP. This is the regression test for a
+// bug class that has cost this repo real data TWICE, both times in the zone
+// builder (BLUEPRINT section 15):
+//
+//   createDirectory() asked whether "Stage/jmp/MapParts/Common" existed and was
+//   answered by the FILE ".../MapParts/Common/MapPartsInfo" -- a path-suffix
+//   match -- so it skipped the directory, and every file inside it then failed
+//   to serialize for having no parent.
+//
+//   insert() had the same problem and it was worse. Every layer's tables are
+//   named identically BY DESIGN (Common/StartInfo, LayerA/StartInfo, ...), so
+//   inserting LayerA's table found Common's through the bare-file-name fallback
+//   and REPLACED it. The archive looked complete -- every layer directory was
+//   present -- while every non-Common layer silently held no tables at all.
+//
+// The rule is now written down at the top of rarc.hpp and pinned here. This test
+// constructs the exact ambiguity both bugs relied on and asserts that the writer
+// lands on the file it was told to, and ONLY on that file.
+void testRarcWriterNeverLooseMatches() {
+    using whitehole::io::RarcArchive;
+
+    // --- the insert() half: same file name in two layers ---------------------
+    auto archive = RarcArchive::create("Zone");
+    archive.createDirectory("/jmp");
+    archive.createDirectory("/jmp/Placement");
+    archive.createDirectory("/jmp/Placement/Common");
+    archive.createDirectory("/jmp/Placement/LayerA");
+    const std::uint8_t commonBytes = 0xC0;
+    const std::uint8_t layerBytes = 0xA1;
+    archive.insert("/jmp/Placement/Common/StartInfo", {commonBytes});
+    archive.insert("/jmp/Placement/LayerA/StartInfo", {layerBytes});
+
+    // The two entries must coexist. Before the fix, the second insert() found the
+    // first through the bare-filename fallback and replaced it, leaving ONE file.
+    // Count FILES, not entries(): entries() also lists the four directories, and
+    // the point of this assertion is about the two identically-named files.
+    const auto fileCount = [&archive] {
+        std::size_t count = 0;
+        for (const auto& entry : archive.entries()) {
+            if (!entry.directory) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    expect(fileCount() == 2,
+           "two layers' identically-named tables must be two separate files");
+    const auto* common = archive.find("Zone/jmp/Placement/Common/StartInfo");
+    const auto* layerA = archive.find("Zone/jmp/Placement/LayerA/StartInfo");
+    expect(common != nullptr && layerA != nullptr,
+           "both layers' StartInfo files must be individually addressable");
+    expect(common != layerA, "the two layers resolved to the SAME entry");
+    expect(archive.read(*common) == std::vector<std::uint8_t>{commonBytes},
+           "insert() into LayerA overwrote Common's StartInfo");
+    expect(archive.read(*layerA) == std::vector<std::uint8_t>{layerBytes},
+           "LayerA's StartInfo did not get its own bytes");
+
+    // And this must survive a serialize/re-parse, or the loss only shows up once
+    // the file reaches the game.
+    const RarcArchive reparsed(archive.serialize(false));
+    expect(std::count_if(reparsed.entries().begin(), reparsed.entries().end(),
+                         [](const auto& entry) { return !entry.directory; }) == 2,
+           "the two layer tables did not both survive serialization");
+    expect(reparsed.read(*reparsed.find("Zone/jmp/Placement/Common/StartInfo")) ==
+               std::vector<std::uint8_t>{commonBytes},
+           "Common's StartInfo changed on the way out to disk");
+
+    // --- the replace() half: the path overload must not fall back either -----
+    // This used to resolve through find(), which made it the last writer in the
+    // file that could be redirected by a loose match. Replacing LayerA's file
+    // must change LayerA's file and leave Common's alone.
+    auto replaced = archive;
+    const std::uint8_t newLayerBytes = 0xA2;
+    replaced.replace("Zone/jmp/Placement/LayerA/StartInfo", {newLayerBytes});
+    expect(replaced.read(*replaced.find("Zone/jmp/Placement/Common/StartInfo")) ==
+               std::vector<std::uint8_t>{commonBytes},
+           "replace() wrote to Common's file instead of the one it was given");
+    expect(replaced.read(*replaced.find("Zone/jmp/Placement/LayerA/StartInfo")) ==
+               std::vector<std::uint8_t>{newLayerBytes},
+           "replace() did not write the file it was given");
+
+    // Root-RELATIVE paths (a leading slash, which is how every caller in the
+    // codebase addresses an archive) must resolve too. Entries are stored
+    // WITHOUT the leading slash, so replace() has to normalize before comparing.
+    // Getting this wrong made createGalaxy() fail with "RARC file does not
+    // exist: /Stage/jmp/Placement/Common/StageObjInfo" for a file the archive
+    // plainly had -- findExact() compares raw strings and does not normalize.
+    auto slashForm = archive;
+    slashForm.replace("/Zone/jmp/Placement/LayerA/StartInfo", {0xA3});
+    expect(slashForm.read(*slashForm.find("Zone/jmp/Placement/LayerA/StartInfo")) ==
+               std::vector<std::uint8_t>{0xA3},
+           "replace() must accept a root-relative path with a leading slash");
+    expect(slashForm.read(*slashForm.find("Zone/jmp/Placement/Common/StartInfo")) ==
+               std::vector<std::uint8_t>{commonBytes},
+           "a leading-slash replace() disturbed the wrong layer");
+
+    // A path that resolves ONLY through the fallback must now be refused outright
+    // rather than silently landing on some other entry. The bare name "StartInfo"
+    // is ambiguous here by construction -- there are two of them.
+    bool refusedAmbiguous = false;
+    try {
+        replaced.replace("StartInfo", {0xFF});
+    } catch (const std::runtime_error&) {
+        refusedAmbiguous = true;
+    }
+    expect(refusedAmbiguous,
+           "replace() must refuse a bare file name rather than guess which file it meant");
+
+    // The entry overload is the unambiguous writer: the caller already decided,
+    // and nothing about the path can redirect it.
+    auto byEntry = archive;
+    byEntry.replace(*byEntry.find("Zone/jmp/Placement/Common/StartInfo"), {0xC1});
+    expect(byEntry.read(*byEntry.find("Zone/jmp/Placement/Common/StartInfo")) ==
+               std::vector<std::uint8_t>{0xC1},
+           "replace(entry, ...) did not write the entry it was handed");
+    expect(byEntry.read(*byEntry.find("Zone/jmp/Placement/LayerA/StartInfo")) ==
+               std::vector<std::uint8_t>{layerBytes},
+           "replace(entry, ...) disturbed a different entry");
+
+    // --- the createDirectory() half: a FILE must not satisfy a directory ask --
+    // The original bug in its purest form. "Common/MapPartsInfo" exists as a
+    // file; asking whether the DIRECTORY "Common" exists must not be answered by
+    // it through the suffix match, because that skips creating the directory.
+    auto suffix = RarcArchive::create("Suffix");
+    suffix.createDirectory("/jmp");
+    suffix.createDirectory("/jmp/MapParts");
+    suffix.createDirectory("/jmp/MapParts/Common");
+    suffix.insert("/jmp/MapParts/Common/MapPartsInfo", {0x42});
+    // Creating the same directory again is idempotent and must NOT create a
+    // duplicate entry -- the exact case that used to be answered by the file.
+    suffix.createDirectory("/jmp/MapParts/Common");
+    expect(suffix.entries().size() == 4,
+           "createDirectory() must be idempotent when the directory really exists");
+    const RarcArchive suffixReparsed(suffix.serialize(false));
+    expect(suffixReparsed.find("Suffix/jmp/MapParts/Common/MapPartsInfo") != nullptr,
+           "the sibling file must survive the idempotent directory create");
+
+    // --- the READ side keeps its convenience, deliberately -------------------
+    // The half of the rule that says find() is not being removed: a reader may
+    // still answer a bare file name and a path suffix, because that is what a
+    // human typing a shortened path means. Pin it so a future "cleanup" does
+    // not quietly break SMG1's lowercase paths or the BCSV editor's dialogs.
+    const auto* loose = archive.find("StartInfo");
+    expect(loose != nullptr, "find() must still resolve a bare file name for readers");
+    const auto* suffixLoose = archive.find("jmp/Placement/Common/StartInfo");
+    expect(suffixLoose != nullptr, "find() must still resolve a path suffix for readers");
+    expect(suffixLoose == common,
+           "the path-suffix read must resolve to the same file as the exact path");
 }
 
 void testMath() {
@@ -5599,6 +5916,7 @@ int main() {
     try {
         testBinaryData();
         testStageBuilder();
+        testStageCreatePlans();
         testStageTemplates();
         testWriteFileLeavesNoTemporaries();
         testDirectoryFilesystem();
@@ -5628,6 +5946,7 @@ int main() {
         testValidation();
         testDocument();
         testRarcEndianness();
+        testRarcWriterNeverLooseMatches();
         testProjectArchives();
         testArchiveTableEdit();
         testNameTables();

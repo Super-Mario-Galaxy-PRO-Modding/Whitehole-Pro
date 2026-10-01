@@ -1,6 +1,10 @@
 #include "whitehole/app/object_db_update.hpp"
 
+#include "whitehole/io/binary_file.hpp"
+
 #include <fstream>
+#include <cstdint>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -169,22 +173,34 @@ std::string downloadObjectDatabase(const std::filesystem::path& destination) {
     if (destination.has_parent_path()) {
         std::filesystem::create_directories(destination.parent_path(), code);
     }
-    const std::filesystem::path temporary = destination.string() + ".download";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return "could not open " + temporary.string() + " for writing";
-        }
-        out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
-        if (!out) {
-            return "could not write " + temporary.string();
-        }
+    // Commit through writeFile(), which owns the whole safe-save protocol: a
+    // per-writer temporary (a FIXED ".download" suffix is a race -- two instances
+    // downloading at once opened the same file, and whichever finished first
+    // deleted it out from under the other), a .bak of whatever was there, and an
+    // in-place copy fallback when the rename cannot happen.
+    //
+    // It also fixes a real data-loss window this used to have. The old code
+    // remove()d the destination and THEN renamed, so a rename that failed -- an
+    // antivirus scanner holding the file, a second instance -- left the modder
+    // with NO database at all, having destroyed the one they already had.
+    // Nothing is staged and removed by hand any more: writeFile does both.
+    //
+    // Nothing is thrown out of here; this function reports failure as a string,
+    // which is what the caller surfaces in a toast.
+    //
+    // payload is a std::vector<char> (that is what WinHttpReadData fills in) and
+    // writeFile takes bytes, so convert once rather than reinterpreting: a
+    // reinterpret_cast here would be the one place in this file that could get
+    // signedness wrong, and there is no reason to take that risk for a copy.
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(payload.size());
+    for (const char value : payload) {
+        bytes.push_back(static_cast<std::uint8_t>(value));
     }
-    std::filesystem::remove(destination, code);
-    code.clear();
-    std::filesystem::rename(temporary, destination, code);
-    if (code) {
-        return "could not move the downloaded database into place: " + code.message();
+    try {
+        io::writeFile(destination, bytes);
+    } catch (const std::exception& failure) {
+        return std::string("could not write the downloaded database: ") + failure.what();
     }
     return {};
 #endif

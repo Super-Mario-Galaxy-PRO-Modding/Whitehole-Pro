@@ -1,5 +1,7 @@
 #include "whitehole/app/settings.hpp"
 
+#include "whitehole/io/binary_file.hpp"
+
 #include <algorithm>
 #include <optional>
 #include "whitehole/util/json.hpp"
@@ -160,8 +162,21 @@ void Settings::save() const {
     util::JsonArray recent;
     for (const auto& m : recentMaps) recent.emplace_back(m);
     o["recentMaps"] = util::JsonValue(std::move(recent));
-    std::ofstream out(configPath_, std::ios::binary | std::ios::trunc);
-    if (out) out << util::serializeJson(util::JsonValue(std::move(o)));
+    // Through writeFile(), so an interrupted save cannot leave a half-written
+    // settings file that fails to parse on the next launch. It stages into a
+    // per-writer temporary and renames.
+    //
+    // Still swallows every failure, deliberately: save() is const, is called
+    // from a dozen places including shutdown, and a preference file is not worth
+    // interrupting the editor or throwing from a destructor path over. Losing
+    // settings costs a re-toggle; crashing costs the session.
+    const std::string text = util::serializeJson(util::JsonValue(std::move(o)));
+    const std::vector<std::uint8_t> bytes(text.begin(), text.end());
+    try {
+        io::writeFile(configPath_, bytes);
+    } catch (const std::exception&) {
+        // Best effort by contract; see above.
+    }
 }
 void Settings::reset() {
     lastGameDir.clear();

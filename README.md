@@ -241,6 +241,9 @@ whitehole-pro-console.exe galaxy create C:\path\to\extracted\files NewGalaxy --z
 whitehole-pro-console.exe zone templates C:\path\to\extracted\files
 whitehole-pro-console.exe zone create C:\path\to\extracted\files Cave --layer LayerA
 
+# ...or see exactly what it would write, without writing any of it
+whitehole-pro-console.exe zone create C:\path\to\extracted\files Cave --layer LayerA --dry-run
+
 # Field-name hashes (parity with the Java reader)
 whitehole-pro-console.exe hash Obj_arg0
 

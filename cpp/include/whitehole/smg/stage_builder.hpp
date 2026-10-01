@@ -37,6 +37,15 @@ namespace whitehole::smg {
 // (scenarioLayerBit), so it is added implicitly rather than asked for.
 [[nodiscard]] std::vector<std::string> allStageLayerNames();
 
+// The layer list create* would actually build, from the caller's request: "Common"
+// first and always present, duplicates collapsed, and anything that is not a real
+// layer REJECTED (scenarioLayerBit < 0) rather than silently dropped.
+//
+// Exposed because the layer pickers -- the CLI's --layer flags and the GUI's
+// dialog -- must show the truth, not the request. A checkerboard that silently
+// ignores "LayerZ" is how a zone ends up missing a layer the author believed in.
+[[nodiscard]] std::vector<std::string> normalizeStageLayers(const std::vector<std::string>& layers);
+
 // What one create* call wrote, so the CLI and the GUI can report it and the
 // tests can assert on it. Paths are workspace-relative, as everywhere else.
 struct CreatedZone {
@@ -45,6 +54,55 @@ struct CreatedZone {
     std::vector<std::string> layers;     // as written, "Common" first
     std::vector<std::string> layerFiles;  // every JMap file written, for the summary
 };
+
+// Everything a create would write, computed WITHOUT writing any of it.
+//
+// This is the plan/apply split, and it exists for two reasons that both need the
+// same thing. A `--dry-run` has to print every file before touching the disk, and
+// the GUI's confirm step has to show the author what is about to happen -- the
+// Scenarios panel's existing rule is "show what will happen, then happen it".
+//
+// It is deliberately planStageZone/planGalaxy rather than a bool flag on
+// create*: a flag that suppressed the writes would still build every archive and
+// every BCSV, so a "dry run" would cost exactly what the real thing costs and
+// would still be able to fail on the thing it promised to be previewing.
+//
+// A plan is only trustworthy if it cannot drift from what create* does, so
+// createStageZone/createGalaxy BUILD THEIR PLAN THROUGH THESE and then apply it.
+// The two never compute the file list independently.
+struct StageCreatePlan {
+    std::string name;
+    std::string mapPath;                    // the zone's map archive
+    std::vector<std::string> layers;        // "Common" first
+    std::vector<std::string> layerFiles;    // every JMap path INSIDE the map archive
+    // Empty for a plain zone. A galaxy also writes these.
+    std::string scenarioPath;
+    std::vector<std::string> extraZones;
+
+    [[nodiscard]] bool forGalaxy() const noexcept { return !scenarioPath.empty(); }
+    // Every file the apply will put on disk, in the order it writes them. This is
+    // what a dry run prints and what the GUI's confirm step lists.
+    [[nodiscard]] std::vector<std::string> filesWritten() const;
+};
+
+// Validates and resolves a create into a plan. Throws std::runtime_error naming
+// what went wrong (unsafe name, no layers, a name that is not a layer, a template
+// that carries no schemas) -- exactly as create* does, because a plan that
+// cannot be applied is not a plan.
+[[nodiscard]] StageCreatePlan planStageZone(std::string_view name,
+                                            const std::vector<std::string>& layers,
+                                            const std::vector<std::uint8_t>& schemaTemplate,
+                                            int gameType);
+
+// The same for a galaxy, including the scenario archive's path and the zones it
+// will link. It does NOT check whether the galaxy already exists: that is a
+// question about the destination, and this function never looks at it -- which is
+// what lets the same plan be previewed anywhere.
+[[nodiscard]] StageCreatePlan planGalaxy(std::string_view name,
+                                         const std::vector<std::string>& extraZones,
+                                         const std::vector<std::string>& layers,
+                                         const std::vector<std::uint8_t>& schemaTemplate,
+                                         int gameType);
 
 // Creates <name>'s map archive and writes it into the workspace.
 //
@@ -77,10 +135,20 @@ void createGalaxy(io::DirectoryFilesystem& filesystem, std::string_view name,
                   const std::vector<std::string>& layers,
                   const std::vector<std::uint8_t>& schemaTemplate, int gameType);
 
-// The path a created zone's map archive lives at, and the name of the scenario
-// archive for a galaxy. Exposed because the CLI reports them and the tests use
-// them; the Java has these rules in two places and they must not drift.
-[[nodiscard]] std::string zoneScenarioPath(std::string_view galaxyName, int gameType);
-[[nodiscard]] std::string galaxyScenarioPath(std::string_view galaxyName);
+// Where a galaxy's scenario archive lives: /StageData/<Galaxy>/<Galaxy>Scenario.arc
+//
+// This is deliberately NOT game-dependent, which is the whole reason it is its
+// own function. SMG1 MAP zones are flat (/StageData/<zone>.arc) while SMG2 ones
+// get a folder, so a reader reasonably expects stageMapFilesystemPath()'s answer
+// to differ per game -- but Java's createGalaxy writes the scenario archive in
+// the SMG2 folder shape for BOTH games, lowercasing only the ROOT name for SMG1
+// (StageHelper.java:293). An earlier version took a `gameType` and threw it
+// away, which is a trap: it reads like the answer changes per game and it does
+// not. `galaxyScenarioPath()` was then a second name for this same function.
+// One function, no parameter, documented.
+//
+// Exposed because the CLI reports the path and the tests assert on it, and the
+// Java carries these rules in two places that must not drift.
+[[nodiscard]] std::string scenarioArchivePath(std::string_view galaxyName);
 
 } // namespace whitehole::smg

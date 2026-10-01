@@ -167,9 +167,30 @@ int archiveCommand(int argc, char** argv) {
         if (argc != 7) {
             throw std::runtime_error("archive replace requires an entry, replacement file, and output archive");
         }
-        archive.replace(argv[4], whitehole::io::readFile(argv[5]));
+        // The path here is typed by a human, so resolve it the convenient way --
+        // find() -- and then write through the ENTRY overload, which overwrites by
+        // identity and cannot be redirected by the loose match. When the match was
+        // not exact, say so: the user asked for one file and is about to write
+        // another, and silence there is how data gets lost. replace(path, ...)
+        // resolves exactly on purpose, so this is the only place in the codebase
+        // allowed to turn a loose lookup into a write.
+        const auto* target = archive.find(argv[4]);
+        if (target == nullptr) {
+            throw std::runtime_error("No entry matches \"" + std::string(argv[4]) +
+                                     "\". Run `archive list` to see the paths.");
+        }
+        if (target->directory) {
+            throw std::runtime_error("\"" + std::string(argv[4]) + "\" is a directory (" +
+                                     target->path + ")");
+        }
+        const std::string asked = argv[4];
+        if (!whitehole::util::equalIgnoreCase(target->path, asked)) {
+            std::cout << "Note: \"" << asked << "\" matched " << target->path
+                      << " by file name or path suffix.\n";
+        }
+        archive.replace(*target, whitehole::io::readFile(argv[5]));
         whitehole::io::writeFile(argv[6], archive.serialize(archive.wasCompressed()));
-        std::cout << "Replaced " << argv[4] << " and wrote " << argv[6] << '\n';
+        std::cout << "Replaced " << target->path << " and wrote " << argv[6] << '\n';
         return 0;
     }
     throw std::runtime_error("Unknown archive operation: " + operation);
@@ -681,14 +702,21 @@ int galaxyCreateCommand(int argc, char** argv) {
     if (argc < 5) {
         throw std::runtime_error(
             "galaxy create requires: <game-directory> <galaxy> [--zone <name>]... "
-            "[--template <name>] [--json]");
+            "[--template <name>] [--dry-run] [--json]");
     }
     const std::string directory = argv[3];
     const std::string name = argv[4];
     std::vector<std::string> extraZones;
     std::string templateName;
+    bool dryRun = false;
     for (int index = 5; index < argc; ++index) {
         const std::string flag = argv[index];
+        if (flag == "--dry-run") {
+            // Print every file that WOULD be written and stop. Built by the same
+            // planning code the real create applies, so the list is the truth.
+            dryRun = true;
+            continue;
+        }
         if (flag == "--json") {
             g_json = true;
         } else if (flag == "--zone") {
@@ -742,6 +770,26 @@ int galaxyCreateCommand(int argc, char** argv) {
     }
 
     io::DirectoryFilesystem project(directory);
+    if (dryRun) {
+        // Show what would happen, then happen it -- the Scenarios panel's rule,
+        // and the only way to answer "what exactly does this create?" without a
+        // throwaway copy of the workspace.
+        const auto plan = smg::planGalaxy(name, extraZones, layers, *schema, gameType);
+        if (project.fileExists(plan.scenarioPath)) {
+            throw std::runtime_error("A galaxy named " + name + " already exists");
+        }
+        std::cout << "Dry run -- " << name << " would write:\n";
+        for (const auto& file : plan.filesWritten()) {
+            std::cout << "  " << file << '\n';
+        }
+        std::cout << "  layers:";
+        for (const auto& layer : plan.layers) {
+            std::cout << ' ' << layer;
+        }
+        std::cout << "\n  " << plan.layerFiles.size() << " tables inside the map archive\n";
+        std::cout << "  (nothing was written)\n";
+        return 0;
+    }
     smg::createGalaxy(project, name, extraZones, layers, *schema, gameType);
 
     if (g_json) {
@@ -767,7 +815,7 @@ int galaxyCreateCommand(int argc, char** argv) {
     // The REAL paths, from the builder's own rules -- not an SMG2-shaped guess
     // printed regardless of game. An SMG1 galaxy's map is a flat /StageData/<n>.arc.
     std::cout << "  " << smg::stageMapFilesystemPath(name, gameType) << '\n';
-    std::cout << "  " << smg::zoneScenarioPath(name, gameType) << '\n';
+    std::cout << "  " << smg::scenarioArchivePath(name) << '\n';
     for (const auto& zoneName : extraZones) {
         std::cout << "  zone " << zoneName
                   << "  (linked only -- run `zone create` to give it a map)\n";
@@ -1759,16 +1807,19 @@ int zoneCreateCommand(int argc, char** argv) {
     if (argc < 5) {
         throw std::runtime_error(
             "zone create requires: <game-directory> <zone> [--layer <name>]... "
-            "[--template <name>] [--json]");
+            "[--template <name>] [--dry-run] [--json]");
     }
     const std::string directory = argv[3];
     const std::string name = argv[4];
     std::string templateName;
     std::vector<std::string> layers{"Common"};
+    bool dryRun = false;
     for (int index = 5; index < argc; ++index) {
         const std::string flag = argv[index];
         if (flag == "--json") {
             g_json = true;
+        } else if (flag == "--dry-run") {
+            dryRun = true;
         } else if (flag == "--layer") {
             if (index + 1 >= argc) {
                 throw std::runtime_error("--layer needs a name (Common, LayerA .. LayerP)");
@@ -1818,6 +1869,23 @@ int zoneCreateCommand(int argc, char** argv) {
     }
 
     io::DirectoryFilesystem project(directory);
+    if (dryRun) {
+        const auto plan = smg::planStageZone(name, layers, *schema, gameType);
+        if (project.fileExists(plan.mapPath)) {
+            throw std::runtime_error("A zone named " + name + " already exists");
+        }
+        std::cout << "Dry run -- " << name << " would write:\n";
+        for (const auto& file : plan.filesWritten()) {
+            std::cout << "  " << file << '\n';
+        }
+        std::cout << "  layers:";
+        for (const auto& layer : plan.layers) {
+            std::cout << ' ' << layer;
+        }
+        std::cout << "\n  " << plan.layerFiles.size() << " tables inside the map archive\n";
+        std::cout << "  (nothing was written)\n";
+        return 0;
+    }
     smg::CreatedZone created;
     smg::createStageZone(project, name, layers, *schema, gameType, &created);
 

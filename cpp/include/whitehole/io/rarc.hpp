@@ -1,5 +1,43 @@
 #pragma once
 
+// RarcArchive: the SMG archive format (RARC), read, written, and built from
+// nothing.
+//
+// ---------------------------------------------------------------------------
+// THE find() / findExact() RULE. Read this before touching any code here.
+//
+// There are two lookups and they are NOT interchangeable:
+//
+//   find()       Human/convenience lookup. Exact match first, then a FALLBACK
+//                that also answers to a bare file name and to a path suffix.
+//                So find("StartInfo") resolves, and so does
+//                find("Placement/Common/ObjInfo") finding
+//                ".../Placement/Common/ObjInfo" by suffix. This is deliberate:
+//                SMG1 lowercases every path, the editor shows shortened paths,
+//                and a human reading "CameraParam.bcam" means the one file by
+//                that name.
+//
+//   findExact()  Exact (case-insensitive) path only. No fallback at all.
+//
+// THE RULE: anything that WRITES uses findExact() and nothing else. Anything
+// that READS for display or for a human-facing answer may use find().
+//
+// This is not stylistic. Building a zone writes one file per layer, and every
+// layer's tables share the same names by design -- Common/StartInfo,
+// LayerA/StartInfo, LayerB/StartInfo, ... A writer using find() asks "does
+// .../LayerA/StartInfo exist?", gets an answer from Common's "StartInfo" via
+// the bare-filename fallback, REPLACES the Common layer's file with LayerA's,
+// and reports success. The archive looks complete -- every layer directory is
+// present -- while every non-Common layer silently holds no tables at all.
+// That bug shipped once. createDirectory() lost data the same way, answering
+// "does Stage/jmp/MapParts/Common exist?" with the FILE
+// ".../MapParts/Common/MapPartsInfo" and skipping the directory.
+//
+// findExact() is currently file-local. If you add a writer, use it; if you
+// need it from outside this file, promote it to a member rather than widening
+// find(). testRarcWriterNeverLooseMatches pins both halves of the rule.
+// ---------------------------------------------------------------------------
+
 #include "whitehole/io/binary_file.hpp"
 
 #include <cstddef>
@@ -47,16 +85,28 @@ public:
     [[nodiscard]] bool wasCompressed() const noexcept { return wasCompressed_; }
     [[nodiscard]] std::string_view rootName() const noexcept { return rootName_; }
     [[nodiscard]] const std::vector<RarcEntry>& entries() const noexcept { return entries_; }
+        // The CONVENIENCE lookup, for READERS. Falls back to a bare-file-name and a
+        // path-suffix match, so "StartInfo" and "Placement/Common/ObjInfo" both
+        // resolve to something useful for a human. Never call this from a writer.
     [[nodiscard]] const RarcEntry* find(std::string_view path) const;
     [[nodiscard]] bool fileExists(std::string_view path) const;
     [[nodiscard]] std::vector<std::string> directories(std::string_view parent) const;
     [[nodiscard]] std::vector<std::string> files(std::string_view parent) const;
     [[nodiscard]] std::vector<std::uint8_t> read(const RarcEntry& entry) const;
     [[nodiscard]] std::vector<std::uint8_t> read(std::string_view path) const;
+        // Overwrites an entry the caller already resolved, by identity rather than
+        // by name. This is the unambiguous writer: nothing about the path can
+        // redirect it, because the path is not consulted. Preferred when the
+        // caller came from entries()/find() and already knows which file it means.
+    void replace(const RarcEntry& entry, std::vector<std::uint8_t> data);
+        // Overwrites the file at `path`, resolving it EXACTLY (no find() fallback).
+        // Throws when no such file exists -- a writer must never quietly land on
+        // a different entry that happens to share a file name.
     void replace(std::string_view path, std::vector<std::uint8_t> data);
-    // Adds a new file under an existing directory (or replaces it when the
-    // path already exists). The path keeps its given casing so a new entry
-    // reads like its siblings; lookups stay case-insensitive.
+        // Adds a new file under an existing directory (or replaces it when the
+        // path already exists), resolving `path` EXACTLY. The path keeps its given
+        // casing so a new entry reads like its siblings; lookups stay
+        // case-insensitive.
     void insert(std::string_view path, std::vector<std::uint8_t> data);
     [[nodiscard]] std::vector<std::uint8_t> serialize(bool compress) const;
 

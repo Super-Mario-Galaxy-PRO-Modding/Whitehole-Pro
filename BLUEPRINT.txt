@@ -210,11 +210,53 @@
 
      call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
      cmake -S . -B <dir> -G Ninja -DCMAKE_BUILD_TYPE=Release
-           -DCMAKE_CXX_COMPILER=cl.exe
+           -DCMAKE_CXX_COMPILER=cl.exe  [SUPERSEDED -- see "BUILD RECIPE CORRECTIONS" below]
            -DCMAKE_MAKE_PROGRAM=C:/msys64/ucrt64/bin/ninja.exe
      cmake --build <dir> -j 8
 
-   The PATH line is mandatory in EVERY shell: g++.exe itself starts, but cc1plus
+BUILD RECIPE CORRECTIONS (verified this session -- the two commands above are
+   now WRONG, and neither failure explains itself):
+
+     1. NINJA IS NOT INSTALLED. C:/msys64/ucrt64/bin/ninja.exe does not exist on
+        this machine; configure dies with "no such file or directory" on the
+        generator probe. There is no ninja anywhere under C:\msys64 or
+        C:\devkitPro. For MinGW use the generator CI uses -- "Unix Makefiles"
+        with MSYS2's make at C:/msys64/usr/bin/make.exe.
+
+     2. NEVER LET THE MSYS2 CMAKE TOUCH YOUR ARGUMENTS. The cmake first on PATH
+        is devkitPro's MSYS2 build, and MSYS2 rewrites Windows-looking arguments
+        into POSIX ones. It turned a build directory into
+        "/home/conta/OneDrive/.../c:/Users/.../build-msvc is not a directory",
+        and it truncated -DCMAKE_CXX_COMPILER=C:/msys64/ucrt64/bin/g++.exe down
+        to the single letter "C" -- which CMake then reports as "is not a full
+        path and was not found in the PATH". That READS like a missing compiler
+        and is really argument mangling. PowerShell mangles it the same way.
+        THE FIX FOR BOTH: call the NATIVE cmake by absolute path (VS ships one
+        at ...\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe) and let it
+        drive the MSYS2 compiler and make underneath -- the native binary does no
+        translation. Name the compiler WITHOUT a drive letter (CXX=g++.exe);
+        PATH already puts ucrt64 first.
+
+     3. BUILD TREES MUST NOT LIVE UNDER ONEDRIVE. A build directory beside the
+        repo kept being resurrected with a stale CMakeCache.txt, so every
+        configure died with "generator ... does not match the generator used
+        previously: Ninja" even after an rmdir /s /q. Use C:\whp-build-mingw.
+        A PSReadLine trap here too: it rewrites "c:" to a private-use character,
+        so a directory literally named "c:" got created INSIDE the repo and
+        showed up as untracked. Remove such a directory with
+        Remove-Item -LiteralPath (a plain "c:" will not match it).
+
+     4. VS2022 is at ...\2022\Community and there is NO VS2026 on this machine,
+        but its vcvars64.bat DOES still exist -- the older note above claiming
+        otherwise is wrong. The repo's own build-msvc tree is gitignored and
+        already fully built, so `cmake --build build-msvc --config Release` is a
+        seconds-long incremental build. Use it.
+
+   A WORKING PAIR OF SCRIPTS EXISTS at ..\whp-mingw-build.cmd and
+   ..\whp-msvc-build.cmd -- outside the repo, so they stay out of git. Both run
+   detached and log to a file, because a foreground build is killed at ~30s.
+   Both are green today on the same tree (100% tests passed).
+   THE PATH line is mandatory in EVERY shell: g++.exe itself starts, but cc1plus
    and the MSYS2 DLLs it needs are only reachable through the ucrt64 bin dir.
    build-check/ was untracked this session (it had been committed by accident).
    Keep build directories OUT of the repo (see the wart below), otherwise every
@@ -1258,29 +1300,55 @@ Six of those commits are the camera feature and the next nine are the
     and the two-layer case. Anything with a hand-built writer deserves that
     shape. It is also the only way to catch a schema mistake without a game.
 
-  * A --dry-run FOR THE CREATE COMMANDS. `galaxy scenario layer ... on` already
-    refuses a zone the galaxy does not have, which is the right instinct. A
-    dry run would let `zone create` print every file it is about to write before
-    writing any of them, and it fits the rule the Scenarios panel already
-    follows: show what will happen, then happen it.
+  * A --dry-run FOR THE CREATE COMMANDS. [DONE] `zone create --dry-run` and
+    `galaxy create --dry-run` print every file that would be written and stop.
+    It is a PLAN/APPLY SPLIT, not a flag that suppresses the writes:
+    planStageZone()/planGalaxy() in stage_builder return a StageCreatePlan
+    (mapPath, resolved layers, every JMap path, plus scenarioPath + extraZones
+    for a galaxy), and create* BUILD THEIR PLAN THROUGH THEM and then apply it.
+    That is the part that matters -- a bool flag would still build every archive
+    and every BCSV, so the "preview" would cost what the real thing costs and
+    could still fail on the thing it promised to preview, and the two file lists
+    could drift. Normalizing the layers also became a public
+    normalizeStageLayers(), because a layer picker must show the resolved truth
+    and reject "LayerZ" rather than silently drop it.
+    One honest limit, documented in the header: a plan CANNOT know whether the
+    zone already exists, because that is a fact about the destination and
+    planning never looks at it. The CLI re-checks it after planning, and
+    testStageCreatePlans pins plan == what create actually wrote.
 
   * DOCUMENT "NOT UNDOABLE" IN THE UI, NOT ONLY HERE. Section 15 says creation
     cannot be undone by the snapshot model. That belongs on screen in the
     confirm step. It is currently written down in exactly one place, and that
     place is a file most users will not read.
 
-  * UNIFY TEMP-FILE NAMING. writeFile() now uses a per-writer suffix (section 10),
-    but the builder and the CLI do not create temporaries. The day a second
-    writer appears there, the same race returns.
+  * UNIFY TEMP-FILE NAMING. [DONE, and the blueprint's version of this was
+    WRONG] It said writeFile() had been fixed but "the builder and the CLI do
+    not create temporaries". That is not what the code does: DirectoryFilesystem
+    ::write() already delegates to writeFile(), so the builder and CLI were safe
+    all along. Auditing every std::ofstream instead found THREE real bypasses,
+    all in the app layer, none covered by testWriteFileLeavesNoTemporaries:
+      * object_db_update.cpp staged into a FIXED ".download" name -- the exact
+        race writeFile() was fixed for -- and then remove()d the destination
+        BEFORE renaming, so a failed rename (AV scanner, a second instance) left
+        the modder with NO database instead of the old one. Now one writeFile()
+        call: fixed race, closed data-loss window, .bak for free.
+      * custom_obj_db.cpp truncated straight onto the live file. That file is the
+        modder's own object registry -- work that exists nowhere else -- so an
+        interrupted write destroyed real authoring.
+      * settings.cpp had the same shape (low stakes, same hole).
+    temporaryPathFor() is now PUBLIC in binary_file.hpp so a caller that cannot
+    use writeFile() cannot invent a second naming scheme that drifts.
 
   * A TEST THAT THE TEMPLATES ON DISK STILL PARSE. They are user-editable files
     in the install directory. testStageTemplates covers malformed and missing
     ones, but nothing catches "someone edited a shipped template into something
     invalid" until a user hits it. A cheap CI check would do it.
 
-  * CLOSE THE TWO UNDOCUMENTED API HOLES. galaxyScenarioPath() is declared and
-    takes a gameType it deliberately ignores; stage_templates.hpp is not
-    mentioned in any section above. Small, but a reader will trip on both.
+  * CLOSE THE TWO UNDOCUMENTED API HOLES. [DONE] scenarioArchivePath() replaces
+    zoneScenarioPath()/galaxyScenarioPath(): one function, no gameType parameter
+    that was accepted and discarded, documented as game-independent on purpose.
+    stage_templates.hpp is still not mentioned above.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

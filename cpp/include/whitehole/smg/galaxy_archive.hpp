@@ -28,6 +28,14 @@ public:
     [[nodiscard]] const BcsvTable& galaxyInfo() const noexcept { return galaxyInfo_; }
     [[nodiscard]] BcsvTable& scenarioData() noexcept { return scenarioData_; }
     [[nodiscard]] BcsvTable& zoneList() noexcept { return zoneList_; }
+    // Endianness the tables were read with, so an undo snapshot can be re-parsed
+    // exactly as the archive stores it (retail SMG1/SMG2 are big-endian).
+    [[nodiscard]] io::Endian endian() const noexcept { return endian_; }
+    // Replaces a table from an undo snapshot. zoneList() also rebuilds zones_,
+    // because that name list is a cache of the table and leaving it stale would
+    // make the Project panel disagree with what a save would write.
+    void setScenarioData(BcsvTable table);
+    void setZoneList(BcsvTable table);
     // True when this galaxy has its own map archive (<galaxy>Map.arc / .arc).
     // Every SMG galaxy ships one: it is the galaxy map itself, a real zone with
     // its own CameraParam.bcam, and it is NOT listed in ZoneList.bcsv.
@@ -52,6 +60,7 @@ private:
     // Rebuilds zones_ from zoneList_, and the "as read" byte snapshots that
     // dirty() compares against.
     void snapshotOriginals();
+    void rebuildZones();
     // The path of the scenario archive inside the workspace, and whether it was
     // Yaz0 compressed on the way in (so save() can put it back the same way).
     [[nodiscard]] std::string scenarioPath() const;

@@ -10,6 +10,7 @@
 
 #include "whitehole/edit/undo.hpp"
 #include "whitehole/smg/bcsv.hpp"
+#include "whitehole/smg/galaxy_archive.hpp"
 #include "whitehole/smg/placement.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 
@@ -129,6 +130,40 @@ private:
     std::string label_;
 };
 
+// One galaxy-scenario edit. BOTH tables a scenario editor can touch are
+// snapshotted -- ScenarioData.bcsv and ZoneList.bcsv -- because a single action
+// ("add zone", "rename scenario") may change either, and undoing must put the
+// pair back exactly as it was. Byte snapshots for the same reason the camera
+// table uses them: a sparse per-zone column vanishes when its last non-zero mask
+// goes away, and a field-level diff could not reproduce the original offsets.
+//
+// This lives on its own undo stack, NOT the zone's: the scenario tables and a
+// zone's CameraParam.bcam are different documents with different save paths
+// (GalaxyArchive::save vs StageArchive::save), and selectZone() clears the zone
+// stack. One shared stack could not produce a coherent "saved" state for both.
+class GalaxyTableCommand final : public IUndo {
+public:
+    GalaxyTableCommand(smg::GalaxyArchive& galaxy, std::vector<std::uint8_t> scenarioBefore,
+                       std::vector<std::uint8_t> zoneBefore,
+                       std::vector<std::uint8_t> scenarioAfter,
+                       std::vector<std::uint8_t> zoneAfter, std::string label);
+
+    void undo() override;
+    void redo() override;
+    [[nodiscard]] std::string label() const override { return label_; }
+
+private:
+    void restore(const std::vector<std::uint8_t>& scenarioBytes,
+                 const std::vector<std::uint8_t>& zoneBytes);
+
+    smg::GalaxyArchive* galaxy_;
+    std::vector<std::uint8_t> scenarioBefore_;
+    std::vector<std::uint8_t> zoneBefore_;
+    std::vector<std::uint8_t> scenarioAfter_;
+    std::vector<std::uint8_t> zoneAfter_;
+    std::string label_;
+};
+
 // ---- helpers: apply + record -------------------------------------------
 // Each returns false (and records nothing) when the target indices are stale.
 // The caller is responsible for setting `after` on the objects first when using
@@ -172,5 +207,13 @@ private:
 [[nodiscard]] bool mutateCameras(smg::StageArchive& stage, UndoStack& stack,
                                  const std::function<void(smg::CameraParamTable&)>& mutate,
                                  std::string label);
+
+// The same idea for a galaxy's scenario tables. `mutate` gets BOTH tables, so an
+// action that touches ScenarioData and ZoneList together is one undo step. Returns
+// false (recording nothing) when neither table changed, so a no-op leaves the
+// stack clean. `stack` must be the GALAXY's stack, not a zone's.
+[[nodiscard]] bool mutateScenarios(
+    smg::GalaxyArchive& galaxy, UndoStack& stack,
+    const std::function<void(smg::BcsvTable&, smg::BcsvTable&)>& mutate, std::string label);
 
 } // namespace whitehole::edit

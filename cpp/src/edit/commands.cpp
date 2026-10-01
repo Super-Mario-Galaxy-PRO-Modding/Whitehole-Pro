@@ -195,4 +195,49 @@ bool mutateCameras(smg::StageArchive& stage, UndoStack& stack,
     return true;
 }
 
+GalaxyTableCommand::GalaxyTableCommand(smg::GalaxyArchive& galaxy,
+                                       std::vector<std::uint8_t> scenarioBefore,
+                                       std::vector<std::uint8_t> zoneBefore,
+                                       std::vector<std::uint8_t> scenarioAfter,
+                                       std::vector<std::uint8_t> zoneAfter, std::string label)
+    : galaxy_(&galaxy), scenarioBefore_(std::move(scenarioBefore)),
+      zoneBefore_(std::move(zoneBefore)), scenarioAfter_(std::move(scenarioAfter)),
+      zoneAfter_(std::move(zoneAfter)), label_(std::move(label)) {}
+
+void GalaxyTableCommand::restore(const std::vector<std::uint8_t>& scenarioBytes,
+                                 const std::vector<std::uint8_t>& zoneBytes) {
+    // Re-parsed in the archive's own endianness so a restored table is byte-
+    // identical to the file it came from, exactly as CameraTableCommand does for
+    // the camera table. setZoneList also rebuilds the cached zone-name list, so
+    // the Project panel follows an undo that added or removed a zone.
+    galaxy_->setScenarioData(smg::BcsvTable(scenarioBytes, galaxy_->endian()));
+    galaxy_->setZoneList(smg::BcsvTable(zoneBytes, galaxy_->endian()));
+}
+
+void GalaxyTableCommand::undo() { restore(scenarioBefore_, zoneBefore_); }
+void GalaxyTableCommand::redo() { restore(scenarioAfter_, zoneAfter_); }
+
+bool mutateScenarios(smg::GalaxyArchive& galaxy, UndoStack& stack,
+                     const std::function<void(smg::BcsvTable&, smg::BcsvTable&)>& mutate,
+                     std::string label) {
+    const auto scenarioBefore = galaxy.scenarioData().serialize();
+    const auto zoneBefore = galaxy.zoneList().serialize();
+    mutate(galaxy.scenarioData(), galaxy.zoneList());
+    const auto scenarioAfter = galaxy.scenarioData().serialize();
+    const auto zoneAfter = galaxy.zoneList().serialize();
+    if (scenarioBefore == scenarioAfter && zoneBefore == zoneAfter) {
+        return false;
+    }
+    // The lambda got raw tables, so it could have added or removed a zone row
+    // without going through GalaxyArchive. Re-installing the changed tables is
+    // what rebuilds the cached zone-name list; without this the Project panel
+    // would keep listing zones the table no longer has. Cheap: the tables are a
+    // few hundred bytes and the cache is a handful of strings.
+    galaxy.setScenarioData(smg::BcsvTable(scenarioAfter, galaxy.endian()));
+    galaxy.setZoneList(smg::BcsvTable(zoneAfter, galaxy.endian()));
+    stack.push(std::make_unique<GalaxyTableCommand>(
+        galaxy, scenarioBefore, zoneBefore, scenarioAfter, zoneAfter, std::move(label)));
+    return true;
+}
+
 } // namespace whitehole::edit

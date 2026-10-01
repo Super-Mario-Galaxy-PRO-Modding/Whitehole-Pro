@@ -20,9 +20,7 @@ GalaxyArchive::GalaxyArchive(io::DirectoryFilesystem& filesystem, std::string na
     // ZoneList/ScenarioData is not a galaxy the editor can do anything with, so a
     // malformed one is a hard error rather than a silently empty editor.
     zoneList_ = BcsvTable(archive.read("ZoneList.bcsv"), archive.endian());
-    for (const auto& row : zoneList_.rows()) {
-        zones_.push_back(zoneList_.getString(row, "ZoneName"));
-    }
+    rebuildZones();
     if (archive.fileExists("ScenarioData.bcsv")) {
         scenarioData_ = BcsvTable(archive.read("ScenarioData.bcsv"), archive.endian());
     }
@@ -35,6 +33,25 @@ GalaxyArchive::GalaxyArchive(io::DirectoryFilesystem& filesystem, std::string na
 
 std::string GalaxyArchive::scenarioPath() const {
     return "/StageData/" + name_ + "/" + name_ + "Scenario.arc";
+}
+
+void GalaxyArchive::rebuildZones() {
+    zones_.clear();
+    for (const auto& row : zoneList_.rows()) {
+        zones_.push_back(zoneList_.getString(row, "ZoneName"));
+    }
+}
+
+void GalaxyArchive::setScenarioData(BcsvTable table) {
+    scenarioData_ = std::move(table);
+}
+
+void GalaxyArchive::setZoneList(BcsvTable table) {
+    zoneList_ = std::move(table);
+    // zones() is a cache of the ZoneList rows, so it has to follow. Leaving it
+    // stale would let the Project panel list a zone the table no longer has, or
+    // hide one it does -- and area-limit validation reads the same list.
+    rebuildZones();
 }
 
 void GalaxyArchive::snapshotOriginals() {

@@ -1781,6 +1781,138 @@ void testGalaxyMapZone() {
            "the composed event id must be stored byte for byte");
 }
 
+// Undo for the scenario tables. These live on their OWN stack because the
+// scenario tables and a zone's CameraParam.bcam are different documents with
+// different save paths -- and selectZone() clears the zone stack, so a shared one
+// would lose scenario history every time the author looked at another zone.
+void testScenarioUndo() {
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    TemporaryDirectory temporary;
+    whitehole::io::DirectoryFilesystem project(temporary.path);
+    project.createDirectory("/SystemData");
+    project.write("/SystemData/ObjNameTable.arc", {0});
+    project.createDirectory("/StageData/RedBlueExGalaxy");
+    project.write("/StageData/RedBlueExGalaxy/RedBlueExGalaxyScenario.arc",
+                  whitehole::io::readFile(templates / "SMG2BigGalaxyScenario.arc"));
+
+    whitehole::smg::GameArchive game(temporary.path);
+    whitehole::smg::GalaxyArchive galaxy = game.openGalaxy("RedBlueExGalaxy");
+    whitehole::edit::UndoStack stack;
+
+    const auto scenarioBytes = galaxy.scenarioData().serialize();
+    const auto zoneBytes = galaxy.zoneList().serialize();
+
+    // The comparison is on PARSED CONTENT, not on the snapshot bytes: a BCSV
+    // writer may append alignment padding, and a restored table is re-serialised
+    // from a parse rather than restored as the original bytes. So the undo
+    // snapshot restores what the table MEANS, and its trailing padding may differ
+    // from the untouched file's -- which is exactly what GalaxyArchive::save()
+    // already relies on by refusing to rewrite a clean galaxy at all.
+    auto contentOf = [](const std::vector<std::uint8_t>& bytes) {
+        return whitehole::smg::BcsvTable(bytes, whitehole::io::Endian::big);
+    };
+    // Compares the VALUES of the columns both tables have, in order. A snapshot taken
+    // after an ensureField() carries the extra column, so a whole-row compare
+    // would always differ on width even when every shared value matches.
+    auto sharedValues = [](const whitehole::smg::BcsvTable& table,
+                           const whitehole::smg::BcsvTable& other) {
+        std::vector<std::vector<whitehole::smg::BcsvValue>> rows;
+        const std::size_t width = std::min(table.fields().size(), other.fields().size());
+        for (const auto& row : table.rows()) {
+            rows.emplace_back(row.values.begin(),
+                              row.values.begin() + static_cast<std::ptrdiff_t>(width));
+        }
+        return rows;
+    };
+
+    // A no-op records nothing, so a drag that ends where it started leaves the
+    // stack clean -- the same rule mutateCameras follows. The lambda parameters
+    // are spelled whitehole::smg:: because a function-local using-declaration is
+    // not visible in the lambda's own parameter list.
+    expect(!whitehole::edit::mutateScenarios(
+               galaxy, stack,
+               [](whitehole::smg::BcsvTable&, whitehole::smg::BcsvTable&) {},
+               "Nothing"),
+           "a no-op scenario edit must not record a step");
+    expect(stack.size() == 0, "the galaxy undo stack must stay empty after a no-op");
+
+    // Rename a scenario: one step, and undo restores the bytes exactly.
+    expect(whitehole::edit::mutateScenarios(
+               galaxy, stack,
+               [](whitehole::smg::BcsvTable& scenarios, whitehole::smg::BcsvTable&) {
+                   scenarios.setString(scenarios.rows()[0], "ScenarioName", "Renamed");
+               },
+               "Rename scenario"),
+           "renaming must record a step");
+    expect(stack.size() == 1 && stack.cursor() == 1, "one edit must be one undo step");
+    expect(stack.undoLabel() == "Rename scenario",
+           "the undo entry must name the action in plain words");
+    expect(galaxy.scenarioData().getString(galaxy.scenarioData().rows()[0], "ScenarioName") ==
+               "Renamed",
+           "the rename must be applied before it is recorded");
+
+    expect(stack.undo(), "undo must succeed");
+    expect(sharedValues(galaxy.scenarioData(), contentOf(scenarioBytes)) ==
+               sharedValues(contentOf(scenarioBytes), galaxy.scenarioData()),
+           "undo must restore every ScenarioData value");
+    expect(sharedValues(galaxy.zoneList(), contentOf(zoneBytes)) ==
+               sharedValues(contentOf(zoneBytes), galaxy.zoneList()),
+           "undo must restore every ZoneList value");
+    expect(stack.redo(), "redo must succeed");
+    expect(galaxy.scenarioData().getString(galaxy.scenarioData().rows()[0], "ScenarioName") ==
+               "Renamed",
+           "redo must re-apply the rename");
+
+    // A layer edit -- the case that made byte snapshots necessary: the new zone
+    // column has to come back with its original type and offsets.
+    expect(whitehole::edit::mutateScenarios(
+               galaxy, stack,
+               [](whitehole::smg::BcsvTable& scenarios, whitehole::smg::BcsvTable&) {
+                   (void)scenarios.ensureField("NewZoneColumn", whitehole::smg::BcsvType::integer);
+                   scenarios.setInt(scenarios.rows()[0], "NewZoneColumn", 5);
+               },
+               "Change layers"),
+           "a layer edit must record a step");
+    expect(galaxy.scenarioData().hasField("NewZoneColumn"),
+           "the layer column must exist after the edit");
+    // The baseline is taken HERE, not from the top of the function: the rename is
+    // currently applied (it was redone), so the original bytes are no longer what
+    // undo should restore.
+    const auto beforeLayerEdit = galaxy.scenarioData().serialize();
+    expect(stack.undo(), "the layer edit must undo");
+    expect(!galaxy.scenarioData().hasField("NewZoneColumn"),
+           "undo must remove the column the edit added");
+    expect(sharedValues(galaxy.scenarioData(), contentOf(beforeLayerEdit)) ==
+               sharedValues(contentOf(beforeLayerEdit), galaxy.scenarioData()),
+           "undo must restore every value after a layer edit");
+    expect(stack.redo(), "the layer edit must redo");
+    expect(galaxy.scenarioData().hasField("NewZoneColumn"), "redo must restore the column");
+
+    // Zone-list edits go through the same pair, and undo must also rebuild the
+    // cached zone-name list, or the Project panel would keep listing a zone the
+    // table no longer has.
+    const std::size_t zonesBefore = galaxy.zones().size();
+    const auto beforeZoneEdit = galaxy.zoneList().serialize();
+    expect(whitehole::edit::mutateScenarios(
+               galaxy, stack,
+               [](whitehole::smg::BcsvTable&, whitehole::smg::BcsvTable& zones) {
+                   (void)zones.ensureField("ZoneName", whitehole::smg::BcsvType::stringOffset);
+                   const std::size_t row = zones.addRow();
+                   zones.setString(zones.rows()[row], "ZoneName", "ExtraZone");
+               },
+               "Add zone"),
+           "adding a zone must record a step");
+    expect(galaxy.zones().size() == zonesBefore + 1,
+           "the cached zone list must follow the table");
+    expect(galaxy.zones().back() == "ExtraZone", "the new zone must be listed");
+    expect(stack.undo(), "adding a zone must undo");
+    expect(galaxy.zones().size() == zonesBefore,
+           "undo must rebuild the cached zone list, not just the table");
+    expect(sharedValues(galaxy.zoneList(), contentOf(beforeZoneEdit)) ==
+               sharedValues(contentOf(beforeZoneEdit), galaxy.zoneList()),
+           "undo must restore every ZoneList value after a zone edit");
+}
+
 void testUndoStack() {
     using whitehole::edit::IUndo;
     using whitehole::edit::UndoMultiEntry;
@@ -4957,6 +5089,7 @@ int main() {
         testScenarioModel();
         testScenarioEditing();
         testGalaxyScenarioSave();
+        testScenarioUndo();
         testGizmoMath();
         testStageEditCommands();
         testObjectAuthoring();

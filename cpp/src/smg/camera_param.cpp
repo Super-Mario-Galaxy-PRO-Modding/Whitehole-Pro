@@ -47,166 +47,208 @@ std::vector<CameraFieldSpec> buildFieldSpecs() {
 
     // ---- framing: where the camera sits and how it is oriented ----
     specs.push_back({"string", BcsvType::stringOffset, strDef(), std::nullopt,
-                     S::general, G::framing, "Target name",
-                     "Object or path name used by some camera types (matrix/vector register cameras)."});
+                     S::general, G::framing, "Follow target",
+                     "Object or path this camera follows, if the camera type follows "
+                     "something. Blank means it follows the default target."});
     specs.push_back({"angleB", BcsvType::floatingPoint, floatDef(0.3F), std::nullopt,
-                     S::general, G::framing, "Angle B",
-                     "Camera-type specific angle in radians: horizontal angle for "
-                     "CAM_TYPE_XZ_PARA, rotation dead-zone for CAM_TYPE_TOWER."});
+                     S::general, G::framing, "Side angle (degrees)",
+                     "How far around the target the camera sits, sideways. "
+                     "0 looks from one side; larger values swing it around. "
+                     "The file stores radians; the panel edits and shows degrees."});
     specs.push_back({"angleA", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Angle A",
-                     "Camera-type specific angle in radians: vertical (pitch) angle for "
-                     "parallel and tower cameras."});
+                     S::general, G::framing, "Height angle (degrees)",
+                     "How high above or below the target the camera sits. "
+                     "0 is level with the target; larger values look down from above. "
+                     "The file stores radians; the panel edits and shows degrees."});
     specs.push_back({"roll", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Roll",
-                     "Rotates the camera around its view axis (180 flips it upside down)."});
+                     S::general, G::framing, "Tilt (degrees)",
+                     "Tilts the picture sideways. 0 is level; 180 turns it upside down. "
+                     "The file stores radians; the panel edits and shows degrees."});
     specs.push_back({"dist", BcsvType::floatingPoint, floatDef(1200.0F), std::nullopt,
                      S::general, G::framing, "Distance",
-                     "Standoff distance from the target in game units."});
+                     "How far the camera stays from the target, in game units."});
     specs.push_back({"fovy", BcsvType::floatingPoint, floatDef(45.0F), std::nullopt,
-                     S::general, G::framing, "Field of view",
-                     "Vertical field of view in degrees; keep it between 0 and 179.9."});
+                     S::general, G::framing, "Zoom (field of view, degrees)",
+                     "How wide the lens is, in degrees. Smaller zooms in, larger widens "
+                     "the view. Keep it between 0 and 179.9."});
     specs.push_back({"num1", BcsvType::integer, intDef(0), intDef(1),
-                     S::general, G::framing, "Num 1",
-                     "Camera-type specific integer: non-zero enables reset/rounding on "
-                     "CAM_TYPE_XZ_PARA; SMG2 defaults to 1."});
+                     S::general, G::framing, "Special option 1",
+                     "Extra switch whose meaning depends on the camera type "
+                     "(for example it steadies the side-view camera). "
+                     "SMG2 cameras default to 1, SMG1 to 0."});
     specs.push_back({"num2", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::framing, "Num 2",
-                     "Camera-type specific integer used by rail, demo and death cameras."});
+                     S::general, G::framing, "Special option 2",
+                     "Second extra switch, only used by rail, demo and death cameras."});
     specs.push_back({"loffset", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Forward offset",
-                     "Offset along the target's forward vector: higher moves the camera "
-                     "in front of the target, lower behind it."});
+                     S::general, G::framing, "Forward shift",
+                     "Slides the camera along the direction the target faces: positive "
+                     "moves it in front of the target, negative behind it."});
     specs.push_back({"loffsetv", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Vertical offset",
-                     "Offset along the target's up vector: higher moves the camera above "
-                     "the target, lower below it."});
+                     S::general, G::framing, "Up/down shift",
+                     "Slides the camera along the target's up direction: positive moves "
+                     "it above the target, negative below it."});
     specs.push_back({"woffset.X", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "World offset X",
-                     "Constant offset from the target relative to the zone."});
+                     S::general, G::framing, "Aim nudge X",
+                     "Small fixed nudge to the point the camera orbits, in zone units."});
     specs.push_back({"woffset.Y", BcsvType::floatingPoint, floatDef(100.0F), floatDef(0.0F),
-                     S::general, G::framing, "World offset Y",
-                     "Constant offset from the target relative to the zone "
-                     "(SMG1 defaults to 100, SMG2 to 0)."});
+                     S::general, G::framing, "Aim nudge Y (height)",
+                     "Small fixed height nudge to the point the camera orbits "
+                     "(SMG1 starts at 100, SMG2 at 0)."});
     specs.push_back({"woffset.Z", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "World offset Z",
-                     "Constant offset from the target relative to the zone."});
+                     S::general, G::framing, "Aim nudge Z",
+                     "Small fixed nudge to the point the camera orbits, in zone units."});
     specs.push_back({"wpoint.X", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "World point X",
-                     "Fixed world-space point the camera looks at or rotates around."});
+                     S::general, G::framing, "Fixed point X",
+                     "A fixed spot in the zone some camera types stare at or circle "
+                     "around, instead of following the player."});
     specs.push_back({"wpoint.Y", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "World point Y",
-                     "Fixed world-space point the camera looks at or rotates around."});
+                     S::general, G::framing, "Fixed point Y",
+                     "A fixed spot in the zone some camera types stare at or circle "
+                     "around, instead of following the player."});
     specs.push_back({"wpoint.Z", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "World point Z",
-                     "Fixed world-space point the camera looks at or rotates around."});
+                     S::general, G::framing, "Fixed point Z",
+                     "A fixed spot in the zone some camera types stare at or circle "
+                     "around, instead of following the player."});
     specs.push_back({"axis.X", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Axis X",
-                     "Camera-type specific axis: rotation axis for tower-style cameras, "
-                     "player-relative direction otherwise."});
+                     S::general, G::framing, "Tilt direction X",
+                     "Which way the camera leans or spins: the spin pole for "
+                     "tower-style cameras, the lean direction otherwise."});
     specs.push_back({"axis.Y", BcsvType::floatingPoint, floatDef(1.0F), std::nullopt,
-                     S::general, G::framing, "Axis Y",
-                     "Camera-type specific axis: rotation axis for tower-style cameras, "
-                     "player-relative direction otherwise."});
+                     S::general, G::framing, "Tilt direction Y",
+                     "Which way the camera leans or spins: the spin pole for "
+                     "tower-style cameras, the lean direction otherwise."});
     specs.push_back({"axis.Z", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Axis Z",
-                     "Camera-type specific axis: rotation axis for tower-style cameras, "
-                     "player-relative direction otherwise."});
+                     S::general, G::framing, "Tilt direction Z",
+                     "Which way the camera leans or spins: the spin pole for "
+                     "tower-style cameras, the lean direction otherwise."});
     specs.push_back({"vpanaxis.X", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Vertical pan axis X",
-                     "Axis the Camera Height Arrangement adjusts along (when enabled)."});
+                     S::general, G::framing, "Auto-height direction X",
+                     "Which way the camera slides when the target climbs or drops "
+                     "(only when auto-height below is on)."});
     specs.push_back({"vpanaxis.Y", BcsvType::floatingPoint, floatDef(1.0F), std::nullopt,
-                     S::general, G::framing, "Vertical pan axis Y",
-                     "Axis the Camera Height Arrangement adjusts along (when enabled)."});
+                     S::general, G::framing, "Auto-height direction Y",
+                     "Which way the camera slides when the target climbs or drops "
+                     "(only when auto-height below is on)."});
     specs.push_back({"vpanaxis.Z", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Vertical pan axis Z",
-                     "Axis the Camera Height Arrangement adjusts along (when enabled)."});
+                     S::general, G::framing, "Auto-height direction Z",
+                     "Which way the camera slides when the target climbs or drops "
+                     "(only when auto-height below is on)."});
     specs.push_back({"up.X", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Up X",
-                     "Up vector used to orient the camera."});
+                     S::general, G::framing, "Sky direction X",
+                     "Which way is up for this camera. Leave at 0, 1, 0 unless the "
+                     "zone has unusual gravity."});
     specs.push_back({"up.Y", BcsvType::floatingPoint, floatDef(0.0F), floatDef(1.0F),
-                     S::general, G::framing, "Up Y",
-                     "Up vector used to orient the camera (SMG2 defaults to +Y, SMG1 to 0)."});
+                     S::general, G::framing, "Sky direction Y",
+                     "Which way is up for this camera (SMG2 uses +Y, SMG1 uses 0). "
+                     "Leave it alone unless the zone has unusual gravity."});
     specs.push_back({"up.Z", BcsvType::floatingPoint, floatDef(0.0F), std::nullopt,
-                     S::general, G::framing, "Up Z",
-                     "Up vector used to orient the camera."});
+                     S::general, G::framing, "Sky direction Z",
+                     "Which way is up for this camera. Leave at 0, 1, 0 unless the "
+                     "zone has unusual gravity."});
 
     // ---- behaviour: timing, screen bounds, event control ----
     specs.push_back({"camint", BcsvType::integer, intDef(120), std::nullopt,
-                     S::general, G::behavior, "Blend-in (frames)",
-                     "Frames it takes the camera to move into its active position."});
+                     S::general, G::behavior, "Switch speed (frames)",
+                     "How many frames the camera takes to glide into place when it "
+                     "turns on. Bigger is slower and smoother."});
     specs.push_back({"camendint", BcsvType::integer, intDef(120), std::nullopt,
-                     S::event, G::behavior, "Blend-out (frames)",
-                     "Frames this event camera takes to deactivate (e: cameras only)."});
+                     S::event, G::behavior, "Switch-away speed (frames)",
+                     "How many frames this cutscene camera takes to glide away when it "
+                     "turns off (cutscene cameras only)."});
     specs.push_back({"gndint", BcsvType::integer, intDef(160), std::nullopt,
-                     S::general, G::behavior, "Ground intercept",
-                     "Appears unused by the game; kept for compatibility."});
+                     S::general, G::behavior, "Ground intercept (no known effect)",
+                     "Nothing in the game's own camera notes explains this value. It is kept "
+                     "so old files still load bit for bit."});
     specs.push_back({"uplay", BcsvType::floatingPoint, floatDef(300.0F), std::nullopt,
-                     S::general, G::behavior, "Rise start (Y)",
-                     "How high the target must go before the camera starts moving up."});
+                     S::general, G::behavior, "Follow-up height",
+                     "How high the target must climb before the camera starts rising "
+                     "to follow it."});
     specs.push_back({"lplay", BcsvType::floatingPoint, floatDef(800.0F), std::nullopt,
-                     S::general, G::behavior, "Sink start (Y)",
-                     "How low the target must go before the camera starts moving down."});
+                     S::general, G::behavior, "Follow-down depth",
+                     "How low the target must drop before the camera starts sinking "
+                     "to follow it."});
     specs.push_back({"pushdelay", BcsvType::integer, intDef(120), std::nullopt,
-                     S::general, G::behavior, "Upper bound delay (frames)",
-                     "Activation time in frames for the upper screen bound."});
+                     S::general, G::behavior, "Top edge delay (frames)",
+                     "How long the target can push against the top of the screen before "
+                     "the camera gives way."});
     specs.push_back({"pushdelaylow", BcsvType::integer, intDef(120), std::nullopt,
-                     S::general, G::behavior, "Lower bound delay (frames)",
-                     "Activation time in frames for the lower screen bound."});
+                     S::general, G::behavior, "Bottom edge delay (frames)",
+                     "How long the target can push against the bottom of the screen "
+                     "before the camera gives way."});
     specs.push_back({"udown", BcsvType::integer, intDef(120), std::nullopt,
-                     S::general, G::behavior, "Udown",
-                     "Appears unused by the game; kept for compatibility."});
+                     S::general, G::behavior, "Udown (no known effect)",
+                     "Nothing in the game's own camera notes explains this value. It is kept "
+                     "so old files still load bit for bit."});
     specs.push_back({"upper", BcsvType::floatingPoint, floatDef(0.3F), std::nullopt,
-                     S::general, G::behavior, "Upper screen bound",
-                     "Upper screen bound relative to the centre of the screen."});
+                     S::general, G::behavior, "Top edge margin",
+                     "How close the target may get to the top of the screen before the "
+                     "camera starts moving. Smaller keeps the target freer."});
     specs.push_back({"lower", BcsvType::floatingPoint, floatDef(0.1F), std::nullopt,
-                     S::general, G::behavior, "Lower screen bound",
-                     "Lower screen bound relative to the centre of the screen."});
+                     S::general, G::behavior, "Bottom edge margin",
+                     "How close the target may get to the bottom of the screen before "
+                     "the camera starts moving. Smaller keeps the target freer."});
     specs.push_back({"evfrm", BcsvType::integer, intDef(0), std::nullopt,
-                     S::event, G::behavior, "Event length (frames)",
-                     "How many frames this event camera stays active (e: cameras only)."});
+                     S::event, G::behavior, "Cutscene length (frames)",
+                     "How long this cutscene camera stays on before handing back "
+                     "control (cutscene cameras only)."});
     specs.push_back({"evpriority", BcsvType::integer, intDef(1), std::nullopt,
-                     S::event, G::behavior, "Event priority",
-                     "Event camera priority; the game always uses 1."});
+                     S::event, G::behavior, "Cutscene priority",
+                     "Which cutscene camera wins when several want control. The game "
+                     "always uses 1; leave it."});
     specs.push_back({"vpanuse", BcsvType::integer, intDef(1), std::nullopt,
-                     S::general, G::behavior, "Enable vertical pan",
-                     "Enables the Camera Height Arrangement."});
+                     S::general, G::behavior, "Follow height automatically",
+                     "Lets the camera slide up and down as the target climbs or drops. "
+                     "Turn it off to lock the camera's height."});
 
     // ---- flags ----
+    // Every one of these is an on/off switch stored as 0/1 in the file. The
+    // labels say what turning it ON does, so the panel can draw checkboxes.
     specs.push_back({"flag.noreset", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::flags, "No reset",
-                     "Disables the camera reset performed when this camera activates."});
+                     S::general, G::flags, "Skip the reset when this camera starts",
+                     "When on, this camera does not do the usual position reset as it "
+                     "activates. The game's own notes do not describe the exact effect, so "
+                     "only turn it on when copying a stage that already sets it."});
     specs.push_back({"flag.nofovy", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::flags, "Enable field of view",
-                     "When set, this camera's field of view takes effect."});
+                     S::general, G::flags, "Use this camera's zoom",
+                     "When on, this camera's Zoom (field of view) is allowed to change. When "
+                     "off, the zoom stays whatever the previous camera used."});
     specs.push_back({"flag.lofserpoff", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::flags, "Snap offsets",
-                     "loffset/loffsetv snap into place instead of interpolating."});
+                     S::general, G::flags, "Snap shifts instantly",
+                     "When on, the Forward/Up shifts above jump into place instead of "
+                     "gliding."});
     specs.push_back({"flag.antibluroff", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::flags, "Disable anti-blur",
-                     "Disables the smoothing applied while the camera rotates."});
+                     S::general, G::flags, "Turn off motion smoothing",
+                     "When on, the camera stops smoothing its turns, so fast spins look "
+                     "raw and immediate."});
     specs.push_back({"flag.collisionoff", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::flags, "Ignore collision",
-                     "Camera moves through map geometry instead of colliding with it."});
+                     S::general, G::flags, "See through walls",
+                     "When on, the camera passes through map geometry instead of being "
+                     "pushed out of it. Handy indoors; risky outdoors."});
     specs.push_back({"flag.subjectiveoff", BcsvType::integer, intDef(0), std::nullopt,
-                     S::general, G::flags, "Disable first person",
-                     "Disables the first-person camera for this camera."});
+                     S::general, G::flags, "Block first-person view",
+                     "When on, the player cannot switch to the first-person view while "
+                     "this camera is active."});
     specs.push_back({"gflag.enableEndErpFrame", BcsvType::integer, intDef(0), std::nullopt,
-                     S::game, G::flags, "Group: use end blend",
-                     "Deactivating this camera uses gflag.camendint instead of the new "
-                     "camera's blend time (c:/g:/s: cameras only)."});
+                     S::game, G::flags, "Area: slow farewell",
+                     "When on, leaving this area/spawn camera glides out over its own "
+                     "farewell time below (area/spawn cameras only)."});
     specs.push_back({"gflag.thru", BcsvType::integer, intDef(0), std::nullopt,
-                     S::game, G::flags, "Group: through",
-                     "Group transition flag for c:/g:/s: cameras."});
+                     S::game, G::flags, "Area: pass through",
+                     "A group transition switch for area/spawn cameras. The game's own notes "
+                     "leave its exact effect unstated, so change it only when copying a "
+                     "stage that already sets it."});
     specs.push_back({"gflag.camendint", BcsvType::integer, intDef(120), std::nullopt,
-                     S::game, G::flags, "Group: end blend (frames)",
-                     "Deactivation time in frames for this camera (c:/g:/s: cameras only)."});
+                     S::game, G::flags, "Area: farewell time (frames)",
+                     "How many frames leaving this camera takes when the farewell "
+                     "switch above is on (area/spawn cameras only)."});
     specs.push_back({"eflag.enableEndErpFrame", BcsvType::integer, intDef(0), std::nullopt,
-                     S::event, G::flags, "Event: use end blend",
-                     "Event camera deactivation blends over its own end time (e: cameras only)."});
+                     S::event, G::flags, "Cutscene: slow farewell",
+                     "When on, this cutscene camera glides out over its own farewell "
+                     "time instead of handing off instantly (cutscene cameras only)."});
     specs.push_back({"eflag.enableErpFrame", BcsvType::integer, intDef(0), std::nullopt,
-                     S::event, G::flags, "Event: enable blend",
-                     "Event camera activation blends in over camint frames (e: cameras only)."});
+                     S::event, G::flags, "Cutscene: gentle arrival",
+                     "When on, this cutscene camera glides in over the Switch speed "
+                     "above instead of cutting in (cutscene cameras only)."});
     return specs;
 }
 

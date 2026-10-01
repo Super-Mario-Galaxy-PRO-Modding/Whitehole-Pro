@@ -48,6 +48,14 @@
  The solver also sanitises its inputs now (section 4), because a hand-edited row
  can carry a literal NaN and one NaN in a pose is an invisible viewport.
 
+   [done]  THE WORDING. The panel no longer speaks LaunchCamPlus: every field
+           has a plain-English label + tooltip (plain-English layer, section 8),
+           the camtype row is "Camera style" in human words first, angles show as
+           degrees (converted back to radians on commit), switches draw as
+           checkboxes, and a "Show every setting" switch hides the rare fields
+           while still surfacing any flag the row already stores. Labels only:
+           names, types, defaults and round trips are untouched.
+
  What is NOT verified in this session: the five manual checks in section 8.5,
  which need a person clicking a real map.
 
@@ -514,8 +522,10 @@
      cameraSupportTooltip, cameraDefaultText, cameraTypesForVersion,
      cameraIdTaken, nextFreeCubeCameraId, looksLikeStartObject,
      cameraTargetChoice, endCameraPreview, applyCameraPreview,
-     drawCameraTypeEditor.
-   EditorState members: showCamerasPanel, cameraSelectedRow, cameraPreviewOpen,
+     drawCameraTypeEditor, drawCameraFieldRow, cameraFieldIsCommonShotControl,
+     cameraEngineName.
+   EditorState members: showCamerasPanel, cameraAdvancedMode, cameraSelectedRow,
+     cameraPreviewOpen,
      cameraPreviewRow, cameraPreviewTarget, cameraTargetManual,
      cameraTargetOverride, cameraNewId, cameraNewType.
    Wiring: View > "Cameras", DockBuilderDockWindow("Cameras", dockRight),
@@ -529,6 +539,36 @@
  8.0-8.4 below are the contract the code was written against; re-read them
  (and update them) when you touch the panel. 8.5 is the checklist that is
  still open.
+
+  THE PLAIN-ENGLISH LAYER (added after the panel shipped, because LaunchCamPlus'
+  vocabulary - camtype/angleA/woffset/fovy/nofovy - is not self-explanatory to
+  anyone who did not write a BCAM tool):
+   - Every field spec (camera_param.cpp, buildFieldSpecs) carries a human label
+     and tooltip that say what the number DOES ("Distance", "Height angle
+     (radians)", "Use this camera's zoom", "See through walls"). Field NAMES,
+     types, defaults and ordering are UNCHANGED: only label/tooltip text moved,
+     so hashes, round trips and the CLI are untouched. Keep them factual:
+     flag.noreset and gflag.thru are undocumented upstream, so their tooltips say
+     so instead of inventing behaviour; flag.nofovy's documented reading ("if
+     enabled, the FoV can be changed") is what the label says.
+   - drawCameraFieldRow is the single parameter-row renderer (label, grey/white
+     provenance, tooltip, widget). drawCamerasPanel only filters and orders. Two
+     display-only conveniences live in the row: roll/angleA/angleB show DEGREES
+     and convert back to the file's radians on commit, and the switch fields
+     (CameraFieldGroup::flags plus vpanuse) draw as checkboxes instead of number
+     boxes. A stored value outside 0/1 still round-trips and reads as checked;
+     unchecking writes a clean 0.
+   - The camtype column is drawn once, as the "Camera style" row under the id, in
+     BOTH modes; drawCameraFieldRow skips it by name so it cannot appear twice.
+   - cameraAdvancedMode (EditorState, default false) is set by the "Show every
+     setting" checkbox and picks between the common shot controls
+     (cameraFieldIsCommonShotControl) and every applicable column. Simple mode
+     ALSO shows any switch the row already stores, so a saved flag can never hide
+     behind the checkbox - that rule is what makes the filter safe. It is a view
+     filter only: nothing stored, solved or undone differs between the modes.
+   - fovy is gated by flag.nofovy in game, so the Zoom row prints a hint while
+     that switch is off. Use the same pattern for any future gated field.
+
 
 
  8.0 THE FICTION THAT WAS REVERTED - do not repeat it. The draft assumed:
@@ -600,20 +640,21 @@
        grep for it.
      - Per field: cameraFieldSpecs() in order, filtered by
        cameraFieldApplies(spec.scope, cam.context), grouped by spec.group, using
-       spec.label + spec.tooltip. A column the sparse file does not store shows a
-       DIM name (nothing is hidden: the widget still shows the value the row
-       solves with), and hovering it gives the exact engine default for this
+       spec.label + spec.tooltip (both are plain English now - see the
+       plain-English layer note above). A column the sparse file does not store
+       shows a DIM name (nothing is hidden: the widget still shows the value the
+       row solves with), and hovering it gives the exact engine default for this
        row's version. That distinction is the single most useful thing in a BCAM
        editor, because a value the file omits can differ per version.
-     - A support badge, shown as "Pose: exact | approximate | not reproducible
-       outside the game", taken from the PoseSupport the solver reported. "none"
-       is NOT an error - it means the type is dynamic-only in game.
+     - A support badge, shown as "Exact preview | Close preview | Cannot preview
+       (game-only)", taken from the PoseSupport the solver reported. "none" is NOT
+       an error - it means the type is dynamic-only in game.
      - Editing any camera field goes through edit::mutateCameras (section 4) and
        then updateCameraPreview with the freshly solved pose. Label the undo
-       entry with the field name ("Set fovy"), and do not push one entry per
-       slider frame: mutateCameras already no-ops when nothing changed, but a
-       dragged ImGui slider fires constantly - commit on release, or debounce by
-       comparing against the last applied value.
+       entry with the field's plain label ("Change Distance"), and do not push one
+       entry per slider frame: mutateCameras already no-ops when nothing changed,
+       but a dragged ImGui slider fires constantly - commit on release, or debounce
+       by comparing against the last applied value.
 
  8.5 BUILD + PROOF
      Build both toolchains, run the tests, then the manual pass. What THIS
@@ -752,7 +793,8 @@
  bfc2bd2  Viewport: look through a solved BCAM camera (preview mode)
  8f70eb3  docs: add BLUEPRINT.txt, the cross-session handoff notes
  85ab818  feat(cameras): the Cameras panel (list, edit, live preview)
-  this     chore(repo): stop tracking build-check output, document Cameras  <- HEAD
+  5600e5c  chore(repo): stop tracking build-check output, document Cameras
+  this     feat(cameras): plain-English Cameras panel (labels, degrees, simple view)  <- HEAD
 
  Three of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
@@ -782,6 +824,11 @@
     and ctest passed on both. 8.5 is unrunnable from a shell and still open.
  5) This file updated in the same commit as the code it describes. Done just
     below this line.
+ 6) The panel must not require LaunchCamPlus literacy to read. The wording pass
+    (plain labels/tooltips, degrees, checkboxes, "Show every setting") has to
+    leave the data layer untouched: same names, same hashes, same defaults, same
+    round trip. DONE - testCameraParam and the byte-exact round trip still pass
+    on MinGW and MSVC; only label/tooltip strings and the panel's widgets changed.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

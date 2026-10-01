@@ -188,6 +188,12 @@ struct EditorState {
     std::optional<std::size_t> cameraSelectedRow;
     bool cameraPreviewOpen{false};
     std::optional<std::size_t> cameraPreviewRow;
+    // Simple/Advanced switch for the Cameras panel. Simple shows the handful
+    // of shot controls most authors touch (type, lens, distance, angles,
+    // offsets, blend); Advanced shows every stored column, grouped, exactly
+    // like before. This is a view filter only: it never changes what is
+    // stored, solved or undone.
+    bool cameraAdvancedMode{false};
     // The point the last solve was aimed at, cached so the panel can show it
     // back. The game tracks Mario; the editor has no running Mario, so the
     // panel resolves one (see cameraTargetChoice) and lets the author override
@@ -3066,12 +3072,41 @@ void drawPropertiesPanel(EditorState& state) {
 // content-sized, so a long field name cannot shove the widget off the edge.
 constexpr float kCameraFieldLabelWidth = 150.0F;
 
+// Degrees in a degree/radian pair the panel edits in. The file itself always
+// stores radians; these two are what the widgets convert with, and they are
+// file-scope so the row renderer and the pose readout cannot drift apart.
+constexpr double kRadToDeg = 57.29577951308232;
+constexpr double kDegToRad = 0.017453292519943295;
+
+// The handful of settings most cameras are tuned with, in the order the panel
+// lists them. Simple mode shows exactly these, plus any switch the row already
+// saves -- a stored flag must never hide behind "Show every setting", or an
+// author would tune a camera that still behaves the way the hidden flag says.
+// This is a view filter only: neither mode changes what the file stores.
+bool cameraFieldIsCommonShotControl(const smg::CameraFieldSpec& spec) {
+    static constexpr const char* kCommon[] = {
+        "dist",    "fovy",     "angleA",   "angleB",   "roll",
+        "loffset", "loffsetv", "woffset.Y", "string",  "camint",
+        "vpanuse",
+    };
+    for (const char* name : kCommon) {
+        if (spec.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The groups the panel sections the Advanced parameter list into. Kept plain
+// on purpose: "Identity" was the old LaunchCamPlus bucket name for the three
+// required columns (id/camtype/version, edited elsewhere), and "Behavior" vs
+// "Flags" split timing from on/off switches the same way the game data does.
 const char* cameraGroupLabel(smg::CameraFieldGroup group) {
     switch (group) {
     case smg::CameraFieldGroup::identity: return "Identity";
-    case smg::CameraFieldGroup::framing: return "Framing";
-    case smg::CameraFieldGroup::behavior: return "Behavior";
-    case smg::CameraFieldGroup::flags: return "Flags";
+    case smg::CameraFieldGroup::framing: return "Shot setup";
+    case smg::CameraFieldGroup::behavior: return "Movement and timing";
+    case smg::CameraFieldGroup::flags: return "Switches";
     }
     return "Parameters";
 }
@@ -3086,9 +3121,9 @@ const char* cameraEngineName(std::uint32_t version) {
 // the difference between an author trusting the preview and filing a bug.
 const char* cameraSupportLabel(smg::PoseSupport support) {
     switch (support) {
-    case smg::PoseSupport::exact: return "exact";
-    case smg::PoseSupport::spherical: return "approximate";
-    case smg::PoseSupport::none: return "not reproducible outside the game";
+    case smg::PoseSupport::exact: return "Exact preview";
+    case smg::PoseSupport::spherical: return "Close preview";
+    case smg::PoseSupport::none: return "Cannot preview (game-only)";
     }
     return "unknown";
 }
@@ -3096,14 +3131,15 @@ const char* cameraSupportLabel(smg::PoseSupport support) {
 const char* cameraSupportTooltip(smg::PoseSupport support) {
     switch (support) {
     case smg::PoseSupport::exact:
-        return "The preview reproduces the decompiled translator for this camtype.";
+        return "Exact preview: what you see is what the game shows for this camera type.";
     case smg::PoseSupport::spherical:
-        return "The eye sits on the same angleA/angleB/dist sphere the game uses, but "
-               "the look-at point is the tracked target rather than a live game object.";
+        return "Close preview: the camera sits at the right distance and height, but it "
+               "aims at the tracked target below instead of a live game object, so the "
+               "angle can differ slightly.";
     case smg::PoseSupport::none:
-        return "The game solves this camtype from live state (cutscene, animation, boss "
-               "logic), so the preview shows the eye the entry declares and cannot "
-               "reproduce the real shot.";
+        return "Cannot preview: the game builds this shot from live state (cutscene, "
+               "animation or boss logic), so the panel only shows the stored eye point, "
+               "not the real shot.";
     }
     return "";
 }
@@ -3258,33 +3294,33 @@ bool applyCameraPreview(EditorState& state) {
     return true;
 }
 
-// The camtype combo for one row. Switching class changes how every other column
-// is interpreted, so it goes through the same undo path as any field edit, and
-// the support badge above it updates in the same frame. A camtype this registry
-// does not know is a modder's own class: it is shown verbatim and never
-// silently rewritten.
+// The camtype combo for one row, in plain words first. Switching class changes
+// how every other column is interpreted, so it goes through the same undo path
+// as any field edit, and the support badge above it updates in the same frame.
+// A camtype this registry does not know is a modder's own class: it is shown
+// verbatim and never silently rewritten.
 bool drawCameraTypeEditor(EditorState& state, std::size_t row, const std::string& stored,
                           std::uint32_t version) {
     const std::vector<const smg::CameraTypeInfo*> types = cameraTypesForVersion(version);
     const smg::CameraTypeInfo* known = smg::cameraTypeInfo(stored);
     std::string preview = stored;
     if (known != nullptr) {
-        preview = std::string(known->id);
+        preview = std::string(known->label);
         preview += "  (";
-        preview += known->label;
+        preview += known->id;
         preview += ")";
     }
     bool wrote = false;
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::BeginCombo("##camtype", preview.c_str())) {
         for (const smg::CameraTypeInfo* info : types) {
-            std::string label(info->id);
-            label += "  ";
-            label += info->label;
+            std::string label(info->label);
+            label += "  (";
+            label += info->id;
+            label += ")";
             if (!info->aliasOf.empty()) {
-                label += "  (alias of ";
+                label += "  -- old name for ";
                 label += info->aliasOf;
-                label += ")";
             }
             const bool selected = info->id == stored;
             if (ImGui::Selectable(label.c_str(), selected)) {
@@ -3293,7 +3329,7 @@ bool drawCameraTypeEditor(EditorState& state, std::size_t row, const std::string
                                             [row, picked](smg::CameraParamTable& cameras) {
                                                 cameras.setString(row, "camtype", picked);
                                             },
-                                            "Set camtype");
+                                            "Change camera style");
             }
             if (selected) {
                 ImGui::SetItemDefaultFocus();
@@ -3305,6 +3341,140 @@ bool drawCameraTypeEditor(EditorState& state, std::size_t row, const std::string
         ImGui::EndCombo();
     }
     return wrote;
+}
+
+// Draws one camera parameter row: friendly label, grey/white provenance,
+// hover help, and the widget that edits it through edit::mutateCameras.
+// Returns true when this row wrote the table. The camtype row is owned by
+// the "Camera style" picker above, so it is skipped here by name.
+bool drawCameraFieldRow(EditorState& state, smg::CameraParamTable& table, std::size_t row,
+                        const smg::CameraFieldSpec& spec, std::uint32_t version, int id) {
+    if (spec.name == "camtype") {
+        return false;
+    }
+    ImGui::PushID(id);
+    const std::string label =
+        spec.label.empty() ? std::string(spec.name) : std::string(spec.label);
+    const std::string tooltip(spec.tooltip);
+    const std::string undoLabel = "Change " + label;
+    const bool authored = table.hasColumn(spec.name);
+    bool fieldWrote = false;
+
+    // ImGui draws a widget's label to the RIGHT of the widget, which would push
+    // a long field name past the panel edge, so this grid draws its own fixed
+    // label column and hands the widgets a hidden "##" label.
+    ImGui::AlignTextToFramePadding();
+    if (authored) {
+        ImGui::TextUnformatted(label.c_str());
+    } else {
+        ImGui::TextDisabled("%s", label.c_str());
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        if (authored) {
+            ImGui::SetTooltip("%s\nSaved in this file as \"%s\".", tooltip.c_str(),
+                              std::string(spec.name).c_str());
+        } else {
+            ImGui::SetTooltip("%s\nSaved in this file as \"%s\".\nThis camera does not save "
+                              "it, so it uses the %s default (%s). Editing it saves it for "
+                              "every camera in the zone.",
+                              tooltip.c_str(), std::string(spec.name).c_str(),
+                              cameraEngineName(version),
+                              cameraDefaultText(spec, version).c_str());
+        }
+    }
+    ImGui::SameLine(kCameraFieldLabelWidth);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+
+    if (spec.type == smg::BcsvType::floatingPoint) {
+        // Angles are friendlier in degrees, so this box shows degrees and
+        // converts back to the file's radians on commit. Zoom keeps its native
+        // degrees, and the fixed-point aim (axis.x/axis.y) is degrees in the
+        // file too, so both pass through untouched.
+        const bool degrees =
+            spec.name == "roll" || spec.name == "angleA" || spec.name == "angleB";
+        const float value = table.getFloat(row, spec.name);
+        float shown = degrees ? static_cast<float>(static_cast<double>(value) * kRadToDeg)
+                              : value;
+        ImGui::DragFloat("##value", &shown, degrees ? 0.5F : 0.1F, 0.0F, 0.0F,
+                         degrees ? "%.2f deg" : "%.4f");
+        if (degrees && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Shown in degrees. The file stores this one as radians (\"%s\"); "
+                              "this box converts both ways for you.",
+                              std::string(spec.name).c_str());
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            // Commit on release, not per slider frame: a dragged slider fires
+            // every frame, and one undo entry per frame would bury the history
+            // (mutateCameras would also record hundreds of steps).
+            const float applied =
+                degrees ? static_cast<float>(static_cast<double>(shown) * kDegToRad) : shown;
+            fieldWrote = edit::mutateCameras(
+                *state.stage, state.undoStack,
+                [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                    cameras.setFloat(row, name, applied);
+                },
+                undoLabel);
+        }
+    } else if (spec.type == smg::BcsvType::fixedString ||
+               spec.type == smg::BcsvType::stringOffset) {
+        char scratch[128]{};
+        std::snprintf(scratch, sizeof(scratch), "%s", table.getString(row, spec.name).c_str());
+        ImGui::InputText("##value", scratch, sizeof(scratch));
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            const std::string applied(scratch);
+            fieldWrote = edit::mutateCameras(
+                *state.stage, state.undoStack,
+                [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                    cameras.setString(row, name, applied);
+                },
+                undoLabel);
+        }
+    } else {
+        // integer / integer2 / shortInteger / byte. integer2 is the packed
+        // bitfield type, so it reads and writes as hex, like the BCSV editor's
+        // bitfield cells.
+        const bool packed =
+            spec.type == smg::BcsvType::integer2 || spec.type == smg::BcsvType::byte;
+        // The switch fields hold an on/off value, so a checkbox reads better
+        // than a number box: the label above it already says what turning it on
+        // does. A non-0/1 value still round-trips (it reads as checked) and
+        // unchecking writes a clean 0.
+        const bool onOff = !packed && (spec.group == smg::CameraFieldGroup::flags ||
+                                       spec.name == "vpanuse");
+        if (onOff) {
+            bool checked = table.getInt(row, spec.name) != 0;
+            if (ImGui::Checkbox("##value", &checked)) {
+                const std::int32_t applied = checked ? 1 : 0;
+                fieldWrote = edit::mutateCameras(
+                    *state.stage, state.undoStack,
+                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                        cameras.setInt(row, name, applied);
+                    },
+                    undoLabel);
+            }
+        } else {
+            int shown = static_cast<int>(table.getInt(row, spec.name));
+            ImGui::InputInt("##value", &shown, 1, 100,
+                            packed ? ImGuiInputTextFlags_CharsHexadecimal
+                                   : ImGuiInputTextFlags_None);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                const std::int32_t applied = static_cast<std::int32_t>(shown);
+                fieldWrote = edit::mutateCameras(
+                    *state.stage, state.undoStack,
+                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
+                        cameras.setInt(row, name, applied);
+                    },
+                    undoLabel);
+            }
+        }
+    }
+    // fovy is gated by flag.nofovy: with the switch off, the zoom this row asks
+    // for never reaches the screen, so say so right where the author is looking.
+    if (spec.name == "fovy" && table.getInt(row, "flag.nofovy") == 0) {
+        ImGui::TextDisabled("Takes effect only when \"Use this camera's zoom\" is on.");
+    }
+    ImGui::PopID();
+    return fieldWrote;
 }
 
 void drawCamerasPanel(EditorState& state) {
@@ -3378,7 +3548,8 @@ void drawCamerasPanel(EditorState& state) {
         ImGui::SeparatorText("New camera");
         ImGui::SetNextItemWidth(260.0F);
         ImGui::InputText("Id", state.cameraNewId, sizeof(state.cameraNewId));
-        ImGui::SetItemTooltip("c: / s: / e: / g: / o: -- the id the game looks the camera up by");
+        ImGui::SetItemTooltip("Which trigger uses this camera: c:000f = camera area 15, "
+                              "s:003c = spawn point 60, e: = cutscene, g: = group, o: = other");
         const std::vector<const smg::CameraTypeInfo*> types =
             cameraTypesForVersion(table.defaultVersion());
         if (state.cameraNewType < 0 ||
@@ -3387,19 +3558,21 @@ void drawCamerasPanel(EditorState& state) {
         }
         const smg::CameraTypeInfo* chosen =
             types.empty() ? nullptr : types[static_cast<std::size_t>(state.cameraNewType)];
-        const std::string preview = chosen != nullptr ? std::string(chosen->id)
-                                                      : std::string("(no classes for this game)");
+        const std::string preview = chosen != nullptr
+                                        ? std::string(chosen->label) + "  (" +
+                                              std::string(chosen->id) + ")"
+                                        : std::string("(no camera styles for this game)");
         ImGui::SetNextItemWidth(260.0F);
         if (ImGui::BeginCombo("Type", preview.c_str())) {
             for (std::size_t index = 0; index < types.size(); ++index) {
                 const smg::CameraTypeInfo* info = types[index];
-                std::string label(info->id);
-                label += "  ";
-                label += info->label;
+                std::string label(info->label);
+                label += "  (";
+                label += info->id;
+                label += ")";
                 if (!info->aliasOf.empty()) {
-                    label += "  (alias of ";
+                    label += "  -- old name for ";
                     label += info->aliasOf;
-                    label += ")";
                 }
                 const bool selected = static_cast<int>(index) == state.cameraNewType;
                 if (ImGui::Selectable(label.c_str(), selected)) {
@@ -3466,9 +3639,10 @@ void drawCamerasPanel(EditorState& state) {
             const smg::CameraId id = smg::parseCameraId(camera.id);
             const smg::CameraTypeInfo* info = smg::cameraTypeInfo(camera.camtype);
             // Friendly English first (the raw ids can carry Japanese event names
-            // the default font cannot draw), the stored camtype after it.
+            // the default font cannot draw), then the camera style in plain words;
+            // the raw class name only survives here when it is a modder's own.
             std::string label = smg::describeCameraId(id);
-            label += "  ";
+            label += "  -- ";
             label += info != nullptr ? std::string(info->label) : camera.camtype;
             const bool selected = state.cameraSelectedRow == camera.row;
             ImGui::PushID(static_cast<int>(camera.row));
@@ -3484,9 +3658,15 @@ void drawCamerasPanel(EditorState& state) {
             }
             ImGui::PopID();
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s\n%s\n%s", camera.id.c_str(),
-                                  smg::cameraContextLabel(id.context),
-                                  std::string(camera.camtype).c_str());
+                std::string hover(info != nullptr ? std::string(info->description)
+                                                  : std::string("Custom camera type (not built in)."));
+                hover += "\nStored id: ";
+                hover += camera.id;
+                hover += "  (";
+                hover += smg::cameraContextLabel(id.context);
+                hover += ")\nStored style: ";
+                hover += camera.camtype;
+                ImGui::SetTooltip("%s", hover.c_str());
             }
         }
     }
@@ -3507,8 +3687,13 @@ void drawCamerasPanel(EditorState& state) {
     const smg::CameraId identity = smg::parseCameraId(cameraId);
     const std::uint32_t version = table.engineVersion(row);
 
+    // Accumulates "did any row write the table this frame", which the tail of
+    // this panel turns into markDirty + a re-solve of the live preview.
+    bool wrote = false;
+
     ImGui::SeparatorText(smg::describeCameraId(identity).c_str());
-    ImGui::TextDisabled("%s  -  %s, engine %s", smg::cameraContextLabel(identity.context),
+    ImGui::TextDisabled("%s  -  stored as %s, game %s",
+                        smg::cameraContextLabel(identity.context),
                         smg::formatCameraId(identity).c_str(), cameraEngineName(version));
     ImGui::SameLine();
     if (ImGui::SmallButton("Copy id")) {
@@ -3518,14 +3703,26 @@ void drawCamerasPanel(EditorState& state) {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("The stored id, byte for byte:\n%s", cameraId.c_str());
     }
-    ImGui::TextDisabled("camtype %s", cameraTypeStored.c_str());
+    {
+        // The camera "style" IS the camtype column: renaming it here renames it in
+        // the file. Kept on its own labelled row so it reads as one choice.
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Camera style");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Which behaviour this row uses (follow, fixed, tower, ...). "
+                              "Stored in the file as \"camtype\".");
+        }
+        ImGui::SameLine(kCameraFieldLabelWidth);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        wrote = wrote || drawCameraTypeEditor(state, row, cameraTypeStored, version);
+    }
 
     // ---- preview -----------------------------------------------------------
     const smg::PoseSupport support = smg::cameraPoseSupport(cameraTypeStored, version);
     const bool previewLive = state.viewportReady && state.viewport.cameraPreviewActive();
     bool wanted = previewLive && state.cameraPreviewRow == row;
     ImGui::BeginDisabled(!state.viewportReady);
-    if (ImGui::Checkbox("Previewing", &wanted)) {
+    if (ImGui::Checkbox("Look through this camera", &wanted)) {
         if (wanted) {
             state.cameraPreviewOpen = true;
             state.cameraPreviewRow = row;
@@ -3545,23 +3742,28 @@ void drawCamerasPanel(EditorState& state) {
     const Rgba badge = support == smg::PoseSupport::exact       ? palette.accentFg
                        : support == smg::PoseSupport::spherical ? palette.unsaved
                                                                 : palette.textDim;
-    ImGui::TextColored(toImVec4(badge), "Pose: %s", cameraSupportLabel(support));
+    ImGui::TextColored(toImVec4(badge), "%s", cameraSupportLabel(support));
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s", cameraSupportTooltip(support));
     }
+    if (support == smg::PoseSupport::none) {
+        ImGui::TextDisabled("The game builds this shot while it runs, so turn the preview on "
+                            "to see the stored eye point, not the real shot.");
+    }
 
-    // ---- tracked target ----------------------------------------------------
+    // ---- what the camera follows ---------------------------------------------
     // The solver is given the point the game would be tracking (Mario). The
     // editor has no running Mario, so a point is resolved and SHOWN here rather
     // than hidden in the solve: a preview that silently frames the origin looks
     // exactly like a broken solver.
-    ImGui::SeparatorText("Tracked target");
+    ImGui::SeparatorText("What the camera follows");
     const CameraTargetChoice choice = cameraTargetChoice(state);
-    ImGui::TextDisabled("(%.1f, %.1f, %.1f)  from %s", static_cast<double>(choice.point.x),
-                        static_cast<double>(choice.point.y), static_cast<double>(choice.point.z),
-                        choice.source);
+    ImGui::TextDisabled("Aiming at (%.1f, %.1f, %.1f)  -- %s",
+                        static_cast<double>(choice.point.x),
+                        static_cast<double>(choice.point.y),
+                        static_cast<double>(choice.point.z), choice.source);
     bool manual = state.cameraTargetManual;
-    if (ImGui::Checkbox("Manual target", &manual)) {
+    if (ImGui::Checkbox("Aim at a point I type", &manual)) {
         if (manual) {
             // Seeded from the automatic choice, so ticking the box never jumps
             // the shot to the origin.
@@ -3571,8 +3773,8 @@ void drawCamerasPanel(EditorState& state) {
         (void)applyCameraPreview(state);
     }
     ImGui::SetItemTooltip(
-        "Track a point you type instead of the selection / start object. The game itself "
-        "tracks Mario here; the preview cannot know where he would be.");
+        "Aim at a point you type instead of the selection / start object. The game itself "
+        "aims at Mario here; the preview cannot know where he would be.");
     if (state.cameraTargetManual) {
         float values[3] = {state.cameraTargetOverride.x, state.cameraTargetOverride.y,
                            state.cameraTargetOverride.z};
@@ -3601,26 +3803,30 @@ void drawCamerasPanel(EditorState& state) {
     const smg::CameraPreviewParams params = smg::cameraPreviewParams(table, row);
     const math::Vec3f solveTarget = previewLive ? state.cameraPreviewTarget : choice.point;
     const smg::GameCameraPose pose = smg::solveGameCameraPose(params, solveTarget);
-    ImGui::TextDisabled("eye (%.0f, %.0f, %.0f) -> at (%.0f, %.0f, %.0f)",
+    ImGui::TextDisabled("Camera sits at (%.0f, %.0f, %.0f), looking at (%.0f, %.0f, %.0f)",
                         static_cast<double>(pose.eye.x), static_cast<double>(pose.eye.y),
                         static_cast<double>(pose.eye.z), static_cast<double>(pose.at.x),
                         static_cast<double>(pose.at.y), static_cast<double>(pose.at.z));
-    ImGui::TextDisabled("fovy %.1f deg  roll %.4f rad  dist %.1f",
-                        static_cast<double>(params.fovy), static_cast<double>(pose.rollRadians),
+    ImGui::TextDisabled("Zoom %.1f deg  tilt %.1f deg  distance %.1f",
+                        static_cast<double>(params.fovy),
+                        static_cast<double>(pose.rollRadians) * kRadToDeg,
                         static_cast<double>(params.dist));
 
-    // ---- parameters --------------------------------------------------------
-    // Every column the engine can carry, filtered to the ones this camera's id
-    // context actually uses and grouped the way the community documents them.
-    // The widget always shows the value the row solves with, whether it came
-    // from the file or from the engine default: a dim name means the file does
-    // not store that column at all (hover for the exact default). The sparse
-    // model only ever creates columns, never removes them, so a defaulted value
-    // stays defaulted until it is edited -- which is also what keeps an
-    // untouched file byte-exact through a round trip.
-    ImGui::SeparatorText("Parameters");
-    ImGui::TextDisabled("Dim name = engine default, bright = stored value.");
-    bool wrote = false;
+    // ---- shot controls -----------------------------------------------------
+    // Simple mode shows the handful of settings that shape the visible shot;
+    // "Show every setting" reveals every column the game can store, grouped. The
+    // widget always shows the value the row solves with, whether it came from the
+    // file or from the game default: a grey name means the file does not store
+    // that column at all (hover for the exact default). Editing a defaulted value
+    // creates the column for every camera -- the sparse model only ever creates
+    // columns, which is also what keeps an untouched file byte-exact.
+    bool advanced = state.cameraAdvancedMode;
+    if (ImGui::Checkbox("Show every setting", &advanced)) {
+        state.cameraAdvancedMode = advanced;
+    }
+    ImGui::SetItemTooltip("Off: the common shot controls. On: every value the file can "
+                          "store, grouped. Same camera either way.");
+    ImGui::TextDisabled("Grey name = game default, white = saved in this file.");
     int lastGroup = -1;
     const std::vector<smg::CameraFieldSpec>& specs = smg::cameraFieldSpecs();
     for (std::size_t specIndex = 0; specIndex < specs.size(); ++specIndex) {
@@ -3628,111 +3834,28 @@ void drawCamerasPanel(EditorState& state) {
         // id and version are identity, not parameters: the id decides which part
         // of the stage activates the camera, and the version decides which
         // defaults every other column resolves to. "Add camera" sets both, and
-        // editing them in place would silently reinterpret the whole row.
-        if (spec.name == "id" || spec.name == "version") {
+        // editing them in place would silently reinterpret the whole row. camtype
+        // is identity too and is drawn as its own "Camera style" row above the
+        // preview, so skipping it here also keeps its section header empty.
+        if (spec.name == "id" || spec.name == "version" || spec.name == "camtype") {
             continue;
         }
         if (!smg::cameraFieldApplies(spec.scope, identity.context)) {
+            continue;
+        }
+        // Simple mode keeps a hand-picked list of the controls that shape the
+        // visible shot, plus any switch this row already saves (see
+        // cameraFieldIsCommonShotControl). Everything else lives one checkbox up.
+        if (!advanced && !cameraFieldIsCommonShotControl(spec) &&
+            !(spec.group == smg::CameraFieldGroup::flags && table.hasColumn(spec.name))) {
             continue;
         }
         if (lastGroup != static_cast<int>(spec.group)) {
             lastGroup = static_cast<int>(spec.group);
             ImGui::SeparatorText(cameraGroupLabel(spec.group));
         }
-        ImGui::PushID(static_cast<int>(specIndex));
-        const std::string label =
-            spec.label.empty() ? std::string(spec.name) : std::string(spec.label);
-        const std::string tooltip(spec.tooltip);
-        const std::string undoLabel = "Set " + std::string(spec.name);
-        const bool authored = table.hasColumn(spec.name);
-        bool fieldWrote = false;
-
-        // ImGui draws a widget's label to the RIGHT of the widget, which would
-        // push a long field name past the panel edge, so this grid draws its own
-        // fixed label column and hands the widgets a hidden "##" label.
-        ImGui::AlignTextToFramePadding();
-        if (authored) {
-            ImGui::TextUnformatted(label.c_str());
-        } else {
-            ImGui::TextDisabled("%s", label.c_str());
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            if (authored) {
-                ImGui::SetTooltip("%s\nField: %s", tooltip.c_str(),
-                                  std::string(spec.name).c_str());
-            } else {
-                ImGui::SetTooltip("%s\nField: %s\nThe file does not store this column, so the "
-                                  "row runs on the %s engine default (%s). Editing it creates "
-                                  "the column for every camera in the table.",
-                                  tooltip.c_str(), std::string(spec.name).c_str(),
-                                  cameraEngineName(version),
-                                  cameraDefaultText(spec, version).c_str());
-            }
-        }
-        ImGui::SameLine(kCameraFieldLabelWidth);
-        ImGui::SetNextItemWidth(-FLT_MIN);
-
-        if (spec.name == "camtype") {
-            fieldWrote = drawCameraTypeEditor(state, row, cameraTypeStored, version);
-        } else if (spec.type == smg::BcsvType::floatingPoint) {
-            float value = table.getFloat(row, spec.name);
-            ImGui::DragFloat("##value", &value, 0.1F, 0.0F, 0.0F, "%.4f");
-            if (ImGui::IsItemActive() &&
-                (spec.name == "angleA" || spec.name == "angleB" || spec.name == "roll")) {
-                // These three are file-native radians; the readout while dragging
-                // adds the degrees an author actually thinks in.
-                ImGui::SetTooltip("%s = %.4f rad (%.2f deg)", label.c_str(),
-                                  static_cast<double>(value),
-                                  static_cast<double>(value) * 57.29577951308232);
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                // Committed on release, not per frame: a dragged slider fires
-                // every frame, and one undo entry per frame would bury the
-                // history (mutateCameras would also record hundreds of steps).
-                const float applied = value;
-                fieldWrote = edit::mutateCameras(
-                    *state.stage, state.undoStack,
-                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
-                        cameras.setFloat(row, name, applied);
-                    },
-                    undoLabel);
-            }
-        } else if (spec.type == smg::BcsvType::fixedString ||
-                   spec.type == smg::BcsvType::stringOffset) {
-            char scratch[128]{};
-            std::snprintf(scratch, sizeof(scratch), "%s", table.getString(row, spec.name).c_str());
-            ImGui::InputText("##value", scratch, sizeof(scratch));
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                const std::string applied(scratch);
-                fieldWrote = edit::mutateCameras(
-                    *state.stage, state.undoStack,
-                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
-                        cameras.setString(row, name, applied);
-                    },
-                    undoLabel);
-            }
-        } else {
-            // integer / integer2 / shortInteger / byte. integer2 is the packed
-            // bitfield type, so it reads and writes as hex, like the BCSV
-            // editor's bitfield cells.
-            const bool packed =
-                spec.type == smg::BcsvType::integer2 || spec.type == smg::BcsvType::byte;
-            int shown = static_cast<int>(table.getInt(row, spec.name));
-            ImGui::InputInt("##value", &shown, 1, 100,
-                            packed ? ImGuiInputTextFlags_CharsHexadecimal
-                                   : ImGuiInputTextFlags_None);
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                const std::int32_t applied = static_cast<std::int32_t>(shown);
-                fieldWrote = edit::mutateCameras(
-                    *state.stage, state.undoStack,
-                    [row, name = std::string(spec.name), applied](smg::CameraParamTable& cameras) {
-                        cameras.setInt(row, name, applied);
-                    },
-                    undoLabel);
-            }
-        }
-        ImGui::PopID();
-        wrote = wrote || fieldWrote;
+        wrote = wrote || drawCameraFieldRow(state, table, row, spec, version,
+                                            static_cast<int>(specIndex));
     }
 
     if (wrote) {
@@ -4888,15 +5011,27 @@ const std::vector<TutorialTopic>& tutorialTopics() {
              {"Labels toggles the floating object names in the 3D view.", TutorialAction::None},
              {"Real game models appear with a game directory open; archives alone show placeholders.", TutorialAction::None},
          }},
-        {"Preview in-game cameras", "camera bcam cameraparam preview fovy follow eyepos zoom field of view",
+        {"Preview in-game cameras", "camera bcam cameraparam preview fovy follow eyepos zoom field of view degrees",
          {
              {"View > Cameras opens the panel that edits this zone's CameraParam.bcam table.",
               TutorialAction::None},
-             {"Pick a row, then tick Previewing: the viewport looks through that camera.",
+             {"Pick a row, then tick \"Look through this camera\": the viewport looks through that "
+              "camera from the numbers on screen.",
               TutorialAction::None},
-             {"The badge says how faithful the preview is: exact, approximate, or not reproducible outside the game.", TutorialAction::None},
-             {"The tracked target is shown above the parameters; the game tracks Mario, so set a manual target to frame a specific spot.", TutorialAction::None},
-             {"Any click or drag in the viewport ends the preview and restores the editor camera exactly.", TutorialAction::None},
+             {"The badge tells you how faithful the preview is: Exact preview, Close preview, or "
+              "Cannot preview (game-only).",
+              TutorialAction::None},
+             {"\"What the camera follows\" shows the point the shot is aimed at; the game aims at "
+              "Mario, so tick \"Aim at a point I type\" to frame a spot yourself.",
+              TutorialAction::None},
+             {"Angles are shown in degrees and converted for you; the file itself stores radians.",
+              TutorialAction::None},
+             {"\"Show every setting\" reveals every value the file can hold, grouped, with the "
+              "game's own default in each tooltip.",
+              TutorialAction::None},
+             {"Any click or drag in the viewport ends the preview and restores the editor camera "
+              "exactly.",
+              TutorialAction::None},
          }},
         {"Save your work", "save write disk ctrl+s unsaved",
          {

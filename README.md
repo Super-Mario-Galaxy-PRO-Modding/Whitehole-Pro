@@ -68,9 +68,11 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - Stored in your user config folder — survives reinstalls, never committed.
 
 ### 🎥 In-game cameras (CameraParam.bcam)
-- **View > Cameras** edits the zone's camera table: every row with its authored vs engine-default values, per-field tooltips, add/remove rows.
+- **View > Cameras** edits the zone's camera table: every row with its authored vs engine-default values, plain-English tooltips, add/remove rows.
+- **Shot controls by default** — distance, zoom, height/side angles, offsets, blend speed. Ticking **Show every setting** reveals every value the file can hold, grouped.
 - **Live preview** solves the selected row into the viewport (eye/at + FOV + roll), framed on the selected object / start position / manual target.
-- Every edit is undoable (`Ctrl+Z`); rows the game's cutscene system owns show as "not reproducible outside the game" instead of guessing.
+- **Angles read in degrees** (the file's radians are converted for you), switches are checkboxes, and every edit is one undo step (`Ctrl+Z`).
+- Rows the game's cutscene system owns show as "Cannot preview (game-only)" instead of guessing.
 
 ### 💻 CLI — the same engine, scriptable
 - `map objects`, `map paths`, `objectdb check`, `hash`, `bcsv inspect`, and more.

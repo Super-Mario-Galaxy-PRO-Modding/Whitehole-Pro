@@ -3303,24 +3303,21 @@ bool drawCameraTypeEditor(EditorState& state, std::size_t row, const std::string
                           std::uint32_t version) {
     const std::vector<const smg::CameraTypeInfo*> types = cameraTypesForVersion(version);
     const smg::CameraTypeInfo* known = smg::cameraTypeInfo(stored);
-    std::string preview = stored;
-    if (known != nullptr) {
-        preview = std::string(known->label);
-        preview += "  (";
-        preview += known->id;
-        preview += ")";
-    }
+    // Plain words in the box. The raw class name still exists -- it is what the
+    // file stores -- but it lives on hover instead of in the reading path, so a
+    // modder can find it and nobody else has to read CAM_TYPE soup.
+    const std::string preview = known != nullptr ? std::string(known->label) : stored;
     bool wrote = false;
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::BeginCombo("##camtype", preview.c_str())) {
         for (const smg::CameraTypeInfo* info : types) {
             std::string label(info->label);
-            label += "  (";
-            label += info->id;
-            label += ")";
             if (!info->aliasOf.empty()) {
-                label += "  -- old name for ";
-                label += info->aliasOf;
+                const smg::CameraTypeInfo* target = smg::cameraTypeInfo(info->aliasOf);
+                label += "  (old name for ";
+                label += target != nullptr ? std::string(target->label)
+                                           : std::string(info->aliasOf);
+                label += ")";
             }
             const bool selected = info->id == stored;
             if (ImGui::Selectable(label.c_str(), selected)) {
@@ -3335,7 +3332,10 @@ bool drawCameraTypeEditor(EditorState& state, std::size_t row, const std::string
                 ImGui::SetItemDefaultFocus();
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", std::string(info->description).c_str());
+                std::string tip(info->description);
+                tip += "\nStored in the file as: ";
+                tip += info->id;
+                ImGui::SetTooltip("%s", tip.c_str());
             }
         }
         ImGui::EndCombo();
@@ -3506,8 +3506,12 @@ void drawCamerasPanel(EditorState& state) {
         endCameraPreview(state);
     }
 
-    ImGui::TextDisabled("%d camera%s in CameraParam.bcam", static_cast<int>(rowCount),
+    ImGui::TextDisabled("%d camera%s in this zone", static_cast<int>(rowCount),
                         rowCount == 1 ? "" : "s");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("All of them live in one file per zone:\n"
+                          "/Stage/camera/CameraParam.bcam");
+    }
     // An empty table is NORMAL, not an error: many stages ship no
     // CameraParam.bcam at all, and StageArchive swallows a corrupt one back to
     // an empty table, so "no cameras" covers all three cases.
@@ -3547,7 +3551,7 @@ void drawCamerasPanel(EditorState& state) {
     if (ImGui::BeginPopup("##addcamera")) {
         ImGui::SeparatorText("New camera");
         ImGui::SetNextItemWidth(260.0F);
-        ImGui::InputText("Id", state.cameraNewId, sizeof(state.cameraNewId));
+        ImGui::InputText("Trigger id", state.cameraNewId, sizeof(state.cameraNewId));
         ImGui::SetItemTooltip("Which trigger uses this camera: c:000f = camera area 15, "
                               "s:003c = spawn point 60, e: = cutscene, g: = group, o: = other");
         const std::vector<const smg::CameraTypeInfo*> types =
@@ -3558,21 +3562,22 @@ void drawCamerasPanel(EditorState& state) {
         }
         const smg::CameraTypeInfo* chosen =
             types.empty() ? nullptr : types[static_cast<std::size_t>(state.cameraNewType)];
-        const std::string preview = chosen != nullptr
-                                        ? std::string(chosen->label) + "  (" +
-                                              std::string(chosen->id) + ")"
-                                        : std::string("(no camera styles for this game)");
+        // Plain words in the box and in the list; the raw class name moves to
+        // the hover tooltip, same as the style picker on the row below.
+        const std::string preview =
+            chosen != nullptr ? std::string(chosen->label)
+                              : std::string("(no camera styles for this game)");
         ImGui::SetNextItemWidth(260.0F);
-        if (ImGui::BeginCombo("Type", preview.c_str())) {
+        if (ImGui::BeginCombo("Camera style", preview.c_str())) {
             for (std::size_t index = 0; index < types.size(); ++index) {
                 const smg::CameraTypeInfo* info = types[index];
                 std::string label(info->label);
-                label += "  (";
-                label += info->id;
-                label += ")";
                 if (!info->aliasOf.empty()) {
-                    label += "  -- old name for ";
-                    label += info->aliasOf;
+                    const smg::CameraTypeInfo* target = smg::cameraTypeInfo(info->aliasOf);
+                    label += "  (old name for ";
+                    label += target != nullptr ? std::string(target->label)
+                                               : std::string(info->aliasOf);
+                    label += ")";
                 }
                 const bool selected = static_cast<int>(index) == state.cameraNewType;
                 if (ImGui::Selectable(label.c_str(), selected)) {
@@ -3582,12 +3587,15 @@ void drawCamerasPanel(EditorState& state) {
                     ImGui::SetItemDefaultFocus();
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", std::string(info->description).c_str());
+                    std::string tip(info->description);
+                    tip += "\nStored in the file as: ";
+                    tip += info->id;
+                    ImGui::SetTooltip("%s", tip.c_str());
                 }
             }
             ImGui::EndCombo();
         }
-        ImGui::SetItemTooltip("The camera class the game instantiates for this row");
+        ImGui::SetItemTooltip("How this camera behaves: follow the player, stay put, orbit, ...");
 
         const std::string newId(state.cameraNewId);
         const bool duplicate = cameraIdTaken(table, newId);
@@ -3623,7 +3631,8 @@ void drawCamerasPanel(EditorState& state) {
             ImGui::TextColored(toImVec4(palette.error), "That id is already in the table.");
         } else if (!knownContext && !newId.empty()) {
             ImGui::TextColored(toImVec4(palette.unsaved),
-                               "The game only looks up c:, s:, e:, g: and o: ids.");
+                               "The game only recognises ids starting with "
+                               "c:, s:, e:, g: or o:.");
         }
         ImGui::EndPopup();
     }
@@ -3692,7 +3701,7 @@ void drawCamerasPanel(EditorState& state) {
     bool wrote = false;
 
     ImGui::SeparatorText(smg::describeCameraId(identity).c_str());
-    ImGui::TextDisabled("%s  -  stored as %s, game %s",
+    ImGui::TextDisabled("%s  -  id %s  -  for %s",
                         smg::cameraContextLabel(identity.context),
                         smg::formatCameraId(identity).c_str(), cameraEngineName(version));
     ImGui::SameLine();

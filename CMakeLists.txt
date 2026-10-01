@@ -92,6 +92,7 @@ add_library(whitehole_core
     cpp/src/smg/camera_param.cpp
     cpp/src/smg/object_model.cpp
     cpp/src/smg/path.cpp
+    cpp/src/smg/scenario_model.cpp
     cpp/src/smg/stage_archive.cpp
     cpp/src/util/json.cpp
 )

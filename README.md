@@ -310,6 +310,7 @@ them is copied into this repository.
 | **[Supernova](https://github.com/)** (`GalaxyTools/Supernova-main/`) — SMG editor & viewer | **MIT** — © 2026 Super Mario Galaxy Modding Community | Studied its viewer architecture: joint-space vertex baking, the opaque/translucent two-pass draw ordering, and per-material draw state. All re-implemented independently in our C++20 renderer — **no code copied**. |
 | **[Takochu](https://github.com/)** (`GalaxyTools/Takochu-main/`) — SMG model/scene viewer | **GPL-3.0** | Studied *concepts only* (material draw-flag classification, per-material depth/blend state). Because GPL-3.0 is copyleft, **zero Takochu code is present in this tree** — everything was re-derived from the J3D format specification and Whitehole Neo's own Java reader. |
 | **[bmd-bdl-export](https://github.com/IsaiasDV/bmd-bdl-export)** (`GalaxyTools/Bmd-Bdl-Export-main/`) — Blender-side BMD/BDL exporter | **MIT** — © 2026 IsaiasDV | Texture/material handling in our TEX1 path was informed by this exporter's approach. Technique-level reference only. |
+| **[Scenaristar](https://github.com/SuperHackio/Scenaristar)** (`GalaxyTools/Scenaristar-master/`) — SMG scenario editor | Community tool | The *feature* reference for the galaxy scenario editor (add/rename scenarios, declare stars, set comet state, choose which layers each zone uses). Reimplemented in our own C++20 `ScenarioModel` — **no code copied**. The column names and types came from the game's own Java writer (`StageHelper.populateScenarioFieldsScenarioData`), not from Scenaristar. |
 
 ### Data & community
 
@@ -348,7 +349,7 @@ editor's core · full test suite.
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. 🚧 Layer filtering & hierarchical object tree
 4. 🚧 BCSV spreadsheet editor
-5. 🚧 Galaxy & zone management (create galaxy, zone add/remove)
+5. 🚧 Galaxy & zone management (create galaxy, zone add/remove) — scenario tables now editable in the core; panel next
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)
 7. 🚧 Model/texture browser inside the app
 8. ⏳ Cross-platform GUI (the core already builds anywhere)

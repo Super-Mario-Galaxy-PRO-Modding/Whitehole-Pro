@@ -64,6 +64,15 @@
            ZoneList-only, because area-limit validation counts objects per
            scenario and adding the map zone there would change those numbers.
 
+   [done]  THE GALAXY SCENARIO TABLES. Scenaristar's scenario editor, reimplemented.
+           ScenarioData.bcsv/ZoneList.bcsv/GalaxyInfo.bcsv were parsed and then
+           THROWN AWAY: GalaxyArchive collapsed ZoneList into a vector of names
+           and nothing ever displayed ScenarioData, though the Java original read
+           it (PowerStarRenderer.java:143 picks a star's colour from it). New
+           smg/scenario_model.hpp + .cpp own them, and GalaxyArchive keeps all
+           three tables, adds dirty() and save(). See section 13 for the format
+           facts, which cost three wrong guesses to pin down.
+
    [done]  THE WORDING. The panel no longer speaks LaunchCamPlus: every field
            has a plain-English label + tooltip (plain-English layer, section 8),
            the camtype row is "Camera style" in human words first, angles show as
@@ -846,9 +855,10 @@
   5600e5c  chore(repo): stop tracking build-check output, document Cameras
   bd82516  feat(cameras): make the Cameras panel readable
   9bf7da8  feat(cameras): hide the last raw BCAM strings from the panel
-  this     feat(cameras): author e: cameras, and open a galaxy's own map zone  <- HEAD
+  this     feat(cameras): author e: cameras, and open a galaxy's own map zone
+  this     feat(galaxy): keep and save the scenario tables (ScenarioModel)  <- HEAD
 
- Five of those commits are the camera feature; the ones before them are the
+ Six of those commits are the camera feature; the ones before them are the
  viewport-math landmines the camera now stands on. Do not "clean up" dfcf520
  (reversed-Z: near->+1, far->0, clear to 0, GL_GEQUAL, and the x/y terms must
  stay centric so GL_CW winding keeps working - see the comment at
@@ -881,6 +891,59 @@
     leave the data layer untouched: same names, same hashes, same defaults, same
     round trip. DONE - testCameraParam and the byte-exact round trip still pass
     on MinGW and MSVC; only label/tooltip strings and the panel's widgets changed.
+
+================================================================================
+13. THE SCENARIO TABLES (cpp/include/whitehole/smg/scenario_model.hpp)
+================================================================================
+
+  GalaxyArchive used to read ZoneList.bcsv, keep only a vector of zone NAMES, and
+  throw the table away, while ScenarioData.bcsv was loaded and never displayed by
+  anyone. Both are now kept as tables (zoneList()/scenarioData()/galaxyInfo(), plus
+  non-const overloads) with dirty() and save() on top.
+
+  FORMAT FACTS - read from the game's OWN code, not guessed:
+   Sources, in order of authority: StageHelper.java:1042-1061
+   (populateScenarioFieldsScenarioData, which WRITES the columns and states their
+   types), GalaxyArchive.java:60-71 (getActiveLayerNames), and the decompiled
+   ScenarioData.cpp in GalaxyTools/Garigari + Petari. Scenaristar was the FEATURE
+   reference; none of its code was used.
+   * Column order/types: ScenarioNo(int) ScenarioName(str) PowerStarId(int)
+     AppearPowerStarObj(str) Comet(str) LuigiModeTimer(int), then for SMG2 ONLY
+     PowerStarType(str) CometLimitTimer(int), then ONE INTEGER COLUMN PER ZONE.
+     SMG1 replaces the SMG2 pair with an integer IsHidden.
+   * `Comet` is a STRING holding the comet kind ("Dark"), not a flag.
+   * ScenarioNo is the game's 1-based id and is what it looks a scenario up by --
+     NOT the row order.
+   * PowerStarType is compared as a string; the game excludes Hidden and Green from
+     the "normal star" count (getPowerStarNum vs getNormalPowerStarNum).
+   * THE LAYER RULE: every per-zone column IS that zone's layer mask, read RAW.
+     Bit 0 = LayerA ... bit 15 = LayerP; "Common" is always on and owns no bit.
+     Java parity, verbatim: layerList.add("Common"); for (i<16) if (mask & (1<<i))
+     add("Layer" + 'A'+i). The bundled template proves it: its RedBlueExGalaxy
+     column holds 1/2/4 for the three missions that use LayerA/LayerB/LayerC.
+   * The game's getValueU32() MULTIPLIES the stored mask by two before its caller
+     uses it. That multiply belongs to the CALLER. Do not fold it into layerMask()
+     or every bit lands one position off.
+
+  THREE TRAPS THAT COST REAL TIME HERE - do not repeat them:
+   1. fieldHash() IS NOT jmapHash(). `whitehole-pro-console hash ScenarioNo`
+      prints JMap 0x7DAF4852, but BcsvTable writes with fieldHash() = 0xED08B591.
+      Hardcoding the printed value made isScenarioOwnHash() never match, so the
+      copy-a-scenario pass treated ScenarioNo as a layer column and overwrote the
+      copy's id with the source's -- silently, with no error. Compute the hashes
+      with fieldHash() at runtime, exactly as the writer does.
+   2. A BCSV row reference dies the moment a column is appended. ensureField()
+      rewrites every stored row, so holding `BcsvRow& cells = rows()[row]` across
+      one is a dangling reference. Address rows by index and re-fetch.
+   3. `fields()` is the NON-const accessor and clears the cached hash index, so a
+      BcsvField& held across a write reads stale values. Snapshot the hashes into a
+      local vector before the write loop.
+
+  What save() guarantees: an UNTOUCHED galaxy is not rewritten at all (not-dirty
+  and byte-identical are different claims, and only the first is guaranteed without
+  writing); GalaxyInfo.bcsv is never created for a galaxy that shipped without one.
+  testScenarioModel / testScenarioEditing / testGalaxyScenarioSave pin all of it,
+  including that a layer edit and its exact inverse are byte-exact.
 
 ================================================================================
  END OF BLUEPRINT - keep it true, or delete it.

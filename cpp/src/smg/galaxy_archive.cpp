@@ -9,18 +9,70 @@ namespace whitehole::smg {
 
 GalaxyArchive::GalaxyArchive(io::DirectoryFilesystem& filesystem, std::string name, int gameType)
     : filesystem_(&filesystem), name_(std::move(name)), gameType_(gameType) {
-    const auto scenarioPath = "/StageData/" + name_ + "/" + name_ + "Scenario.arc";
-    if (!filesystem_->fileExists(scenarioPath)) {
-        throw std::runtime_error("Galaxy scenario archive is missing: " + scenarioPath);
+    if (!filesystem_->fileExists(scenarioPath())) {
+        throw std::runtime_error("Galaxy scenario archive is missing: " + scenarioPath());
     }
-    const auto archive = io::RarcArchive(filesystem_->read(scenarioPath));
-    const auto zoneTable = BcsvTable(archive.read("ZoneList.bcsv"), archive.endian());
-    for (const auto& row : zoneTable.rows()) {
-        zones_.push_back(zoneTable.getString(row, "ZoneName"));
+    io::RarcArchive archive(filesystem_->read(scenarioPath()));
+    endian_ = archive.endian();
+    wasCompressed_ = archive.wasCompressed();
+
+    // All three tables are optional in principle, but a galaxy without
+    // ZoneList/ScenarioData is not a galaxy the editor can do anything with, so a
+    // malformed one is a hard error rather than a silently empty editor.
+    zoneList_ = BcsvTable(archive.read("ZoneList.bcsv"), archive.endian());
+    for (const auto& row : zoneList_.rows()) {
+        zones_.push_back(zoneList_.getString(row, "ZoneName"));
     }
     if (archive.fileExists("ScenarioData.bcsv")) {
         scenarioData_ = BcsvTable(archive.read("ScenarioData.bcsv"), archive.endian());
     }
+    hasGalaxyInfo_ = archive.fileExists("GalaxyInfo.bcsv");
+    if (hasGalaxyInfo_) {
+        galaxyInfo_ = BcsvTable(archive.read("GalaxyInfo.bcsv"), archive.endian());
+    }
+    snapshotOriginals();
+}
+
+std::string GalaxyArchive::scenarioPath() const {
+    return "/StageData/" + name_ + "/" + name_ + "Scenario.arc";
+}
+
+void GalaxyArchive::snapshotOriginals() {
+    zoneListOriginal_ = zoneList_.serialize();
+    scenarioDataOriginal_ = scenarioData_.serialize();
+    galaxyInfoOriginal_ = galaxyInfo_.serialize();
+}
+
+bool GalaxyArchive::dirty() const {
+    return zoneList_.serialize() != zoneListOriginal_ ||
+           scenarioData_.serialize() != scenarioDataOriginal_ ||
+           galaxyInfo_.serialize() != galaxyInfoOriginal_;
+}
+
+void GalaxyArchive::save() {
+    if (filesystem_ == nullptr) {
+        throw std::runtime_error("This galaxy has no workspace to save into");
+    }
+    // An untouched galaxy is not rewritten. Serialising a BCSV can append
+    // alignment padding, so "we did not change it" and "the bytes are identical"
+    // are not the same claim -- leaving the file alone is the only way to be
+    // certain the game still reads exactly what it read before.
+    if (!dirty()) {
+        return;
+    }
+    io::RarcArchive archive(filesystem_->read(scenarioPath()));
+    // insert() adds a new file or replaces an existing one, keeping the stored
+    // casing for a new entry so it reads like its siblings.
+    archive.insert("ScenarioData.bcsv", scenarioData_.serialize());
+    if (!zoneList_.rows().empty() || zoneList_.hasField("ZoneName")) {
+        archive.insert("ZoneList.bcsv", zoneList_.serialize());
+    }
+    // Never create GalaxyInfo.bcsv: only a galaxy that shipped one gets it back.
+    if (hasGalaxyInfo_) {
+        archive.insert("GalaxyInfo.bcsv", galaxyInfo_.serialize());
+    }
+    filesystem_->write(scenarioPath(), archive.serialize(wasCompressed_));
+    snapshotOriginals();
 }
 
 bool GalaxyArchive::hasMapZone() const {

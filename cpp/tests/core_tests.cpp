@@ -35,6 +35,7 @@
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/object_model.hpp"
 #include "whitehole/smg/path.hpp"
+#include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <algorithm>
@@ -3965,6 +3966,285 @@ void testModelLibrary() {
     plainScene.rebuild({modelled});
     expect(plainScene.boxes().front().model == nullptr, "scene attached a model without a library");
 }
+// The scenario tables: what each mission of a galaxy awards, and which layers of
+// which zone it activates. The format facts are pinned against the real bundled
+// galaxy, because "the stored value IS the layer mask" is the rule that is easiest
+// to get wrong by an off-by-one (the game's own getValueU32 multiplies by two
+// before its caller uses it, and that multiply does not belong here).
+void testScenarioModel() {
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto archive = whitehole::io::RarcArchive::open(templates / "SMG2BigGalaxyScenario.arc");
+    whitehole::smg::BcsvTable scenarioData(archive.read("ScenarioData.bcsv"), archive.endian());
+    whitehole::smg::BcsvTable zoneList(archive.read("ZoneList.bcsv"), archive.endian());
+    whitehole::smg::BcsvTable galaxyInfo(archive.read("GalaxyInfo.bcsv"), archive.endian());
+
+    const std::vector<std::string> zones = {"RedBlueExGalaxy"};
+    const auto worldNo = galaxyInfo.rows().empty()
+                             ? 0
+                             : galaxyInfo.getInt(galaxyInfo.rows()[0], "WorldNo", 0);
+    whitehole::smg::ScenarioModel model(scenarioData, zoneList, zones, worldNo);
+
+    // The real template galaxy: six scenarios, each awarding a different star.
+    expect(model.scenarioCount() == 6, "the template galaxy must have six scenarios");
+    expect(model.powerStarCount() == 6, "every template scenario awards a star");
+    // This galaxy does record PowerStarType: three Normal and three Green, and the
+    // game excludes Green from the ORDINARY count. This is the game's own split
+    // (getPowerStarNum counts every non-zero id; getNormalPowerStarNum drops the
+    // Hidden and Green ones).
+    expect(model.ordinaryPowerStarCount() == 3,
+           "three Green scenarios must be excluded from the ordinary star count");
+
+    // The first scenario, verbatim from the template.
+    const whitehole::smg::Scenario& first = model.scenarios().front();
+    expect(first.number == 1, "the first scenario must be ScenarioNo 1");
+    expect(first.name == "First Mission", "scenario name must read back");
+    expect(first.powerStarId == 25, "the first scenario must award star 25");
+    expect(first.powerStarType == "Normal", "the first scenario's star must be Normal");
+    expect(first.starTypeDescription() == "Normal star",
+           "a recorded star type must be described in plain words");
+    expect(model.scenarios()[3].starTypeIsGreen(),
+           "the template's fourth mission must record a Green star");
+    expect(first.awardsStar(), "a scenario with a star id must report awarding one");
+    // The comet marker is a separate STRING column holding the kind. The
+    // template's third mission is the comet one, so it must read as a comet.
+    expect(!first.comet && first.cometName.empty(),
+           "an ordinary mission must not be a comet");
+    expect(model.scenarios()[2].comet && model.scenarios()[2].cometName == "Dark",
+           "the template's third mission must read as a comet");
+
+    // The star type round trip, including a value this build does not know: the
+    // stored text is kept verbatim rather than normalised into something the game
+    // never wrote.
+    expect(whitehole::smg::starTypeFromText("Green") == whitehole::smg::StarType::green,
+           "Green must parse");
+    expect(whitehole::smg::starTypeFromText("Rainbow") == whitehole::smg::StarType::custom,
+           "an unknown star type must stay custom");
+    expect(whitehole::smg::starTypeIsSpecial("Green") &&
+               whitehole::smg::starTypeIsSpecial("Hidden") &&
+               !whitehole::smg::starTypeIsSpecial("Normal") &&
+               !whitehole::smg::starTypeIsSpecial(""),
+           "only Hidden and Green are the game's special types");
+    expect(whitehole::smg::starTypeLabel("Rainbow").find("Rainbow") != std::string::npos,
+           "an unknown star type must be shown, not hidden");
+    expect(whitehole::smg::starTypeLabel("").find("recorded") != std::string::npos,
+           "an absent star type must say so");
+    expect(whitehole::smg::starTypeText(whitehole::smg::StarType::green) == "Green",
+           "the star type must write back the game's own spelling");
+
+    // THE layer rule. The template's only per-zone column is RedBlueExGalaxy, and
+    // it holds 1/2/4 for scenarios 1/2/3 -- LayerA, LayerB, LayerC. If the mask
+    // were off by one these would come out as LayerB/C/D.
+    expect(model.layerMask(0, "RedBlueExGalaxy") == 1, "scenario 1 must activate bit 0");
+    expect(model.layerMask(1, "RedBlueExGalaxy") == 2, "scenario 2 must activate bit 1");
+    expect(model.layerMask(2, "RedBlueExGalaxy") == 4, "scenario 3 must activate bit 2");
+    expect(model.layerMask(3, "RedBlueExGalaxy") == 0,
+           "scenario 4 must activate no extra layer");
+    // A zone with no column of its own is Common only, not an error.
+    expect(model.layerMask(0, "NoSuchZone") == 0, "an unknown zone must read as no layers");
+
+    // getActiveLayerNames(), the Java parity case: Common always, then the layers
+    // in bit order.
+    const std::vector<std::string> layers = model.activeLayers(1, "RedBlueExGalaxy");
+    expect(layers.size() == 2 && layers[0] == "Common" && layers[1] == "LayerB",
+           "scenario 2 must be Common + LayerB");
+    expect(model.activeLayers(0, "RedBlueExGalaxy").front() == "Common",
+           "Common is always active, even alone");
+    expect(model.activeLayers(3, "RedBlueExGalaxy").size() == 1,
+           "a scenario with no bits is Common only");
+
+    // Layer name resolution, including the deliberate "Common owns no bit".
+    expect(whitehole::smg::scenarioLayerBit("LayerA") == 0 &&
+               whitehole::smg::scenarioLayerBit("LayerB") == 1 &&
+               whitehole::smg::scenarioLayerBit("LayerP") == 15,
+           "layer letters must map onto their bit index");
+    expect(whitehole::smg::scenarioLayerBit("Common") == -1,
+           "Common owns no bit and must not resolve to one");
+    expect(whitehole::smg::scenarioLayerBit("LayerQ") == -1,
+           "a layer past P must not resolve");
+    expect(whitehole::smg::scenarioLayerNames().size() == 16,
+           "the game addresses exactly 16 layers");
+    expect(whitehole::smg::scenarioLayerNames().back() == "LayerP",
+           "the last layer must be LayerP");
+}
+
+// Editing a scenario table: layers, scenarios and the zone list. Kept apart from
+// the read-only test above because this one mutates, and a failure is easier to
+// place when the read and write halves do not share a function.
+void testScenarioEditing() {
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto archive = whitehole::io::RarcArchive::open(templates / "SMG2BigGalaxyScenario.arc");
+    whitehole::smg::BcsvTable scenarioData(archive.read("ScenarioData.bcsv"), archive.endian());
+    whitehole::smg::BcsvTable zoneList(archive.read("ZoneList.bcsv"), archive.endian());
+    whitehole::smg::ScenarioModel model(scenarioData, zoneList, {"RedBlueExGalaxy"}, 1);
+
+    const std::vector<std::uint8_t> untouched = scenarioData.serialize();
+
+    // Turning a layer on and off must set and clear exactly that bit, leaving
+    // the others alone.
+    expect(model.setLayerActive(0, "RedBlueExGalaxy", "LayerC", true),
+           "activating a layer must succeed");
+    expect(model.layerMask(0, "RedBlueExGalaxy") == 5,
+           "LayerC must OR into the existing mask, not replace it");
+    expect(model.setLayerActive(0, "RedBlueExGalaxy", "LayerA", false),
+           "deactivating a layer must succeed");
+    expect(model.layerMask(0, "RedBlueExGalaxy") == 4, "LayerA must be cleared exactly");
+    expect(!model.setLayerActive(0, "RedBlueExGalaxy", "Common", true),
+           "Common owns no bit and must be rejected");
+    // Restored, so the byte-exact check below is meaningful.
+    model.setLayerActive(0, "RedBlueExGalaxy", "LayerC", false);
+    model.setLayerActive(0, "RedBlueExGalaxy", "LayerA", true);
+    expect(model.layerMask(0, "RedBlueExGalaxy") == 1, "the mask must be back to 1");
+    expect(scenarioData.serialize() == untouched,
+           "a layer edit and its exact inverse must be byte-exact");
+
+    // A new zone's column appears on first use, and every scenario row gets the
+    // new column at 0 rather than being left short.
+    expect(model.setLayerActive(0, "FreshZone", "LayerA", true),
+           "a brand-new zone column must be creatable");
+    expect(model.layerMask(0, "FreshZone") == 1, "the new zone must start at its bit");
+    expect(model.layerMask(1, "FreshZone") == 0,
+           "a new column must default to 0 for the other scenarios, not garbage");
+    expect(scenarioData.hasField("FreshZone"), "the new zone column must be stored");
+
+    expect(model.nextFreeScenarioNumber() == 7,
+           "the next free id after 1-6 must be 7");
+
+    // A scenario lookup must reflect the TABLE, not a cache that a layer edit left
+    // stale: toggling a layer does not change the scenario list, so nothing
+    // re-reads it, and a scan over the stale cache once handed back an id that was
+    // already taken and produced two scenarios with the same ScenarioNo.
+    expect(model.findScenario(1).value_or(999) == 0, "scenario 1 must resolve to row 0");
+    model.setLayerActive(0, "RedBlueExGalaxy", "LayerP", true);
+    expect(model.findScenario(1).value_or(999) == 0,
+           "a lookup after a layer edit must still resolve from the table");
+    expect(model.nextFreeScenarioNumber() == 7,
+           "the next free id must not be thrown off by an unrefreshed cache");
+    model.setLayerActive(0, "RedBlueExGalaxy", "LayerP", false);
+
+    const std::size_t added = model.addScenario("New Mission");
+    expect(added == 6 && model.scenarioCount() == 7, "addScenario must append a row");
+    expect(model.scenarios().back().number == 7, "the new scenario must get id 7");
+    expect(model.scenarios().back().name == "New Mission", "the new name must be stored");
+    // A fresh scenario awards nothing, and must SAY so: a scenario with no star is
+    // a legitimate state, not an error.
+    expect(!model.scenarios().back().awardsStar(), "a new scenario awards no star yet");
+
+    // Copying clones the settings but never the id, which would shadow the source.
+    const std::size_t copied = model.addScenario("Copy", added);
+    // 1-6 exist, so "New Mission" is 7 and its copy must be 8 -- never 7 again.
+    expect(model.scenarios()[added].number == 7, "the added scenario must be id 7");
+    expect(model.scenarios()[copied].number == 8,
+           "a copied scenario must take the next free id, not the source's");
+    model.renameScenario(copied, "Copied");
+    expect(model.scenarios()[copied].name == "Copied", "rename must store");
+    model.setPowerStar(copied, 99);
+    expect(model.scenarios()[copied].powerStarId == 99, "the star id must store");
+    model.setPowerStarType(copied, "Green");
+    expect(model.scenarios()[copied].starTypeIsGreen(), "the star type must store");
+    model.setComet(copied, true, 600);
+    expect(model.scenarios()[copied].comet && model.scenarios()[copied].cometTimer == 600,
+           "the comet flag and timer must store");
+    model.setComet(copied, false, 600);
+    expect(!model.scenarios()[copied].comet && model.scenarios()[copied].cometTimer == 0,
+           "turning the comet off must also zero its timer");
+
+    // An id collision is refused: two rows with one id makes the first unreachable.
+    expect(!model.setScenarioNumber(copied, 1),
+           "renumbering onto another scenario's id must be refused");
+    expect(model.setScenarioNumber(copied, 42), "renumbering to a free id must work");
+    expect(model.findScenario(42).has_value(), "the new id must resolve");
+    expect(model.findScenario(8) == std::nullopt, "the old id must be gone");
+    expect(!model.setScenarioNumber(copied, -1), "a negative id must be refused");
+
+    expect(model.removeScenario(copied), "removeScenario must succeed");
+    expect(model.scenarioCount() == 7, "the row must actually be gone");
+    expect(!model.removeScenario(999), "removing a bad row must report false");
+
+    expect(model.addZone("NewZone").has_value(), "adding a zone must succeed");
+    expect(model.zones().size() == 2 && model.zones().back() == "NewZone",
+           "the new zone must be listed");
+    expect(!model.addZone("NewZone").has_value(),
+           "a duplicate zone name must be refused: the game looks zones up by name");
+    expect(!model.addZone("").has_value(), "an empty zone name must be refused");
+    expect(model.moveZone(1, 0), "moving a zone up must succeed");
+    expect(model.zones().front() == "NewZone", "the move must land where asked");
+    expect(!model.moveZone(0, 0), "moving a zone onto itself must report false");
+    expect(model.removeZone(0), "removing the zone must succeed");
+    expect(model.zones().size() == 1 && model.zones().front() == "RedBlueExGalaxy",
+           "the remaining zone must be the original one");
+}
+
+// The galaxy's scenario tables have to survive a save/reopen cycle, and an
+// untouched galaxy must not be rewritten at all.
+void testGalaxyScenarioSave() {
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    TemporaryDirectory temporary;
+    whitehole::io::DirectoryFilesystem project(temporary.path);
+    project.createDirectory("/SystemData");
+    project.write("/SystemData/ObjNameTable.arc", {0});
+    project.createDirectory("/StageData/RedBlueExGalaxy");
+    project.write("/StageData/RedBlueExGalaxy/RedBlueExGalaxyScenario.arc",
+                  whitehole::io::readFile(templates / "SMG2BigGalaxyScenario.arc"));
+    project.write("/StageData/RedBlueExGalaxy/RedBlueExGalaxyMap.arc",
+                  whitehole::io::readFile(templates / "SMG2BigGalaxyMap.arc"));
+
+    whitehole::smg::GameArchive game(temporary.path);
+    const std::vector<std::uint8_t> before =
+        project.read("/StageData/RedBlueExGalaxy/RedBlueExGalaxyScenario.arc");
+
+    {
+        whitehole::smg::GalaxyArchive galaxy = game.openGalaxy("RedBlueExGalaxy");
+        expect(!galaxy.dirty(), "a freshly opened galaxy must not be dirty");
+        expect(galaxy.galaxyInfo().hasField("WorldNo"),
+           "GalaxyInfo.bcsv must be kept as a table now, not discarded");
+        expect(galaxy.zoneList().hasField("ZoneName"), "ZoneList.bcsv must be kept as a table");
+        expect(galaxy.scenarioData().rows().size() == 6, "ScenarioData must have 6 rows");
+
+        // Saving an untouched galaxy must leave the file alone: "not dirty" and
+        // "the bytes are identical" are different claims, and only the first is
+        // guaranteed without rewriting.
+        galaxy.save();
+        expect(project.read("/StageData/RedBlueExGalaxy/RedBlueExGalaxyScenario.arc") == before,
+               "saving an unedited galaxy must not touch the file");
+
+        // Now edit it for real, through the model the panel uses.
+        whitehole::smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                                             galaxy.editableZones(), 1);
+        model.addScenario("Seventh Mission");
+        model.setPowerStar(6, 77);
+        expect(galaxy.dirty(), "an edited galaxy must report dirty");
+        galaxy.save();
+        expect(!galaxy.dirty(), "a saved galaxy must be clean again");
+    }
+
+    // Reopened from disk: the new scenario must be there, in the right place.
+    {
+        whitehole::smg::GalaxyArchive reopened = game.openGalaxy("RedBlueExGalaxy");
+        whitehole::smg::ScenarioModel model(reopened.scenarioData(), reopened.zoneList(),
+                                             reopened.editableZones(), 1);
+        expect(model.scenarioCount() == 7, "the added scenario must survive a save");
+        expect(model.scenarios().back().name == "Seventh Mission",
+               "the added scenario's name must survive a save");
+        expect(model.scenarios().back().powerStarId == 77,
+               "the added scenario's star must survive a save");
+        // The scenarios that were already there must be untouched by all of this.
+        expect(model.scenarios()[0].name == "First Mission",
+               "the original scenarios must be unchanged");
+        expect(model.layerMask(0, "RedBlueExGalaxy") == 1,
+               "an original layer mask must survive an unrelated save");
+        // A layer edit round-trips through the archive too.
+        model.setLayerActive(0, "RedBlueExGalaxy", "LayerD", true);
+        reopened.save();
+    }
+    {
+        whitehole::smg::GalaxyArchive again = game.openGalaxy("RedBlueExGalaxy");
+        whitehole::smg::ScenarioModel model(again.scenarioData(), again.zoneList(),
+                                             again.editableZones(), 1);
+        expect(model.layerMask(0, "RedBlueExGalaxy") == 9,
+               "a layer edit must survive two save/reopen cycles");
+        expect(model.scenarioCount() == 7, "the scenario list must be stable");
+    }
+}
 } // namespace
 
 // The theme is data, so it can be checked instead of eyeballed. Every contrast
@@ -4674,6 +4954,9 @@ int main() {
         testBcsvMutation();
         testUndoStack();
         testGalaxyMapZone();
+        testScenarioModel();
+        testScenarioEditing();
+        testGalaxyScenarioSave();
         testGizmoMath();
         testStageEditCommands();
         testObjectAuthoring();

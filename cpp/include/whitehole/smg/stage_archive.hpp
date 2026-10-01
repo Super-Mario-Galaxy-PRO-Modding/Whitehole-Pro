@@ -22,6 +22,24 @@ struct ObjectTable {
     BcsvTable table;
 };
 
+// One of the layered JMap files a stage is built from (Java's
+// STAGE_MAP_JMP_FILES). Shared with the loader and with the zone/galaxy builder
+// so the set of files a zone is EXPECTED to have cannot drift from the set the
+// editor reads -- a builder that created a different list would make zones the
+// loader silently ignores.
+struct LayeredTableSpec {
+    std::string_view folder;
+    std::string_view file;
+    std::string_view kind;
+    // 0 = both games, 1 = SMG1 only, 2 = SMG2 only. SoundInfo and ChildObjInfo
+    // are SMG1-only, and creating them for SMG2 would add files the game does not
+    // expect to find.
+    int gameType;
+};
+
+// Every layered table, in the same order the loader walks them.
+[[nodiscard]] const std::vector<LayeredTableSpec>& stageLayeredTables();
+
 // Workspace-relative path of a stage's map archive. SMG2 keeps each zone in
 // its own folder (/StageData/<stage>/<stage>Map.arc); SMG1 flattens them into
 // /StageData/<stage>.arc. Shared rather than duplicated so GalaxyArchive's
@@ -76,7 +94,9 @@ public:
 
 private:
     void loadFromArchive();
-    void loadTable(std::string_view path, std::string kind, std::string layer);
+    // string_view, not string: the table specs are string_views, and taking them by
+    // value would copy every one of them for nothing.
+    void loadTable(std::string_view path, std::string_view kind, std::string_view layer);
     // Writes the camera table back into the archive (no-op for an archive
     // that never carried one and still has no cameras).
     void writeCameraParams();

@@ -19,7 +19,9 @@ struct LayeredTable {
     int gameType; // 0 both, 1 SMG1, 2 SMG2
 };
 
-constexpr std::array<LayeredTable, 12> kLayeredTables{{
+// The layered placement tables of a stage, shared with the loader so the set of
+// files a zone is expected to have can never drift from the set it reads.
+constexpr std::array<LayeredTableSpec, 12> kLayeredTables{{
     {"Placement", "StageObjInfo", "stage", 0},
     {"Placement", "AreaObjInfo", "area", 0},
     {"Placement", "ObjInfo", "obj", 0},
@@ -36,6 +38,12 @@ constexpr std::array<LayeredTable, 12> kLayeredTables{{
 
 } // namespace
 
+const std::vector<LayeredTableSpec>& stageLayeredTables() {
+    static const std::vector<LayeredTableSpec> specs(kLayeredTables.begin(),
+                                                     kLayeredTables.end());
+    return specs;
+}
+
 std::string stageMapFilesystemPath(std::string_view stageName, int gameType) {
     if (gameType == 1) {
         return "/StageData/" + std::string(stageName) + ".arc";
@@ -43,7 +51,7 @@ std::string stageMapFilesystemPath(std::string_view stageName, int gameType) {
     return "/StageData/" + std::string(stageName) + "/" + std::string(stageName) + "Map.arc";
 }
 
-void StageArchive::loadTable(std::string_view path, std::string kind, std::string layer) {
+void StageArchive::loadTable(std::string_view path, std::string_view kind, std::string_view layer) {
     if (!archive_ || !archive_->fileExists(path)) {
         return;
     }
@@ -58,8 +66,8 @@ void StageArchive::loadTable(std::string_view path, std::string kind, std::strin
     try {
         ObjectTable table;
         table.path = std::string(path);
-        table.kind = std::move(kind);
-        table.layer = std::move(layer);
+        table.kind = std::string(kind);
+        table.layer = std::string(layer);
         table.table = BcsvTable(archive_->read(path), archive_->endian());
         tables_.push_back(std::move(table));
     } catch (const std::exception&) {
@@ -144,9 +152,9 @@ void StageArchive::loadFromArchive() {
         if (spec.gameType != 0 && spec.gameType != gameType_) {
             continue;
         }
-        const auto folder = std::string("/Stage/jmp/") + spec.folder;
+        const auto folder = "/Stage/jmp/" + std::string(spec.folder);
         for (const auto& layer : archive_->directories(folder)) {
-            const auto path = folder + "/" + layer + "/" + spec.file;
+            const auto path = folder + "/" + layer + "/" + std::string(spec.file);
             loadTable(path, spec.kind, layer);
         }
     }

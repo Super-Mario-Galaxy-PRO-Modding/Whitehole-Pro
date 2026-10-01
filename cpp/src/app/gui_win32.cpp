@@ -34,6 +34,7 @@
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/hash.hpp"
 #include "whitehole/smg/object_model.hpp"
+#include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
 
 #include <d3d11.h>
@@ -314,6 +315,33 @@ struct EditorState {
     std::size_t savedUndoCursor{0};
     bool unsaved{false};
 
+    // --- galaxy scenarios (ScenarioData.bcsv / ZoneList.bcsv) ---------------
+    // The galaxy whose scenario tables are open for editing. Held as a VALUE,
+    // like state.game and state.stage, and only meaningful while state.game is:
+    // GalaxyArchive borrows the workspace filesystem out of it, so every path that
+    // replaces state.game MUST reset this too (see resetGalaxy). Keeping a galaxy
+    // alive across frames is what selectGalaxy() never did -- it used to open the
+    // archive, read the zone names out of it and throw it away.
+    std::optional<smg::GalaxyArchive> galaxy;
+    // The galaxy's own undo history. Deliberately NOT the zone's stack: the two
+    // documents are saved by different calls, and selectZone() clears the zone
+    // stack, so a shared one would lose scenario history every time the author
+    // looked at another zone. Undo position at the last save, same idea as the
+    // zone's savedUndoCursor.
+    edit::UndoStack scenarioUndoStack;
+    std::size_t savedScenarioUndoCursor{0};
+    // Which scenario the panel is editing, and which panel owns Ctrl+Z. The key
+    // follows the panel the author last touched, so there is never a question
+    // about what it will undo -- the panel shows its own undo label either way.
+    std::optional<std::size_t> scenarioSelected;
+    // "Add scenario" / "add zone" popover buffers, same reason the camera ones
+    // live here: an ImGui popup reopens across frames while the user types.
+    char scenarioNewName[128]{};
+    char scenarioNewZone[128]{};
+    // Seeded per frame from the model; the panel reads it for the layer matrix's
+    // "which zone am I editing layers for" picker.
+    std::size_t scenarioLayerZone{0};
+
     // --- Closing guard -------------------------------------------------------
     // Exit (and opening a different archive) would throw away unsaved edits, so
     // those actions park themselves behind a confirmation instead of going
@@ -365,6 +393,10 @@ struct EditorState {
     // The BCAM camera table editor. Distinct from settings.showCameras, which
     // toggles the in-viewport camera marker overlay; this one is a panel.
     bool showCamerasPanel{false};
+    // Scenarios, unlike every other panel, defaults OPEN: it is the galaxy-level
+    // document an author reaches for right after picking a galaxy, and until they
+    // have it open there is nothing on screen explaining what a galaxy contains.
+    bool showScenariosPanel{true};
     bool showViewport{true};
     bool showLog{false}; // bottom drawer, hidden until needed
     bool showProblems{false}; // validation findings, docked beside the log
@@ -898,6 +930,11 @@ void endCameraPreview(EditorState& state);
 // Re-solves the live preview row and hands the pose to the viewport. No-op
 // (and returns false) when nothing is being previewed.
 [[nodiscard]] bool applyCameraPreview(EditorState& state);
+// Drops the open galaxy and its undo history. Defined further down next to
+// markDirty(); declared here because the open/select paths that must call it all
+// come first, and GalaxyArchive borrowing the workspace filesystem makes missing
+// that call a dangling pointer rather than a compile error.
+void resetGalaxy(EditorState& state);
 
 // Applies one gizmo message to the whole selection. Begin snapshots every
 // member, Update paints live (snapped unless Shift is held), End commits one
@@ -1330,10 +1367,31 @@ void dropSelectionToSurface(EditorState& state) {
                          (usedCollision ? "collision geometry." : "the surface below."));
 }
 
+// Drops the open galaxy and everything that pointed into it. GalaxyArchive holds
+// a raw io::DirectoryFilesystem* borrowed from state.game, so leaving one alive
+// across a workspace swap is a dangling pointer rather than a compile error --
+// which is why every path that replaces state.game calls this.
+void resetGalaxy(EditorState& state) {
+    state.galaxy.reset();
+    state.scenarioUndoStack.clear();
+    state.savedScenarioUndoCursor = 0;
+    state.scenarioSelected.reset();
+    state.scenarioLayerZone = 0;
+    state.scenarioNewName[0] = '\0';
+    state.scenarioNewZone[0] = '\0';
+}
+
 // True when the undo cursor has moved away from the last save point. That is
 // what makes undoing back to the saved state report clean again.
+//
+// The zone's stack is the source of truth for the zone; a galaxy is dirty when
+// its OWN tables differ from what was read, which GalaxyArchive::dirty() answers
+// directly. Both feed the one "unsaved" flag, because the File > Save path and the
+// closing guard both have to know about either document.
 bool markDirty(EditorState& state) {
-    state.unsaved = state.undoStack.cursor() != state.savedUndoCursor;
+    const bool zoneDirty = state.undoStack.cursor() != state.savedUndoCursor;
+    const bool galaxyDirty = state.galaxy.has_value() && state.galaxy->dirty();
+    state.unsaved = zoneDirty || galaxyDirty;
     return state.unsaved;
 }
 
@@ -1368,7 +1426,26 @@ void runPendingAction(EditorState& state, bool& done) {
     }
 }
 
+// Which document Ctrl+Z belongs to. The zone's stack and the galaxy's are SEPARATE
+// (different files, different save paths, and selecting a zone clears the zone
+// one), so the key has to be told which to hit. It follows the panel the author
+// last touched, and the Scenarios panel prints its own undo label so there is
+// never a question about what the key will do.
+bool scenarioUndoActive(EditorState& state) {
+    // A mission selected means the author is working on the galaxy document, so
+    // the key goes there; otherwise the zone, which is the default everywhere else.
+    return state.scenarioUndoStack.canUndo() && state.scenarioSelected.has_value();
+}
+
 void performUndo(EditorState& state) {
+    if (scenarioUndoActive(state)) {
+        if (!state.scenarioUndoStack.undo()) {
+            return;
+        }
+        markDirty(state);
+        pushToast(state, "Undid " + state.scenarioUndoStack.redoLabel() + ".");
+        return;
+    }
     if (!state.undoStack.undo()) {
         return;
     }
@@ -1390,6 +1467,15 @@ void performUndo(EditorState& state) {
 }
 
 void performRedo(EditorState& state) {
+    if (scenarioUndoActive(state) || (state.scenarioUndoStack.canRedo() &&
+                                      state.scenarioSelected.has_value())) {
+        if (!state.scenarioUndoStack.redo()) {
+            return;
+        }
+        markDirty(state);
+        pushToast(state, "Redid " + state.scenarioUndoStack.undoLabel() + ".");
+        return;
+    }
     if (!state.undoStack.redo()) {
         return;
     }
@@ -1965,6 +2051,9 @@ void openMapImpl(EditorState& state, const std::filesystem::path& path) {
     // The camera preview indexes the table that is about to be replaced, so it
     // ends first, before the old stage goes away.
     endCameraPreview(state);
+    // A standalone map archive is not part of a workspace, so any open galaxy is
+    // dropped: its tables belong to the workspace we are leaving.
+    resetGalaxy(state);
     state.stage = smg::StageArchive::openMapFile(path);
     state.zones = {state.stage->stageName()};
     state.selectedZone = 0;
@@ -1986,6 +2075,9 @@ void openMapImpl(EditorState& state, const std::filesystem::path& path) {
 void openGameImpl(EditorState& state, const std::filesystem::path& path, bool quiet = false) {
     // Ends any live camera preview first: this drops the stage further down.
     endCameraPreview(state);
+    // BEFORE the workspace is replaced: the old galaxy borrows the old
+    // filesystem, so it has to go while that borrow is still valid.
+    resetGalaxy(state);
     state.game.emplace(path);
     if (state.game->gameType() == 0) {
         state.game.reset();
@@ -2034,13 +2126,17 @@ void selectGalaxy(EditorState& state, int index) {
         return;
     }
     state.selectedGalaxy = index;
-    const auto galaxy = state.game->openGalaxy(state.galaxies[static_cast<std::size_t>(index)]);
+    // The archive is now KEPT, not read-and-discarded: the Scenarios panel edits
+    // its tables in place, and GalaxyArchive borrows state.game's filesystem, so
+    // switching galaxies has to drop the previous one first.
+    resetGalaxy(state);
+    state.galaxy = state.game->openGalaxy(state.galaxies[static_cast<std::size_t>(index)]);
     // editableZones(), not zones(): the galaxy's OWN map zone is a real zone
     // with its own CameraParam.bcam and is not in ZoneList.bcsv, so using the
     // ZoneList alone made the galaxy map unopenable from here.
-    state.zones = galaxy.editableZones();
+    state.zones = state.galaxy->editableZones();
     state.selectedZone = -1;
-    setStatus(state, "Galaxy " + galaxy.name() + " has " +
+    setStatus(state, "Galaxy " + state.galaxy->name() + " has " +
                          std::to_string(state.zones.size()) + " zones.");
 }
 
@@ -2072,15 +2168,31 @@ void selectZone(EditorState& state, int index) {
 }
 
 void saveStage(EditorState& state) {
+    // A galaxy edit is its own document, so Ctrl+S has to save whichever of the
+    // two is actually dirty. Saving both when both are costs nothing: save() on a
+    // clean galaxy returns without touching the file, which is exactly why
+    // GalaxyArchive::save() refuses to rewrite an untouched archive.
+    bool savedSomething = false;
+    if (state.galaxy.has_value() && state.galaxy->dirty()) {
+        state.galaxy->save();
+        state.savedScenarioUndoCursor = state.scenarioUndoStack.cursor();
+        savedSomething = true;
+        pushToast(state, "Saved the galaxy's scenario tables.");
+    }
     if (!state.stage) {
-        pushToast(state, "No zone is loaded.", true);
+        if (!savedSomething) {
+            pushToast(state, "Nothing to save.", true);
+        }
+        markDirty(state);
         return;
     }
     applyTransform(state);
     state.stage->save();
     state.savedUndoCursor = state.undoStack.cursor();
-    state.unsaved = false;
-    pushToast(state, "Saved " + state.stage->sourcePath().string());
+    if (!savedSomething) {
+        pushToast(state, "Saved " + state.stage->sourcePath().string());
+    }
+    markDirty(state);
 }
 
 // --- UI panels ---------------------------------------------------------------
@@ -3803,6 +3915,593 @@ void drawNewCameraIdEditor(EditorState& state, const smg::CameraParamTable& tabl
     }
 }
 
+// The scenario list, drawn as CARDS rather than a grid. Each card is one mission:
+// its name, the star it awards, that star's type in plain words, and a comet badge.
+// The strip of zone chips under the name is the at-a-glance view -- the whole
+// point of the panel -- showing which layers of which zones this mission brings
+// into play, so a galaxy's structure is legible without opening anything.
+void drawScenarioCardList(EditorState& state, smg::ScenarioModel& model) {
+    const Palette& palette = themePalette(state.settings.darkMode);
+    if (model.scenarioCount() == 0) {
+        ImGui::TextWrapped(
+            "This galaxy has no missions yet. That is unusual but not broken -- add "
+            "one below and it becomes the galaxy's first scenario.");
+        return;
+    }
+    for (std::size_t index = 0; index < model.scenarios().size(); ++index) {
+        const smg::Scenario& scenario = model.scenarios()[index];
+        ImGui::PushID(static_cast<int>(scenario.row));
+        const bool selected = state.scenarioSelected == index;
+        if (ImGui::Selectable("##scen", selected,
+                              ImGuiSelectableFlags_AllowDoubleClick)) {
+            state.scenarioSelected = index;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Mission %d\nStored as scenario id %d",
+                              static_cast<int>(index) + 1, scenario.number);
+        }
+        // Same indent as the selected row's text, so hovering paints over the text
+        // rather than next to it (which is what the camera list does).
+        ImGui::SameLine(ImGui::GetTreeNodeToLabelSpacing());
+        ImGui::TextColored(toImVec4(palette.text), "%s", scenario.name.empty()
+                                                                    ? "(unnamed)"
+                                                                    : scenario.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(toImVec4(palette.textDim), "  #%d", scenario.number);
+        if (scenario.comet) {
+            ImGui::SameLine();
+            ImGui::TextColored(toImVec4(palette.unsaved), "  comet");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("This mission turns into a comet.\nStored as \"%s\"",
+                                  scenario.cometName.c_str());
+            }
+        }
+        // The star, or the honest absence of one.
+        ImGui::SameLine();
+        if (scenario.awardsStar()) {
+            // A comet is the alarming one, so it gets the attention colour; a
+            // Green star is a deliberate choice and reads as ordinary.
+            const Rgba starColour = scenario.starTypeIsGreen() ? palette.text
+                                                 : scenario.comet ? palette.unsaved
+                                                                  : palette.accentFg;
+            ImGui::TextColored(toImVec4(starColour), "  star %d", scenario.powerStarId);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("%s", scenario.starTypeDescription().c_str());
+            }
+        } else {
+            ImGui::TextDisabled("  no star");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "This mission awards no star.\nThat is a normal state -- a galaxy "
+                    "can use a mission purely for its layers.");
+            }
+        }
+
+        // At a glance: one chip per zone, naming the layers it activates. Common
+        // is always on, so a mission that only uses Common still shows something.
+        if (selected || ImGui::IsItemHovered()) {
+            const std::vector<std::string>& zones = model.zones();
+            for (std::size_t z = 0; z < zones.size(); ++z) {
+                const std::vector<std::string> layers = model.activeLayers(scenario.row, zones[z]);
+                if (layers.size() <= 1) {
+                    continue; // Common only: nothing interesting to say
+                }
+                ImGui::SameLine();
+                std::string chip = zones[z];
+                chip += ": ";
+                for (std::size_t l = 1; l < layers.size(); ++l) {
+                    if (l > 1) {
+                        chip += "+";
+                    }
+                    chip += layers[l];
+                }
+                ImGui::TextColored(toImVec4(palette.textDim), "  %s", chip.c_str());
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip("%s always, plus the layers above.", zones[z].c_str());
+                }
+            }
+        }
+        ImGui::PopID();
+    }
+}
+
+// One mission's settings. Every widget commits through edit::mutateScenarios, and
+// inside that lambda it goes through ScenarioModel's own mutators -- so the model
+// re-reads the table it just wrote and the panel never disagrees with the file.
+void drawScenarioDetails(EditorState& state, smg::ScenarioModel& model,
+                         std::size_t index) {
+    const smg::Scenario& scenario = model.scenarios()[index];
+    const std::size_t row = scenario.row;
+    auto* galaxy = state.galaxy ? &*state.galaxy : nullptr;
+    if (galaxy == nullptr) {
+        return;
+    }
+    // Every commit re-reads the table, so the model is rebuilt from the archive
+    // INSIDE the lambda rather than captured: a captured model would point at the
+    // tables an undo restore is about to replace.
+    auto commit = [&](const std::function<void(smg::ScenarioModel&)>& edit,
+                      std::string label) {
+        edit::mutateScenarios(
+            *galaxy, state.scenarioUndoStack,
+            [&edit, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zones) {
+                smg::ScenarioModel live(scenarios, zones, galaxy->editableZones(), 0);
+                edit(live);
+            },
+            std::move(label));
+        model.refresh();
+        markDirty(state);
+    };
+
+    ImGui::SeparatorText("Mission");
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Name");
+    ImGui::SameLine(kCameraFieldLabelWidth);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    char nameBuffer[128];
+    std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", scenario.name.c_str());
+    if (ImGui::InputText("##scenname", nameBuffer, sizeof(nameBuffer)) &&
+        ImGui::IsItemDeactivatedAfterEdit()) {
+        // Committed on Enter or on focus loss, never per keystroke: a rename is
+        // one undo step, and per-keystroke would fill the stack with fragments.
+        const std::string applied(nameBuffer);
+        if (applied != scenario.name) {
+            commit([row, applied](smg::ScenarioModel& live) {
+                        live.renameScenario(row, applied);
+                    },
+                    "Rename mission");
+        }
+    }
+    ImGui::SetItemTooltip("What the galaxy map calls this mission.\nChanges are kept when you "
+                          "press Enter or click away.");
+
+    ImGui::TextDisabled("Game id %d", scenario.number);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("The game looks a mission up by this number, not by its row.\n"
+                          "It is fixed: two missions sharing one id would make the first "
+                          "unreachable.");
+    }
+
+    // ---- the star this mission awards ------------------------------------
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Star");
+    ImGui::SameLine(kCameraFieldLabelWidth);
+    int star = scenario.powerStarId;
+    if (ImGui::InputInt("##scenstar", &star, 1, 10)) {
+        const int applied = std::max(star, 0);
+        commit([row, applied](smg::ScenarioModel& live) { live.setPowerStar(row, applied); },
+               "Change the star");
+    }
+    ImGui::SetItemTooltip("The star id this mission hands out.\n0 means it awards no star, "
+                          "which is a normal state -- a mission can exist purely for "
+                          "its layers.");
+
+    // Star type is a STRING column, and an SMG1 galaxy has no such column at all.
+    // Say so rather than offering a picker that would ADD a column the game never
+    // asked for.
+    if (!galaxy->scenarioData().hasField("PowerStarType")) {
+        ImGui::TextDisabled("This galaxy records no star type (SMG1 stores a hidden flag "
+                            "instead).");
+    } else {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Star type");
+        ImGui::SameLine(kCameraFieldLabelWidth);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        static constexpr const char* kStarTypes[] = {"Normal", "Green", "Hidden"};
+        // An empty stored value is shown as such, never silently as "Normal".
+        std::string preview = scenario.powerStarType.empty() ? "(not recorded)"
+                                                            : scenario.powerStarType;
+        if (ImGui::BeginCombo("##scenstartype", preview.c_str())) {
+            for (const char* type : kStarTypes) {
+                if (ImGui::Selectable(type, scenario.powerStarType == type)) {
+                    const std::string applied(type);
+                    commit([row, applied](smg::ScenarioModel& live) {
+                                live.setPowerStarType(row, applied);
+                            },
+                            "Change the star type");
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip(
+            "Green and Hidden stars are excluded from the galaxy's ordinary star count "
+            "-- the same rule the game applies.");
+    }
+
+    // ---- comet ------------------------------------------------------------
+    bool comet = scenario.comet;
+    if (ImGui::Checkbox("Becomes a comet", &comet)) {
+        const bool applied = comet;
+        const int timer = scenario.cometTimer;
+        commit([row, applied, timer](smg::ScenarioModel& live) {
+                    live.setComet(row, applied, timer);
+                },
+                applied ? "Make this a comet" : "Remove the comet");
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("A comet mission changes what the galaxy looks like partway "
+                          "through.\nStored in the game's Comet column, not as a flag.");
+    }
+    if (scenario.comet) {
+        int timer = scenario.cometTimer;
+        if (ImGui::InputInt("Comet timer (frames)", &timer, 1, 30)) {
+            const int applied = std::max(timer, 0);
+            commit([row, applied](smg::ScenarioModel& live) {
+                        live.setComet(row, true, applied);
+                    },
+                    "Change the comet timer");
+        }
+    }
+}
+
+// The zone x layer matrix. Rows are zones, columns are Common plus the layers the
+// galaxy's missions actually use. Common is drawn as a LOCKED column because it
+// owns no bit in the file -- the model says so explicitly, and offering it as an
+// editable checkbox would be a lie the save would not honour.
+void drawScenarioLayerMatrix(EditorState& state, smg::ScenarioModel& model,
+                             std::size_t row) {
+    auto* galaxy = state.galaxy ? &*state.galaxy : nullptr;
+    if (galaxy == nullptr) {
+        return;
+    }
+    const std::vector<std::string>& zones = model.zones();
+    if (zones.empty()) {
+        ImGui::TextDisabled("This galaxy lists no zones.");
+        return;
+    }
+    // Which layers deserve a column: the union across every mission, so a layer
+    // only one mission uses is still reachable.
+    std::vector<std::string> columns;
+    for (const std::string& zone : zones) {
+        for (const smg::Scenario& scenario : model.scenarios()) {
+            for (const std::string& layer : model.activeLayers(scenario.row, zone)) {
+                if (layer != "Common" &&
+                    std::find(columns.begin(), columns.end(), layer) == columns.end()) {
+                    columns.push_back(layer);
+                }
+            }
+        }
+    }
+
+    ImGui::SeparatorText("Layers");
+    if (columns.empty()) {
+        ImGui::TextWrapped(
+            "No mission uses a layer yet, so there is nothing to tick here. Give one "
+            "mission a layer of its own and it appears as a column.");
+    }
+    if (!ImGui::BeginTable("##layergrid", static_cast<int>(zones.size() + 1),
+                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        return;
+    }
+    ImGui::TableSetupColumn("Zone", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Common", ImGuiTableColumnFlags_WidthFixed, 62.0F);
+    for (const std::string& layer : columns) {
+        ImGui::TableSetupColumn(layer.c_str(), ImGuiTableColumnFlags_WidthFixed, 48.0F);
+    }
+    ImGui::TableHeadersRow();
+    for (std::size_t z = 0; z < zones.size(); ++z) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(zones[z].c_str());
+        ImGui::TableNextColumn();
+        // A locked checkbox, not an editable one: Common owns no bit.
+        static bool commonOn = true;
+        ImGui::BeginDisabled();
+        ImGui::Checkbox("##common", &commonOn);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Every zone's Common layer is always active.\nIt owns no bit in "
+                              "the file, so there is nothing to switch off.");
+        }
+        for (const std::string& layer : columns) {
+            ImGui::TableNextColumn();
+            const std::vector<std::string> on = model.activeLayers(row, zones[z]);
+            const bool active = std::find(on.begin(), on.end(), layer) != on.end();
+            bool wanted = active;
+            ImGui::Checkbox("##layer", &wanted);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("%s in %s.\nAffects this mission only.",
+                                  layer.c_str(), zones[z].c_str());
+            }
+            if (wanted != active) {
+                const std::string zoneName = zones[z];
+                const std::string layerName = layer;
+                edit::mutateScenarios(
+                    *galaxy, state.scenarioUndoStack,
+                    [row, zoneName, layerName, wanted,
+                     galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
+                        smg::ScenarioModel live(scenarios, zoneRows,
+                                                galaxy->editableZones(), 0);
+                        (void)live.setLayerActive(row, zoneName, layerName, wanted);
+                    },
+                    (wanted ? "Turn on " : "Turn off ") + layer + " in " + zoneName);
+                model.refresh();
+                markDirty(state);
+            }
+        }
+    }
+    ImGui::EndTable();
+}
+
+// The zone list: add, remove, reorder. Reordering matters to the game (ZoneList
+// order is what the galaxy map shows), so it is a first-class action rather than
+// something the author does by hand.
+void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
+    auto* galaxy = state.galaxy ? &*state.galaxy : nullptr;
+    if (galaxy == nullptr) {
+        return;
+    }
+    ImGui::SeparatorText("Zones");
+    const std::vector<std::string>& zones = model.zones();
+    if (zones.empty()) {
+        ImGui::TextWrapped(
+            "This galaxy's zone list is empty, so the game has nothing to load for it.");
+    }
+    for (std::size_t index = 0; index < zones.size(); ++index) {
+        ImGui::PushID(static_cast<int>(index));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(zones[index].c_str());
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Zone %d of %d in the galaxy's load order.",
+                              static_cast<int>(index) + 1, static_cast<int>(zones.size()));
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(index == 0);
+        if (ImGui::SmallButton("^")) {
+            const std::size_t from = index;
+            const std::size_t to = index - 1;
+            edit::mutateScenarios(
+                *galaxy, state.scenarioUndoStack,
+                [from, to, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
+                    smg::ScenarioModel live(scenarios, zoneRows,
+                                            galaxy->editableZones(), 0);
+                    (void)live.moveZone(from, to);
+                },
+                "Move a zone up");
+            model.refresh();
+            markDirty(state);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(index + 1 >= zones.size());
+        if (ImGui::SmallButton("v")) {
+            const std::size_t from = index;
+            const std::size_t to = index + 1;
+            edit::mutateScenarios(
+                *galaxy, state.scenarioUndoStack,
+                [from, to, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
+                    smg::ScenarioModel live(scenarios, zoneRows,
+                                            galaxy->editableZones(), 0);
+                    (void)live.moveZone(from, to);
+                },
+                "Move a zone down");
+            model.refresh();
+            markDirty(state);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) {
+            // Confirm INLINE, next to the row: a modal would hide the very zone the
+            // author is being asked about.
+            ImGui::OpenPopup("##removezone");
+        }
+        if (ImGui::BeginPopup("##removezone")) {
+            ImGui::TextWrapped("Remove %s from the zone list?", zones[index].c_str());
+            ImGui::TextDisabled("This does NOT delete the zone's files.");
+            if (ImGui::Button("Remove it")) {
+                const std::size_t victim = index;
+                edit::mutateScenarios(
+                    *galaxy, state.scenarioUndoStack,
+                    [victim, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
+                        smg::ScenarioModel live(scenarios, zoneRows,
+                                                galaxy->editableZones(), 0);
+                        (void)live.removeZone(victim);
+                    },
+                    "Remove a zone");
+                model.refresh();
+                markDirty(state);
+                pushToast(state, "Removed " + zones[index] +
+                                      " from the list. Ctrl+Z puts it back.");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Keep it")) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##addzone", "Add a zone...")) {
+        const std::vector<std::string> known = galaxy->editableZones();
+        bool offered = false;
+        for (const std::string& name : known) {
+            if (std::find(zones.begin(), zones.end(), name) != zones.end()) {
+                continue;
+            }
+            offered = true;
+            if (ImGui::Selectable(name.c_str())) {
+                    const std::string applied = name;
+                    edit::mutateScenarios(
+                        *galaxy, state.scenarioUndoStack,
+                        [applied, galaxy](smg::BcsvTable& scenarios,
+                                          smg::BcsvTable& zoneRows) {
+                            smg::ScenarioModel live(scenarios, zoneRows,
+                                                    galaxy->editableZones(), 0);
+                            (void)live.addZone(applied);
+                        },
+                        "Add a zone");
+                    model.refresh();
+                    markDirty(state);
+                }
+        }
+        if (!offered) {
+            ImGui::TextDisabled("Every zone in this galaxy is already listed.");
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip(
+        "Adds a zone that already exists in the workspace.\nThis only edits the list -- "
+        "it does not create a zone's files, and a name typed here that has no map "
+        "archive behind it will make the game skip it.");
+}
+
+// The Scenarios panel: what each mission of the open galaxy awards, and which
+// layers of which zone it brings into play. Opens with the galaxy in the Project
+// panel and stays useful without a zone loaded, because the scenario tables
+// belong to the galaxy rather than to any one zone.
+void drawScenariosPanel(EditorState& state) {
+    if (!state.showScenariosPanel) {
+        return;
+    }
+    if (!ImGui::Begin("Scenarios", &state.showScenariosPanel)) {
+        ImGui::End();
+        return;
+    }
+    if (!state.galaxy.has_value()) {
+        ImGui::TextDisabled("No galaxy selected.");
+        ImGui::TextWrapped("Pick a galaxy in the Project panel. Its missions live in the "
+                           "galaxy's own scenario file, not in any one zone.");
+        ImGui::End();
+        return;
+    }
+    smg::GalaxyArchive& galaxy = *state.galaxy;
+
+    // Rebuilt from the archive every frame rather than cached: the tables are a
+    // few hundred bytes, and this way the panel can never show something an undo
+    // already replaced.
+    smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
+                             galaxy.editableZones(), 0);
+    // A mission index only means something while the list still has that row.
+    if (state.scenarioSelected && *state.scenarioSelected >= model.scenarios().size()) {
+        state.scenarioSelected.reset();
+    }
+
+    ImGui::TextDisabled("%d mission%s in %s", static_cast<int>(model.scenarioCount()),
+                        model.scenarioCount() == 1 ? "" : "s", galaxy.name().c_str());
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("Stored in the galaxy's own scenario file:\n"
+                          "%s/%sScenario.arc",
+                          galaxy.name().c_str(), galaxy.name().c_str());
+    }
+
+    const float half = (ImGui::GetContentRegionAvail().x - 8.0F) * 0.5F;
+    if (ImGui::Button("Add mission...", ImVec2(half, 0.0F))) {
+        std::snprintf(state.scenarioNewName, sizeof(state.scenarioNewName), "%s",
+                      "New Mission");
+        ImGui::OpenPopup("##addscenario");
+    }
+    ImGui::SetItemTooltip("Append a mission to this galaxy  (undoable)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!state.scenarioSelected.has_value());
+    if (ImGui::Button("Remove mission", ImVec2(half, 0.0F))) {
+        ImGui::OpenPopup("##removescenario");
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Remove the selected mission  (undoable)");
+
+    if (ImGui::BeginPopup("##addscenario")) {
+        ImGui::SeparatorText("New mission");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##scennew", state.scenarioNewName,
+                         sizeof(state.scenarioNewName));
+        ImGui::SetItemTooltip("The name the galaxy map shows. The game id is assigned "
+                              "automatically and never collides.");
+        ImGui::TextDisabled("It starts with no star. Add one below if you want it to.");
+        const std::string wanted(state.scenarioNewName);
+        ImGui::BeginDisabled(wanted.empty());
+        if (ImGui::Button("Add", ImVec2(100.0F, 0.0F))) {
+            const bool added = edit::mutateScenarios(
+                galaxy, state.scenarioUndoStack,
+                [&wanted, &galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
+                    smg::ScenarioModel live(scenarios, zoneRows,
+                                            galaxy.editableZones(), 0);
+                    (void)live.addScenario(wanted);
+                },
+                "Add a mission");
+            if (added) {
+                model.refresh();
+                // Select the row that was just appended, rather than trusting an
+                // index captured before the table grew.
+                if (!model.scenarios().empty()) {
+                    state.scenarioSelected = model.scenarios().size() - 1;
+                }
+                markDirty(state);
+                pushToast(state, "Added " + wanted + ". Ctrl+Z removes it.");
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0F, 0.0F))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopup("##removescenario") && state.scenarioSelected.has_value() &&
+        *state.scenarioSelected < model.scenarios().size()) {
+        // Copied, not referenced: removing the row invalidates the entry this
+        // popup was drawn from.
+        const smg::Scenario victim = model.scenarios()[*state.scenarioSelected];
+        ImGui::TextWrapped("Remove %s?", victim.name.c_str());
+        ImGui::TextDisabled("This removes the row from the file. Ctrl+Z brings it back.");
+        if (ImGui::Button("Remove it")) {
+            const std::size_t row = victim.row;
+            edit::mutateScenarios(
+                galaxy, state.scenarioUndoStack,
+                [row, &galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
+                    smg::ScenarioModel live(scenarios, zoneRows,
+                                            galaxy.editableZones(), 0);
+                    (void)live.removeScenario(row);
+                },
+                "Remove a mission");
+            state.scenarioSelected.reset();
+            model.refresh();
+            markDirty(state);
+            pushToast(state, "Removed the mission. Ctrl+Z puts it back.");
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Keep it")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::Separator();
+    const float listHeight = ImGui::GetTextLineHeight() * 8.0F;
+    if (ImGui::BeginChild("##scenlist", ImVec2(0.0F, listHeight), true)) {
+        drawScenarioCardList(state, model);
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (!state.scenarioSelected.has_value()) {
+        ImGui::TextDisabled("Select a mission above to edit it.");
+        ImGui::End();
+        return;
+    }
+    const std::size_t selected = *state.scenarioSelected;
+    if (selected >= model.scenarios().size()) {
+        state.scenarioSelected.reset();
+        ImGui::End();
+        return;
+    }
+    drawScenarioDetails(state, model, selected);
+    drawScenarioLayerMatrix(state, model, model.scenarios()[selected].row);
+    drawScenarioZoneList(state, model);
+
+    // What Ctrl+Z will do, so the separate undo stacks are never a mystery.
+    if (state.scenarioUndoStack.canUndo()) {
+        ImGui::SeparatorText("Undo");
+        ImGui::TextDisabled("%s   (Ctrl+Z)", state.scenarioUndoStack.undoLabel().c_str());
+    }
+    ImGui::End();
+}
+
 void drawCamerasPanel(EditorState& state) {
     if (!state.showCamerasPanel) {
         return;
@@ -4663,19 +5362,28 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
-        const bool canUndo = state.undoStack.canUndo();
-        const bool canRedo = state.undoStack.canRedo();
+        // The Undo entry follows whichever document owns the key, so the label in the
+        // menu is the label the key will actually undo.
+        const bool galaxyUndo = scenarioUndoActive(state);
+        const bool canUndo = galaxyUndo ? state.scenarioUndoStack.canUndo()
+                                        : state.undoStack.canUndo();
+        const bool canRedo = galaxyUndo ? state.scenarioUndoStack.canRedo()
+                                        : state.undoStack.canRedo();
         if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo)) {
             performUndo(state);
         }
         if (ImGui::IsItemHovered() && canUndo) {
-            ImGui::SetTooltip("%s", state.undoStack.undoLabel().c_str());
+            ImGui::SetTooltip("%s", (galaxyUndo ? state.scenarioUndoStack.undoLabel()
+                                                : state.undoStack.undoLabel())
+                                          .c_str());
         }
         if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo)) {
             performRedo(state);
         }
         if (ImGui::IsItemHovered() && canRedo) {
-            ImGui::SetTooltip("%s", state.undoStack.redoLabel().c_str());
+            ImGui::SetTooltip("%s", (galaxyUndo ? state.scenarioUndoStack.redoLabel()
+                                                : state.undoStack.redoLabel())
+                                          .c_str());
         }
         ImGui::Separator();
         const bool hasStage = state.stage.has_value();
@@ -4746,6 +5454,9 @@ void drawMenuBar(EditorState& state, bool& done) {
         // menu, so the panel and that toggle are named apart on purpose: the
         // panel edits CameraParam.bcam, the overlay draws the markers.
         ImGui::MenuItem("Cameras", nullptr, &state.showCamerasPanel);
+        // Scenarios edits the GALAXY's tables, not a zone's, so it is named for
+        // what it holds rather than for the file it lives in.
+        ImGui::MenuItem("Scenarios", nullptr, &state.showScenariosPanel);
         ImGui::MenuItem("Problems", nullptr, &state.showProblems);
         ImGui::MenuItem("3D Viewport", nullptr, &state.showViewport);
         ImGui::MenuItem("Log", nullptr, &state.showLog);
@@ -6400,6 +7111,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
             ImGui::DockBuilderDockWindow("Viewport", dockCenter);
             ImGui::DockBuilderDockWindow("Properties", dockRight);
             ImGui::DockBuilderDockWindow("Cameras", dockRight);
+            ImGui::DockBuilderDockWindow("Scenarios", dockRight);
             ImGui::DockBuilderDockWindow("Log", dockBottom);
             ImGui::DockBuilderDockWindow("Tutorials", dockBottom);
             ImGui::DockBuilderDockWindow("Problems", dockBottom);
@@ -6416,6 +7128,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         drawObjectsPanel(state);
         drawPropertiesPanel(state);
         drawCamerasPanel(state);
+        drawScenariosPanel(state);
         placeViewportChild(state);
         if (state.showLog) {
             drawRealLogWindow(state);

@@ -78,6 +78,14 @@
            smg/scenario_model.hpp + .cpp own them, and GalaxyArchive keeps all
            three tables, adds dirty() and save(). See section 13 for the format
            facts, which cost three wrong guesses to pin down.
+           A later pass closed the last two columns Scenaristar surfaced and this
+           model dropped: AppearPowerStarObj (which star OBJECT a mission spawns --
+           the game reads it via getAppearPowerStarObjName, and it is the whole
+           point of Scenaristar's star picker) and LuigiModeTimer (SMG1's timed
+           mode). Both are on Scenario, both have mutators, and the panel offers
+           them. The star picker's list comes from the live ObjectDatabase rather
+           than Scenaristar's baked-in _AppearPowerStarObjTable.bcsv, so it cannot
+           go stale and it shows friendly names from data/objectdb.json.
 
    [done]  THE SCENARIO CLI. `galaxy scenarios` and `galaxy scenario
             add|set|remove|layer` run the same ScenarioModel the panel renders, so
@@ -122,9 +130,12 @@
             `zone templates`, `galaxy templates`. See section 15, including four
             bugs the test found -- two of them silent data loss.
 
-  What is NOT verified: the nine manual checks in section 8.5, which need a
-  person clicking a real map. Section 16 ranks what is left; section 17 is
-  opinion, not plan.
+  What is NOT verified: two separate categories, and it matters that they are
+  different. First, the nine manual checks in section 8.5 -- automation should
+  prove that, and cannot. Second, FOUR things needing a human with a mouse: the
+  four checks now listed in section 16 item 1 (created zone on retail, the create
+  dialog, collision picking's wiring, an SMG1 zone on a real archive). Section 16
+  ranks what is left; section 17 is opinion, not plan.
 
   ONE TESTING TRAP THAT HAS ALREADY COST A SESSION: an std::ofstream still open
   when its file is removed, or when a TemporaryDirectory is destroyed, fails on
@@ -867,9 +878,10 @@ BUILD RECIPE CORRECTIONS (verified this session -- the two commands above are
 
  Still open (do not "fix" these without asking), and none of them is
    documentation debt -- each is either a feature or needs hardware:
-    - CREATE ZONE / CREATE GALAXY is roadmap 5, not a camera concern. The
-      enabling piece shipped (section 14); the builder, the template loader and
-      the GUI's layer picker are still to come.
+    - CREATE ZONE / CREATE GALAXY: CLOSED, and no longer a camera concern. The
+      builder, the template loader and the GUI's layer picker all shipped
+      (sections 15 and 16 item 2). What remains is hardware verification, tracked
+      in section 16 item 1 -- not here.
    - The cutscene/scenario-starter types are now AUTHORABLE, but a row added that
      way will usually land on a camtype the solver reports PoseSupport::none for
      (CAM_TYPE_ANIM / RAIL_DEMO are keyframed over time in game). The badge says
@@ -967,9 +979,20 @@ BUILD RECIPE CORRECTIONS (verified this session -- the two commands above are
   9837f34  feat(cli): reach the scenario tables from the command line
   d51b851  feat(rarc): create archives from nothing                 <- section 14
   ca0e0cd  refactor(smg): share the layered-table list with the loader
+   39cdd70  fix(io): unique save temporaries, and stop the fallback throwing
   f8904bf  feat(zones): create zones and galaxies from nothing  <- section 15
   f8820ec  feat(cli): zone/galaxy create + the template loader
-  ef55168  fix(tests): close test streams before removing their files <- HEAD
+  ef55168  fix(tests): close test streams before removing their files
+  68aa3e2  docs: bring BLUEPRINT up to date, and rank what is left
+  0f2ddbf  plan/apply split, temp-file unification, round-trip tests  <- section 17
+  2ba3fac  test-only: collision picking, wireframe welding, create plans
+  89c33c9  the create dialog's GUI layer picker (roadmap 5)
+  0328496  collision-aware picking + wireframe overlay, canonicalLayerName,
+           render::LayerFilter                               <- HEAD
+
+ The four newest subjects are not meaningful, so the content is written above
+ instead. Do not trust a subject in this repo as a description of what shipped;
+ read the stat.
 
 Six of those commits are the camera feature and the next nine are the
   scenario / galaxy / zone work (sections 13, 14 and 15); the ones before
@@ -1035,6 +1058,16 @@ Six of those commits are the camera feature and the next nine are the
      NOT the row order.
    * PowerStarType is compared as a string; the game excludes Hidden and Green from
      the "normal star" count (getPowerStarNum vs getNormalPowerStarNum).
+   * PowerStarId is ONE INTEGER, NOT A BITMASK of the scenario's declared stars.
+     Scenaristar's ScenarioData.cs writes the accessor as (PowerStarID & (1 <<
+     StarID)) and tags that line "//TODO: TEST THIS". The game's own
+     ScenarioData::getPowerStarNum reads a single u32 and only tests it for
+     non-zero, and getScenarioNum does the same for IsHidden -- so "awards a
+     star" is exactly `id != 0`. Someone porting from Scenaristar will be tempted
+     to "fix" this toward the bitmask. Don't: testScenarioEditing pins
+     setPowerStar(4) == 4 and awardsStar() on and off so that regression fails the
+     suite instead of reaching a galaxy.
+
    * THE LAYER RULE: every per-zone column IS that zone's layer mask, read RAW.
      Bit 0 = LayerA ... bit 15 = LayerP; "Common" is always on and owns no bit.
      Java parity, verbatim: layerList.add("Common"); for (i<16) if (mask & (1<<i))
@@ -1223,13 +1256,10 @@ Six of those commits are the camera feature and the next nine are the
   accepts a created zone: no game has been run against it. Treat "the game reads
   this" as unverified until someone opens a created zone on hardware.
 
-  STILL OPEN: the GUI layer picker. The CLI (zone create / galaxy create / zone
-  templates / galaxy templates) and the shared core are done; the Scenarios
-  panel has no create button yet, and creation is NOT undoable -- it writes whole
-  new archives, which the GalaxyTableCommand snapshot model cannot express. The
-  GUI must say so in the confirm step rather than hiding the gap.
-^ SUPERSEDED -- see below. The paragraph above is what the picker looked like
-     while it was still to do.
+  CLOSED: the GUI layer picker. [DONE] See the "[DONE] THE GUI LAYER PICKER HAS
+  LANDED" block below for what shipped.
+^ SUPERSEDED -- see below. The stale paragraph for this item was removed; the [DONE]
+     block below is what shipped.
 
    [DONE] THE GUI LAYER PICKER HAS LANDED. Project > Create offers "New zone..."
    and "New galaxy...", sharing the CLI's core through the SAME
@@ -1267,23 +1297,72 @@ Six of those commits are the camera feature and the next nine are the
   UNBLOCKS THE MOST, with the two non-code items first -- because the highest
   value thing on this list is not a feature and is not mine to do.
 
-  1. VERIFY A CREATED ZONE ON HARDWARE. Ten minutes of a person's time, and it
-     is the only way to close the gap section 15 leaves open. Everything there is
-     proven against Whitehole Pro's own readers; nobody has run a retail game.
-     If a created zone loads and plays, the biggest unproven claim in the repo
-     becomes proven. If it does not, we learn something worth far more than the
-     ten minutes cost. DO THIS BEFORE ANY MORE FORMAT WORK.
+  1. VERIFY ON HARDWARE -- and the list is now FOUR items, not one. Everything
+     below is proven against Whitehole Pro's own readers and nothing else; no
+     retail game has been run, and no human has clicked anything.
+       (a) A created zone opens and plays (section 15's open claim).
+       (b) The create dialog (section 15's GUI layer picker) writes what its
+           confirm step listed.
+       (c) Collision picking (section 16 item 5): clicking a wall selects the
+           wall. The DECISION is unit-tested; the WIRING is compile-verified only.
+       (d) An SMG1 zone loads with correct layer names (the canonicalLayerName
+           fix rests on synthetic tables, never a real SMG1 archive).
+     Ten minutes each, and they are the only way to close any of it. The debt
+     grows faster than it is paid, and it reads as zero risk until a modder hits
+     it. DO THIS BEFORE ANY MORE FORMAT WORK.
 
-  2. THE GUI LAYER PICKER. The last piece of roadmap 5. The core and the CLI are
-     done and shared, so this is UI only -- but it is what makes creation
-     reachable for a person who does not want to open a terminal. Note the
-     honesty requirement: creation is NOT undoable (section 15), and the confirm
-     step must say so.
+  2. THE GUI LAYER PICKER. [DONE] Project > Create offers "New zone..." and "New
+     galaxy...", sharing the CLI's core through the SAME planStageZone()/
+     planGalaxy() that `create --dry-run` prints, so the confirm step lists the
+     REAL files rather than describing them. Three rules keep it from becoming a
+     second, looser implementation of the CLI:
+       * the layer checkboxes hand their selection to smg::normalizeStageLayers(),
+         the same function the builder calls;
+       * template layers are drawn CHECKED AND DISABLED (the archive carries them,
+         so the create makes them either way) and "Common" is locked exactly as
+         the layer matrix locks it, because it owns no bit in the file;
+       * the buttons are disabled WITH A STATED REASON when no workspace is open,
+         since creating needs a game directory and a game type. A greyed button
+         with no explanation is the same lie as an editable Common checkbox.
+     The confirm step says "This writes whole new archives. Ctrl+Z cannot undo
+     it." -- section 17's "document NOT UNDOABLE in the UI", finally on screen.
+     HONEST AFTER A ZONE CREATE: a new zone is in no galaxy's ZoneList until it
+     is added there, so the panel re-reads the galaxy and says so in an ERROR
+     toast rather than implying it is open. That is what `galaxy scenario layer`
+     fixes. A galaxy create has no such gap.
 
   3. LAYER FILTERING + HIERARCHICAL OBJECT TREE (roadmap 3). What makes a LARGE
      galaxy usable. The Scenarios panel made the structure legible, but the
      viewport still cannot hide a layer or navigate a galaxy's zones as a tree.
      This is the biggest usability win left per unit of work.
+[STARTED -- read this before wiring it] render::LayerFilter now exists and is
+     tested (testLayerFilter), but it is deliberately NOT yet a parameter on
+     ViewportScene::rebuild(). THE BLOCKER IS A LATENT COUPLING, and it is the
+     single most important thing to know about this item:
+
+       rebuild() builds boxes_ one-to-one with the object list, IN ORDER, and the
+       entire editor relies on `boxes_[i].objectIndex == i`. pickAt() returns a
+       BOX index; gui_win32's applyPlainPick stores it in state.selectedObject;
+       and every consumer from there on treats that value as a STAGE OBJECT
+       index. Nothing declares this. It is true only by construction.
+
+       So the obvious implementation -- skip hidden objects while building boxes_
+       -- does not hide anything. It shifts every index, and the effect is that
+       clicking object 5 selects object 4. The feature would appear to work, the
+       geometry would look right, and picking would be quietly broken for every
+       object after the first hidden one.
+
+     Two shapes can fix it, and NEITHER is a one-line change:
+       (a) pickAt() translates box index -> boxes()[i].objectIndex, and every
+           consumer of the selection agrees the value is a stage index; or
+       (b) boxes_ stays parallel to the object list with hidden boxes FLAGGED,
+           and draw and pick skip them.
+     (b) keeps indices stable and is the smaller thing to reason about.
+
+     LayerFilter itself is done and its decisions are pinned, including the two
+     that would each have been silent: Common is NEVER hideable (it owns no bit,
+     so a bit-test would hide most of most zones), and an unrecognised layer name
+     stays VISIBLE rather than vanishing with no way to bring it back.
 
   4. ANIMATIONS (roadmap 2). Spin platforms, doors, live stars. The largest
      single feature: it needs BCK/BPK/BRK/BTK parsers AND a timeline UI AND a
@@ -1356,10 +1435,30 @@ THE DECISION IS PURE AND TESTED, in render/surface_snap, deliberately away
   Things I noticed while working that would pay back more than the feature they
   came from. Recorded so the next session can pick them up if they agree.
 
-  STATUS: four are now DONE and carry a [DONE] marker with what they found --
-  the findExact() convention, temp-file naming, --dry-run, the round-trip
-  property tests, the shipped-template check, and the API holes. The rest are
-  still open.
+  STATUS: SEVEN of these are DONE and carry a [DONE] marker with what they found --
+  the findExact() convention, temp-file naming, --dry-run, the round-trip property
+  tests, the shipped-template check, the API holes, and "document NOT UNDOABLE in
+  the UI". Two are still open: the "verify against retail" checklist, and the
+  find() lint (the convention is written down and pinned by a test, but nothing
+  mechanically stops a new writer from calling find()).
+
+  WHAT THE DONE ONES ACTUALLY FOUND, because it is the pattern worth carrying
+  forward: five of them were bugs NO TEST WOULD HAVE CAUGHT, because the wrong
+  answer was silent --
+    * scenarioLayerBit() returned -1 for EVERY object in EVERY SMG1 zone;
+    * "Layer" + char was POINTER ARITHMETIC, reading adjacent string-literal
+      memory, clean under /W4 AND -Wconversion;
+    * the object-database download deleted its destination BEFORE renaming it, so
+      a failed rename left the modder with nothing;
+    * without the on-surface tolerance, every click on a modelled object would
+      have rejected itself against its own collision, making collision zones
+      entirely unselectable -- indistinguishable from "the feature broke the
+      editor";
+    * and boxes_[i].objectIndex == i is a coupling nothing declares, so the
+      obvious layer-filter implementation would have made clicking object 5
+      select object 4.
+  In this codebase the dangerous changes are the ones that compile clean and look
+  right. Budget for that.
 
   * A "VERIFY AGAINST RETAIL" CHECKLIST for every format change. The one test
     that would have caught section 15's worst bug -- a layer silently holding no
@@ -1418,10 +1517,10 @@ THE DECISION IS PURE AND TESTED, in render/surface_snap, deliberately away
     planning never looks at it. The CLI re-checks it after planning, and
     testStageCreatePlans pins plan == what create actually wrote.
 
-  * DOCUMENT "NOT UNDOABLE" IN THE UI, NOT ONLY HERE. Section 15 says creation
-    cannot be undone by the snapshot model. That belongs on screen in the
-    confirm step. It is currently written down in exactly one place, and that
-    place is a file most users will not read.
+  * DOCUMENT "NOT UNDOABLE" IN THE UI, NOT ONLY HERE. [DONE] The confirm step of
+    Project > Create now prints it in the Scenarios panel's own TextDisabled voice.
+    cannot be undone by the snapshot model. The gap section 15 records is now
+    closed on screen rather than only here.
 
   * UNIFY TEMP-FILE NAMING. [DONE, and the blueprint's version of this was
     WRONG] It said writeFile() had been fixed but "the builder and the CLI do

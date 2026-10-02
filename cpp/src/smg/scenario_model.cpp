@@ -203,6 +203,13 @@ Scenario ScenarioModel::readScenario(std::size_t row) const {
     out.number = scenarioData_->getInt(cells, kScenarioNo, 0);
     out.name = scenarioData_->getString(cells, kScenarioName);
     out.powerStarId = scenarioData_->getInt(cells, kPowerStarId, 0);
+    // NOT a bitmask. Scenaristar's ScenarioData.cs implements it as
+    // (PowerStarID & (1 << StarID)) -- with its own "//TODO: TEST THIS" on the
+    // line. The game's ScenarioData::getPowerStarNum reads one u32 and only tests
+    // it for non-zero, and getScenarioNum does the same for IsHidden. Any edit
+    // that turns this field into a bit set is a regression, not a fix.
+    out.appearPowerStarObj = scenarioData_->getString(cells, kAppearPowerStarObj);
+    out.luigiModeTimer = scenarioData_->getInt(cells, kLuigiModeTimer, 0);
     // PowerStarType is SMG2-only. An SMG1 galaxy has no such column, and the game
     // expresses the same thing as an integer IsHidden; getString on a missing or
     // numeric column yields empty, which leaves the type Unknown rather than
@@ -290,20 +297,24 @@ std::int32_t ScenarioModel::nextFreeScenarioNumber() const {
 // columns at all) is taken as SMG2, which is the common case and matches
 // populateScenarioFieldsScenarioData's own default.
 void ensureScenarioColumns(BcsvTable& table) {
-    table.ensureField(kScenarioNo, BcsvType::integer);
-    table.ensureField(kScenarioName, BcsvType::stringOffset);
-    table.ensureField(kPowerStarId, BcsvType::integer);
+    // ensureField() is [[nodiscard]] because callers usually want the index, but
+    // here it is called purely for its side effect -- appending the column if the
+    // table does not have it yet. Discard explicitly rather than silently, so the
+    // /W4 build stays clean without changing what this function does.
+    static_cast<void>(table.ensureField(kScenarioNo, BcsvType::integer));
+    static_cast<void>(table.ensureField(kScenarioName, BcsvType::stringOffset));
+    static_cast<void>(table.ensureField(kPowerStarId, BcsvType::integer));
     // Types exactly as StageHelper declares them: Comet is a string, and the
     // per-zone mask columns are integers. Guessing these wrong makes setInt throw
     // on a string column, which is how the first draft of this file failed.
-    table.ensureField(kAppearPowerStarObj, BcsvType::stringOffset);
-    table.ensureField(kComet, BcsvType::stringOffset);
-    table.ensureField(kLuigiModeTimer, BcsvType::integer);
+    static_cast<void>(table.ensureField(kAppearPowerStarObj, BcsvType::stringOffset));
+    static_cast<void>(table.ensureField(kComet, BcsvType::stringOffset));
+    static_cast<void>(table.ensureField(kLuigiModeTimer, BcsvType::integer));
     // SMG1 stores IsHidden instead of the SMG2 pair. Its presence is the signal.
     const bool smg1 = table.hasField("IsHidden");
     if (!smg1) {
-        table.ensureField(kPowerStarType, BcsvType::stringOffset);
-        table.ensureField(kCometLimitTimer, BcsvType::integer);
+        static_cast<void>(table.ensureField(kPowerStarType, BcsvType::stringOffset));
+        static_cast<void>(table.ensureField(kCometLimitTimer, BcsvType::integer));
     }
 }
 
@@ -392,6 +403,24 @@ void ScenarioModel::setPowerStar(std::size_t row, std::int32_t powerStarId) {
     ensureScenarioColumns(*scenarioData_);
     scenarioData_->setInt(scenarioData_->rows()[row], kPowerStarId,
                           std::max(powerStarId, 0));
+    readAll();
+}
+
+void ScenarioModel::setAppearPowerStarObj(std::size_t row, std::string_view objectName) {
+    if (row >= scenarioData_->rows().size()) {
+        return;
+    }
+    ensureScenarioColumns(*scenarioData_);
+    scenarioData_->setString(scenarioData_->rows()[row], kAppearPowerStarObj, std::string(objectName));
+    readAll();
+}
+
+void ScenarioModel::setLuigiModeTimer(std::size_t row, std::int32_t frames) {
+    if (row >= scenarioData_->rows().size()) {
+        return;
+    }
+    ensureScenarioColumns(*scenarioData_);
+    scenarioData_->setInt(scenarioData_->rows()[row], kLuigiModeTimer, std::max(frames, 0));
     readAll();
 }
 

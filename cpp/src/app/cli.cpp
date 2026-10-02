@@ -1923,7 +1923,10 @@ int zoneCreateCommand(int argc, char** argv) {
 
 // `zone templates` / `galaxy templates` -- what can be created from, so the
 // names accepted by --template are discoverable instead of guessed.
-int templateListCommand(int argc, char** argv, int gameType, bool forGalaxy) {
+// argc is unused: everything is reached through argv[3] onward, the same way the
+// other subcommands index it.
+int templateListCommand([[maybe_unused]] int argc, char** argv, int gameType,
+                        bool forGalaxy) {
     const auto templates = dataDirectory(argv[3]) / "templates";
     auto list = smg::loadStageTemplates(templates, gameType, forGalaxy);
     const auto bare = smg::bareMinimumTemplate(gameType);

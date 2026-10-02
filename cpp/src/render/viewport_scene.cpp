@@ -1,5 +1,7 @@
 #include "whitehole/render/viewport_scene.hpp"
 
+#include "whitehole/util/text.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -695,6 +697,40 @@ struct EdgeKeyHash {
                                                             (mix(key.low) >> 2)));
     }
 };
+
+bool LayerFilter::shows(std::string_view layer) const noexcept {
+    // Common owns no bit and is ALWAYS visible -- the same rule the scenario file
+    // follows. Testing a bit for it would return false and hide every object in
+    // the Common layer, which in most zones is most of the geometry. Special-cased
+    // here rather than left to each caller to remember.
+    if (whitehole::util::equalIgnoreCase(layer, "Common")) {
+        return true;
+    }
+    const int bit = smg::scenarioLayerBit(layer);
+    if (bit < 0) {
+        // Not a layer we recognise: visible. Hiding geometry the filter does not
+        // understand would make a mislabelled or modded layer vanish with no way
+        // to bring it back -- a far worse failure than showing something.
+        return true;
+    }
+    return ((bits >> bit) & 1u) != 0u;
+}
+
+void LayerFilter::set(std::string_view layer, bool visible) noexcept {
+    const int bit = smg::scenarioLayerBit(layer);
+    if (bit < 0) {
+        // Common (and anything unrecognised) owns no bit, so there is nothing to
+        // set. Silently doing nothing is right here: a caller asking to hide
+        // Common is asking for something the file cannot express, and shows() will
+        // keep it visible either way.
+        return;
+    }
+    if (visible) {
+        bits |= (1u << bit);
+    } else {
+        bits &= ~(1u << bit);
+    }
+}
 
 std::vector<OverlaySegment> collisionSegmentsFor(const std::vector<SnapTriangle>& triangles) {
     // Vertices are quantised before keying. Two triangles that share an edge

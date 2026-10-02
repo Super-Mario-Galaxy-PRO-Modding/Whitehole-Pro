@@ -78,6 +78,8 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 
 ### 🌌 Galaxy missions (Scenarios)
 - **View > Scenarios** edits the galaxy's own scenario file: add, rename and remove **missions**, choose the star each one awards and its type, set comet state and timer.
+- **Choose which star OBJECT a mission spawns.** `AppearPowerStarObj` decides which `PowerStarAppear_*` object appears — the boss you actually fight. Pick it by friendly name (the list comes from the live ObjectDB, so it cannot go stale), hover a choice to see the internal name written to the file, or leave it *game decides*. A value already in the file that the ObjectDB does not know is shown as-is, never hidden.
+- **Luigi timed mode (SMG1)** — set the frame limit for a Luigi mission. SMG2 has no Luigi timed mode, so the field is not offered there.
 - **Layers matrix** — pick which `LayerA`…`LayerP` each mission activates per zone. `Common` is always on and is shown locked, because it is not a value in the file.
 - **At a glance** — each mission shows its star, type and comet badge, plus the zones and layers it brings in, so a whole galaxy is legible at once.
 - **Zone list** — add, remove and reorder the zones the galaxy loads. This edits the list only; it never creates or deletes a zone's files.
@@ -379,7 +381,7 @@ editor's core · full test suite.
 1. ✅ KCL collision rendering — collision-aware picking, and a wireframe overlay
       (View > Overlays > Collision, off by default)
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
-3. 🚧 Layer filtering & hierarchical object tree
+3. 🚧 Layer filtering & hierarchical object tree — `LayerFilter` is implemented and tested, **but not yet wired**: `rebuild()`'s box-index == object-index coupling would otherwise make clicks select the wrong object (see BLUEPRINT §16.3)
 4. 🚧 BCSV spreadsheet editor
 5. ✅ Galaxy & zone management — scenario editor (View > Scenarios), a full CLI for the scenario tables, `zone create` / `galaxy create` with the bundled templates, **and the GUI's layer picker** (Project > Create) with a "show what it writes" confirm step
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)

@@ -4303,6 +4303,95 @@ void drawNewCameraIdEditor(EditorState& state, const smg::CameraParamTable& tabl
     }
 }
 
+// A star APPEARANCE object this workspace's ObjectDatabase knows about, paired
+// with the friendly display name it carries.
+struct StarObjectChoice {
+    std::string internal;
+    std::string display;
+};
+
+// Case-insensitive prefix test. Retail files spell it `PowerStarAppear_...`, but
+// a modder's own object may not, and refusing a star object over case would be
+// exactly the kind of silent rejection the model deliberately avoids.
+bool isStarAppearanceObject(const std::string& name) {
+    static constexpr std::string_view kPrefix = "PowerStarAppear_";
+    if (name.size() <= kPrefix.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < kPrefix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(name[i])) !=
+            std::tolower(static_cast<unsigned char>(kPrefix[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Every PowerStarAppear* object the workspace offers, sorted by internal name.
+//
+// Scenaristar ships this list as a baked-in `_AppearPowerStarObjTable.bcsv` of
+// {label, internal name} pairs, so anything added after it shipped can never be
+// chosen and the labels have no way to follow the game. The ObjectDatabase is
+// loaded fresh from `data/objectdb.json` every run and arrives ASYNCHRONOUSLY on
+// a first launch, so this cache is keyed on the database's shape and rebuilt
+// when it lands -- nothing drifts, and there is no second copy of the data.
+const std::vector<StarObjectChoice>& starObjectChoices(const db::ObjectDatabase& source) {
+    static std::vector<StarObjectChoice> cached;
+    static std::size_t cachedSize{0};
+    static std::size_t cachedClasses{0};
+    static bool built{false};
+    if (built && cachedSize == source.size() && cachedClasses == source.classCount()) {
+        return cached;
+    }
+    built = true;
+    cachedSize = source.size();
+    cachedClasses = source.classCount();
+    cached.clear();
+    for (const std::string& name : source.names()) {
+        if (!isStarAppearanceObject(name)) {
+            continue;
+        }
+        StarObjectChoice choice;
+        choice.internal = name;
+        const db::ObjectInfo* info = source.find(name);
+        choice.display = (info != nullptr && !info->name.empty()) ? info->name : name;
+        cached.push_back(std::move(choice));
+    }
+    std::sort(cached.begin(), cached.end(),
+              [](const StarObjectChoice& a, const StarObjectChoice& b) {
+                  return a.internal < b.internal;
+              });
+    return cached;
+}
+
+// Friendly name for a stored star object, or empty when the database does not
+// list it -- which happens for a modder's own object, and for the window before
+// a first launch finishes downloading the ObjectDB.
+std::string starObjectDisplayName(const std::vector<StarObjectChoice>& choices,
+                                  const std::string& stored) {
+    for (const StarObjectChoice& choice : choices) {
+        if (choice.internal == stored) {
+            return choice.display;
+        }
+    }
+    return {};
+}
+
+// The label shown for a stored star object. A value the ObjectDatabase does not
+// list is shown verbatim and marked, never replaced by a guess, because hiding
+// it would be how a real value gets lost.
+std::string starObjectLabel(const std::vector<StarObjectChoice>& choices,
+                            const std::string& stored) {
+    if (stored.empty()) {
+        return "(game decides)";
+    }
+    const std::string display = starObjectDisplayName(choices, stored);
+    if (!display.empty()) {
+        return display;
+    }
+    return stored + "  (not in ObjectDB)";
+}
+
 // The scenario list, drawn as CARDS rather than a grid. Each card is one mission:
 // its name, the star it awards, that star's type in plain words, and a comet badge.
 // The strip of zone chips under the name is the at-a-glance view -- the whole
@@ -4365,6 +4454,23 @@ void drawScenarioCardList(EditorState& state, smg::ScenarioModel& model) {
             }
         }
 
+        // The star OBJECT this mission spawns, but only when the file actually
+        // names one. Empty is the game's own default and is not worth a badge on
+        // every card in the list.
+        if (!scenario.appearPowerStarObj.empty()) {
+            const std::string display =
+                starObjectDisplayName(starObjectChoices(state.objectDb),
+                                      scenario.appearPowerStarObj);
+            const std::string label = display.empty() ? scenario.appearPowerStarObj : display;
+            ImGui::SameLine();
+            ImGui::TextColored(toImVec4(palette.textDim), "  %s", label.c_str());
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("Spawns this star appearance object:\n%s\n"
+                                  "Stored in the AppearPowerStarObj column.",
+                                  scenario.appearPowerStarObj.c_str());
+            }
+        }
+
         // At a glance: one chip per zone, naming the layers it activates. Common
         // is always on, so a mission that only uses Common still shows something.
         if (selected || ImGui::IsItemHovered()) {
@@ -4409,7 +4515,9 @@ void drawScenarioDetails(EditorState& state, smg::ScenarioModel& model,
     // tables an undo restore is about to replace.
     auto commit = [&](const std::function<void(smg::ScenarioModel&)>& edit,
                       std::string label) {
-        edit::mutateScenarios(
+        // A no-op edit (the value was already what was typed) changes no bytes,
+        // pushes no undo entry, and must not mark the document unsaved.
+        const bool changed = edit::mutateScenarios(
             *galaxy, state.scenarioUndoStack,
             [&edit, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zones) {
                 smg::ScenarioModel live(scenarios, zones, galaxy->editableZones(), 0);
@@ -4417,7 +4525,9 @@ void drawScenarioDetails(EditorState& state, smg::ScenarioModel& model,
             },
             std::move(label));
         model.refresh();
-        markDirty(state);
+        if (changed) {
+            markDirty(state);
+        }
     };
 
     ImGui::SeparatorText("Mission");
@@ -4493,6 +4603,81 @@ void drawScenarioDetails(EditorState& state, smg::ScenarioModel& model,
         ImGui::SetItemTooltip(
             "Green and Hidden stars are excluded from the galaxy's ordinary star count "
             "-- the same rule the game applies.");
+    }
+
+    // ---- the star OBJECT this mission's star is born from ----------------
+    // The game resolves which PowerStarAppear object spawns through
+    // getAppearPowerStarObjName, so this is not decoration: it is what decides
+    // WHICH boss or star the level actually shows. Scenaristar's headline feature
+    // and the one value the panel previously dropped on read.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Star object");
+    ImGui::SameLine(kCameraFieldLabelWidth);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    {
+        const std::vector<StarObjectChoice>& choices = starObjectChoices(state.objectDb);
+        const std::string preview = starObjectLabel(choices, scenario.appearPowerStarObj);
+        if (ImGui::BeginCombo("##scenstarobj", preview.c_str())) {
+            // Clearing is a real choice, not an omission: it hands the decision
+            // back to the game rather than pinning this mission to one object.
+            if (ImGui::Selectable("(game decides)", scenario.appearPowerStarObj.empty())) {
+                commit([row](smg::ScenarioModel& live) {
+                            live.setAppearPowerStarObj(row, std::string{});
+                        },
+                        "Clear the star object");
+            }
+            for (const StarObjectChoice& choice : choices) {
+                const bool picked = choice.internal == scenario.appearPowerStarObj;
+                ImGui::PushID(choice.internal.c_str());
+                if (ImGui::Selectable(choice.display.c_str(), picked)) {
+                    const std::string applied = choice.internal;
+                    commit([row, applied](smg::ScenarioModel& live) {
+                                live.setAppearPowerStarObj(row, applied);
+                            },
+                            "Change the star object");
+                }
+                // The stored value is one hover away: the friendly name is what
+                // you read, but the file stores the internal one.
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip("%s", choice.internal.c_str());
+                }
+                ImGui::PopID();
+            }
+            if (choices.empty()) {
+                ImGui::TextDisabled(
+                    "No PowerStarAppear objects in the ObjectDB yet -- it loads "
+                    "shortly after first launch. Values already in the file are "
+                    "still shown above.");
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip(
+            "The star appearance object this mission spawns.\n"
+            "Stored in AppearPowerStarObj as the object's internal name; hover a "
+            "choice to see it.\nLeave as \"(game decides)\" to use the level's own default.");
+    }
+
+    // ---- Luigi timed mode (SMG1 only) ------------------------------------
+    // SMG1 stores IsHidden instead of the SMG2 star-type pair, and that same
+    // galaxy is the only one where a Luigi timed mission means anything. Gate on
+    // it rather than on the column's presence, because ensureScenarioColumns adds
+    // the column to any file it touches -- presence would mean this shows up on
+    // SMG2 missions where the number is inert.
+    if (galaxy->scenarioData().hasField("IsHidden")) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Luigi timer");
+        ImGui::SameLine(kCameraFieldLabelWidth);
+        int frames = scenario.luigiModeTimer;
+        if (ImGui::InputInt("##scenluigi", &frames, 30, 300)) {
+            const int applied = std::max(frames, 0);
+            commit([row, applied](smg::ScenarioModel& live) {
+                        live.setLuigiModeTimer(row, applied);
+                    },
+                    "Change the Luigi timer");
+        }
+        ImGui::SetItemTooltip(
+            "How long a Luigi timed mission gives you, in frames (60 per second).\n"
+            "0 means no limit. SMG1 only; SMG2 has no Luigi timed mode.");
     }
 
     // ---- comet ------------------------------------------------------------
@@ -4594,7 +4779,7 @@ void drawScenarioLayerMatrix(EditorState& state, smg::ScenarioModel& model,
             if (wanted != active) {
                 const std::string zoneName = zones[z];
                 const std::string layerName = layer;
-                edit::mutateScenarios(
+                const bool changed = edit::mutateScenarios(
                     *galaxy, state.scenarioUndoStack,
                     [row, zoneName, layerName, wanted,
                      galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
@@ -4604,7 +4789,9 @@ void drawScenarioLayerMatrix(EditorState& state, smg::ScenarioModel& model,
                     },
                     (wanted ? "Turn on " : "Turn off ") + layer + " in " + zoneName);
                 model.refresh();
-                markDirty(state);
+                if (changed) {
+                    markDirty(state);
+                }
             }
         }
     }
@@ -4638,7 +4825,7 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
         if (ImGui::SmallButton("^")) {
             const std::size_t from = index;
             const std::size_t to = index - 1;
-            edit::mutateScenarios(
+            const bool changed = edit::mutateScenarios(
                 *galaxy, state.scenarioUndoStack,
                 [from, to, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
                     smg::ScenarioModel live(scenarios, zoneRows,
@@ -4647,7 +4834,9 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
                 },
                 "Move a zone up");
             model.refresh();
-            markDirty(state);
+            if (changed) {
+                markDirty(state);
+            }
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
@@ -4655,7 +4844,7 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
         if (ImGui::SmallButton("v")) {
             const std::size_t from = index;
             const std::size_t to = index + 1;
-            edit::mutateScenarios(
+            const bool changed = edit::mutateScenarios(
                 *galaxy, state.scenarioUndoStack,
                 [from, to, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
                     smg::ScenarioModel live(scenarios, zoneRows,
@@ -4664,7 +4853,9 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
                 },
                 "Move a zone down");
             model.refresh();
-            markDirty(state);
+            if (changed) {
+                markDirty(state);
+            }
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
@@ -4678,7 +4869,7 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
             ImGui::TextDisabled("This does NOT delete the zone's files.");
             if (ImGui::Button("Remove it")) {
                 const std::size_t victim = index;
-                edit::mutateScenarios(
+                const bool changed = edit::mutateScenarios(
                     *galaxy, state.scenarioUndoStack,
                     [victim, galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
                         smg::ScenarioModel live(scenarios, zoneRows,
@@ -4687,9 +4878,11 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
                     },
                     "Remove a zone");
                 model.refresh();
-                markDirty(state);
-                pushToast(state, "Removed " + zones[index] +
-                                      " from the list. Ctrl+Z puts it back.");
+                if (changed) {
+                    markDirty(state);
+                    pushToast(state, "Removed " + zones[index] +
+                                          " from the list. Ctrl+Z puts it back.");
+                }
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -4712,7 +4905,7 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
             offered = true;
             if (ImGui::Selectable(name.c_str())) {
                     const std::string applied = name;
-                    edit::mutateScenarios(
+                    const bool changed = edit::mutateScenarios(
                         *galaxy, state.scenarioUndoStack,
                         [applied, galaxy](smg::BcsvTable& scenarios,
                                           smg::BcsvTable& zoneRows) {
@@ -4722,7 +4915,9 @@ void drawScenarioZoneList(EditorState& state, smg::ScenarioModel& model) {
                         },
                         "Add a zone");
                     model.refresh();
-                    markDirty(state);
+                    if (changed) {
+                        markDirty(state);
+                    }
                 }
         }
         if (!offered) {
@@ -4838,7 +5033,7 @@ void drawScenariosPanel(EditorState& state) {
         ImGui::TextDisabled("This removes the row from the file. Ctrl+Z brings it back.");
         if (ImGui::Button("Remove it")) {
             const std::size_t row = victim.row;
-            edit::mutateScenarios(
+            const bool changed = edit::mutateScenarios(
                 galaxy, state.scenarioUndoStack,
                 [row, &galaxy](smg::BcsvTable& scenarios, smg::BcsvTable& zoneRows) {
                     smg::ScenarioModel live(scenarios, zoneRows,
@@ -4848,8 +5043,10 @@ void drawScenariosPanel(EditorState& state) {
                 "Remove a mission");
             state.scenarioSelected.reset();
             model.refresh();
-            markDirty(state);
-            pushToast(state, "Removed the mission. Ctrl+Z puts it back.");
+            if (changed) {
+                markDirty(state);
+                pushToast(state, "Removed the mission. Ctrl+Z puts it back.");
+            }
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -6907,7 +7104,10 @@ void drawBcsvEditorWindow(EditorState& state) {
     ImGui::SameLine();
     if (ImGui::Button("Add row")) {
         try {
-            table.addRow();
+            // addRow() hands back the new index; selecting it is what the author
+            // means by "add a row" -- otherwise the row lands unselected and the
+            // next edit goes somewhere else entirely.
+            state.bcsvSelectedRow = static_cast<int>(table.addRow());
             state.bcsvDirty = true;
         } catch (const std::exception& error) {
             pushToast(state, std::string("Cannot add a row: ") + error.what(), true);
@@ -6919,7 +7119,9 @@ void drawBcsvEditorWindow(EditorState& state) {
             static_cast<std::size_t>(state.bcsvSelectedRow) >= table.rows().size()) {
             pushToast(state, "Select a row to duplicate.", true);
         } else {
-            table.cloneRow(static_cast<std::size_t>(state.bcsvSelectedRow));
+            state.bcsvSelectedRow =
+                static_cast<int>(table.cloneRow(static_cast<std::size_t>(
+                    state.bcsvSelectedRow)));
             state.bcsvDirty = true;
         }
     }
@@ -7026,7 +7228,10 @@ void drawBcsvEditorWindow(EditorState& state) {
                      static_cast<int>(std::size(kBcsvTypeOrder)));
         if (ImGui::Button("Add")) {
             try {
-                table.ensureField(state.bcsvNewColumnName, kBcsvTypeOrder[state.bcsvNewColumnType]);
+                // The index is not needed here -- the column only has to EXIST for
+                // the editor to show it -- but ensureField() is [[nodiscard]].
+                static_cast<void>(table.ensureField(
+                    state.bcsvNewColumnName, kBcsvTypeOrder[state.bcsvNewColumnType]));
                 state.bcsvDirty = true;
                 state.bcsvNewColumnName[0] = '\0';
                 ImGui::CloseCurrentPopup();

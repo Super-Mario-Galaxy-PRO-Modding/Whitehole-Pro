@@ -86,6 +86,20 @@ struct Scenario {
     std::int32_t number{0};       // ScenarioNo; 0 means "awards nothing"
     std::string name;             // ScenarioName
     std::int32_t powerStarId{0};  // 0 = awards no star
+    // The PowerStarAppear OBJECT this mission's star is born from -- the object
+    // name exactly as the game stores it ("PowerStarAppear_Boss_Bowser"), not a
+    // friendly label. The game reads it through getAppearPowerStarObjName, so it
+    // is what actually decides WHICH star object appears in the level.
+    //
+    // Empty is a real value, not "unknown": it means the mission has no
+    // appearance override and the game falls back to its own default. This was
+    // the one column Scenaristar's signature feature uses and the model threw it
+    // away on read.
+    std::string appearPowerStarObj;
+    // SMG1's timed-mode limit in frames. The column is in BOTH games' fixed hash
+    // set, but it only MEANS something for a Luigi timed mission, so the panel
+    // offers it there rather than showing an inert number on every mission.
+    std::int32_t luigiModeTimer{0};
     // The stored PowerStarType, verbatim. Empty means the galaxy has no such
     // column (SMG1), which is NOT the same as "Normal" -- the panel shows it as
     // unknown rather than guessing a value the file never held.
@@ -137,6 +151,12 @@ public:
     bool removeScenario(std::size_t row);
     void renameScenario(std::size_t row, std::string_view name);
     void setPowerStar(std::size_t row, std::int32_t powerStarId);
+    // Clears with an empty string, which is how the game is told to use its own
+    // default appearance. Passing a name that is not a known PowerStarAppear*
+    // object is still allowed -- the model must not silently reject a star object
+    // a modder added.
+    void setAppearPowerStarObj(std::size_t row, std::string_view objectName);
+    void setLuigiModeTimer(std::size_t row, std::int32_t frames);
     void setPowerStarType(std::size_t row, std::string_view type);
     void setComet(std::size_t row, bool comet, std::int32_t timerFrames);
     // Moves a scenario to a different game id, keeping the rest of the row.

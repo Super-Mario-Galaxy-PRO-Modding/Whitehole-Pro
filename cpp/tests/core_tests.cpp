@@ -201,15 +201,18 @@ void testStageCreatePlans() {
         }
         return false;
     };
-    expect(refuses([&] { planStageZone("NoLayers", {}, smg2ZoneTemplate, 2); }),
+    // planStageZone/planGalaxy return a plan; here the only thing under test is
+    // that they REFUSE, so the plan itself is deliberately unused -- but both are
+    // [[nodiscard]], so discard them explicitly rather than silently.
+    expect(refuses([&] { (void)planStageZone("NoLayers", {}, smg2ZoneTemplate, 2); }),
            "a plan with no layers must be refused, like the create is");
-    expect(refuses([&] { planStageZone("BadLayer", {"Common", "LayerZ"}, smg2ZoneTemplate, 2); }),
+    expect(refuses([&] { (void)planStageZone("BadLayer", {"Common", "LayerZ"}, smg2ZoneTemplate, 2); }),
            "a plan naming something that is not a layer must be refused");
-    expect(refuses([&] { planStageZone("NoTemplate", {"Common"}, {}, 2); }),
+    expect(refuses([&] { (void)planStageZone("NoTemplate", {"Common"}, {}, 2); }),
            "a plan with no template must be refused, not guessed at");
-    expect(refuses([&] { planStageZone("Bad/Name", {"Common"}, smg2ZoneTemplate, 2); }),
+    expect(refuses([&] { (void)planStageZone("Bad/Name", {"Common"}, smg2ZoneTemplate, 2); }),
            "a plan with an unsafe name must be refused");
-    expect(refuses([&] { planGalaxy("Gal", {"Bad/Zone"}, {"Common"}, smg2ZoneTemplate, 2); }),
+    expect(refuses([&] { (void)planGalaxy("Gal", {"Bad/Zone"}, {"Common"}, smg2ZoneTemplate, 2); }),
            "a galaxy plan with an unsafe zone name must be refused");
 
     // ---- SMG1's layout, which differs from SMG2's --------------------------
@@ -229,6 +232,65 @@ void testStageCreatePlans() {
         expect(!project.directoryExists("/StageData/Flat"),
                "an SMG1 zone must not create a folder for itself");
     }
+}
+
+// LAYER FILTERING. The type that decides which objects a rebuild would show, kept
+// separate from the wiring because the wiring is entangled with a coupling this
+// test does not touch: rebuild() builds boxes_ one-to-one with the object list and
+// the whole editor treats a BOX index as a STAGE object index. Compacting boxes_
+// to hide a layer would make every click select the wrong object.
+//
+// So what is pinned here is the decision itself, which is where the silent bugs
+// live -- above all that "Common" must never be hideable.
+void testLayerFilter() {
+    using whitehole::render::LayerFilter;
+
+    // Default: everything visible, so a caller that never thinks about layers sees
+    // the whole zone. Getting this backwards would open every project empty.
+    const LayerFilter all;
+    expect(all.everythingVisible(), "a default filter must show everything");
+    expect(all.shows("Common") && all.shows("LayerA") && all.shows("LayerP"),
+           "a default filter must show every layer");
+
+    // COMMON IS NEVER HIDEABLE. It owns no bit in the file, so a filter that
+    // tested a bit for it would hide the majority of most zones' geometry -- and
+    // the scenario format has no way to express "Common off" either.
+    LayerFilter hidden = LayerFilter::noneVisible();
+    expect(hidden.shows("Common"),
+           "Common must stay visible even when every layer is hidden");
+    expect(!hidden.shows("LayerA"), "LayerA must be hidden when its bit is clear");
+    expect(!hidden.shows("LayerP"), "LayerP must be hidden when its bit is clear");
+    // set() on Common must be a no-op rather than clearing something.
+    hidden.set("Common", false);
+    expect(hidden.shows("Common"), "hiding Common must be a no-op, not a way to hide it");
+
+    // Case does not matter, because PlacementObject::layer is canonicalised at
+    // load but a caller can still hand over either spelling.
+    LayerFilter mixed = LayerFilter::noneVisible();
+    mixed.set("LayerB", true);
+    expect(mixed.shows("LayerB") && mixed.shows("layerb"),
+           "layer matching must be case-insensitive");
+    expect(!mixed.shows("LayerC"), "setting one layer must not reveal another");
+
+    // One bit per layer, each independent -- a mask with an off-by-one would pass
+    // every test above and still show the wrong layer.
+    for (int bit = 0; bit < 16; ++bit) {
+        const std::string name = std::string("Layer") + static_cast<char>('A' + bit);
+        LayerFilter only = LayerFilter::noneVisible();
+        only.set(name, true);
+        for (int other = 0; other < 16; ++other) {
+            const std::string probe = std::string("Layer") + static_cast<char>('A' + other);
+            expect(only.shows(probe) == (other == bit),
+                   "a filter showing only " + name + " must not show " + probe);
+        }
+    }
+
+    // A name that is not a layer stays VISIBLE. Hiding geometry the filter does
+    // not understand would make a modded or mislabelled layer vanish with no way
+    // to get it back, which is a far worse failure than showing something extra.
+    LayerFilter unknown = LayerFilter::noneVisible();
+    expect(unknown.shows("LayerZ") && unknown.shows("ObjInfo") && unknown.shows(""),
+           "an unrecognised layer name must stay visible, not vanish");
 }
 
 // THE COLLISION WIREFRAME MUST BE WELDED. A KCL is a closed mesh of prisms, so
@@ -4083,8 +4145,10 @@ void testRarcCreation() {
     // saving) goes through StageArchive, so if this passes the created zone is
     // real rather than merely well-formed.
     whitehole::smg::BcsvTable stageObjInfo;
-    stageObjInfo.ensureField("name", whitehole::smg::BcsvType::stringOffset);
-    stageObjInfo.ensureField("l_id", whitehole::smg::BcsvType::integer);
+    const auto nameField =
+        stageObjInfo.ensureField("name", whitehole::smg::BcsvType::stringOffset);
+    const auto idField = stageObjInfo.ensureField("l_id", whitehole::smg::BcsvType::integer);
+    expect(nameField != idField, "each ensureField must append its own column");
     const std::size_t row = stageObjInfo.addRow();
     stageObjInfo.setString(stageObjInfo.rows()[row], "name", "FirstThing");
     stageObjInfo.setInt(stageObjInfo.rows()[row], "l_id", 0);
@@ -5647,6 +5711,66 @@ void testScenarioEditing() {
     expect(!model.scenarios()[copied].comet && model.scenarios()[copied].cometTimer == 0,
            "turning the comet off must also zero its timer");
 
+    // The star id is a SINGLE value, not a bit set of the scenario's declared
+    // stars. Scenaristar's ScenarioData.cs implements the accessor as
+    // (PowerStarID & (1 << StarID)) and tags it "//TODO: TEST THIS"; the game's
+    // ScenarioData::getPowerStarNum reads one u32 and only tests it for non-zero.
+    // Pin both directions so nobody "fixes" this toward the reference tool.
+    model.setPowerStar(copied, 4);
+    expect(model.scenarios()[copied].powerStarId == 4,
+           "PowerStarId 4 must stay the single value 4, never the bit set {0,1,2}");
+    expect(model.scenarios()[copied].awardsStar(),
+           "a non-zero star id must award a star");
+    model.setPowerStar(copied, 0);
+    expect(!model.scenarios()[copied].awardsStar(),
+           "id 0 must award nothing -- the game's own test");
+    model.setPowerStar(copied, 99);
+
+    // The two columns Scenaristar's headline feature needs. Neither existed on the
+    // resolved struct before, so both silently read back as 0/empty.
+    expect(model.scenarios()[copied].appearPowerStarObj.empty(),
+           "a mission with no appearance override must read empty, not a placeholder");
+    model.setAppearPowerStarObj(copied, "PowerStarAppear_Boss_Bowser");
+    expect(model.scenarios()[copied].appearPowerStarObj == "PowerStarAppear_Boss_Bowser",
+           "the PowerStarAppear object name must store verbatim");
+    model.setAppearPowerStarObj(copied, "");
+    expect(model.scenarios()[copied].appearPowerStarObj.empty(),
+           "clearing the appearance must restore the game's own default");
+    // A star object this galaxy invents is still a legal value: the model must not
+    // validate against a closed list the game never supplied.
+    model.setAppearPowerStarObj(copied, "PowerStarAppear_Custom_MyBoss");
+    expect(model.scenarios()[copied].appearPowerStarObj == "PowerStarAppear_Custom_MyBoss",
+           "a modder-added star object must not be rejected");
+
+    model.setLuigiModeTimer(copied, 1800);
+    expect(model.scenarios()[copied].luigiModeTimer == 1800,
+           "the Luigi timed-mode limit must store");
+    model.setLuigiModeTimer(copied, -5);
+    expect(model.scenarios()[copied].luigiModeTimer == 0,
+           "a negative frame count must clamp to 0, not wrap");
+
+    // OPTIONAL columns the panel never touches must survive an edit that does. A
+    // row is a bag of values, so dropping PowerStarColor on the way past would be
+    // silent data loss on any real galaxy that has one -- and Scenaristar keeps it
+    // precisely because it knows that.
+    const auto colorField =
+        scenarioData.ensureField("PowerStarColor", whitehole::smg::BcsvType::integer);
+    scenarioData.setInt(scenarioData.rows()[copied], "PowerStarColor", 2);
+    const auto checkField =
+        scenarioData.ensureField("ErrorCheck", whitehole::smg::BcsvType::integer);
+    scenarioData.setInt(scenarioData.rows()[copied], "ErrorCheck", 0);
+    expect(scenarioData.hasField("PowerStarColor") && scenarioData.hasField("ErrorCheck"),
+           "both optional columns must be in the schema before the edit");
+    expect(colorField != checkField, "each ensureField must append its own column");
+    model.renameScenario(copied, "ColorKeeper");
+    model.setLayerActive(copied, "RedBlueExGalaxy", "LayerB", true);
+    expect(scenarioData.getInt(scenarioData.rows()[copied], "PowerStarColor", -1) == 2,
+           "PowerStarColor must survive an unrelated scenario edit");
+    expect(scenarioData.hasField("ErrorCheck"),
+           "an untouched optional column must keep existing");
+    model.setLayerActive(copied, "RedBlueExGalaxy", "LayerB", false);
+
+
     // An id collision is refused: two rows with one id makes the first unreachable.
     expect(!model.setScenarioNumber(copied, 1),
            "renumbering onto another scenario's id must be refused");
@@ -5709,8 +5833,10 @@ void testGalaxyScenarioSave() {
         // Now edit it for real, through the model the panel uses.
         whitehole::smg::ScenarioModel model(galaxy.scenarioData(), galaxy.zoneList(),
                                              galaxy.editableZones(), 1);
-        model.addScenario("Seventh Mission");
-        model.setPowerStar(6, 77);
+        // addScenario() returns the row it created -- use it rather than assuming
+        // the appended row landed at index 6.
+        const std::size_t seventh = model.addScenario("Seventh Mission");
+        model.setPowerStar(seventh, 77);
         expect(galaxy.dirty(), "an edited galaxy must report dirty");
         galaxy.save();
         expect(!galaxy.dirty(), "a saved galaxy must be clean again");
@@ -6442,6 +6568,7 @@ int main() {
         testCanonicalLayerNames();
         testCollisionAwarePicking();
         testCollisionWireframeWelding();
+        testLayerFilter();
         testStageCreatePlans();
         testStageTemplates();
         testShippedTemplatesParse();

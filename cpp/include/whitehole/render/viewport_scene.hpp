@@ -12,6 +12,7 @@
 #include "whitehole/render/surface_snap.hpp"
 #include "whitehole/smg/path.hpp"
 #include "whitehole/smg/placement.hpp"
+#include "whitehole/smg/scenario_model.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -79,6 +80,58 @@ struct RailPointRef {
 // unreadable thicket.
 [[nodiscard]] std::vector<OverlaySegment> collisionSegmentsFor(
     const std::vector<SnapTriangle>& triangles);
+
+// Which layers are visible. Small value type + free functions, resolved through
+// smg::scenarioLayerBit() so the filter and the scenario tables cannot disagree
+// about what "LayerB" means.
+//
+// WHY IT IS A MASK AND NOT A SET OF NAMES: an object's layer is compared on every
+// rebuild for every object, and a zone can hold 10k of them. A 17-bit mask makes
+// "is this hidden" one shift and one test, where a set of strings would hash a
+// string per object per frame.
+//
+// "Common" IS ALWAYS VISIBLE and owns no bit -- exactly as it owns no bit in the
+// scenario file. A filter that tested a bit for Common would hide every object in
+// the Common layer, which in most zones is most of the geometry. That is the trap
+// this type exists to make impossible: shows() special-cases it rather than
+// leaving the caller to remember.
+// NOT YET WIRED INTO ViewportScene::rebuild(), and that is deliberate.
+//
+// rebuild() builds boxes_ one-to-one with the object list, in order, and the WHOLE
+// editor relies on `boxes_[i].objectIndex == i`: pickAt() returns a box index, the
+// GUI stores it in state.selectedObject, and every consumer then treats that value
+// as a STAGE object index. Compacting boxes_ to hide a layer would therefore not
+// hide anything -- it would silently make every click select the WRONG object,
+// because box 5 would no longer be object 5. That coupling is invisible today and
+// is exactly the kind of thing that turns "layer filtering" into "picking is
+// broken now".
+//
+// So the filter lands as a tested type first, and the wiring must go through one
+// of two shapes, neither of which is a one-line change:
+//   (a) pickAt() translates box index -> boxes()[i].objectIndex, and every
+//       consumer of the selection agrees the value is a stage index; or
+//   (b) boxes_ stays parallel to the object list and hidden boxes are flagged,
+//       with draw and pick skipping them.
+// (b) keeps indices stable and is the smaller change to reason about.
+struct LayerFilter {
+    // One bit per LayerA..LayerP (bit 0 = LayerA). All-on is the default, so a
+    // caller that never thinks about layers sees the whole zone.
+    std::uint32_t bits{0xFFFFFFFFu};
+
+    // Explicit constructor helpers, because "all visible" is spelled differently
+    // from "nothing visible" and getting it backwards hides a whole zone.
+    [[nodiscard]] static LayerFilter allVisible() noexcept { return LayerFilter{}; }
+    [[nodiscard]] static LayerFilter noneVisible() noexcept { return LayerFilter{0}; }
+
+    // True when an object in `layer` should be drawn and pickable. A name that is
+    // not a layer at all (or an unrecognised one from a modded zone) is treated as
+    // visible: hiding geometry the filter does not understand would make a
+    // mislabelled layer disappear with no way to get it back.
+    [[nodiscard]] bool shows(std::string_view layer) const noexcept;
+    void set(std::string_view layer, bool visible) noexcept;
+    [[nodiscard]] bool everythingVisible() const noexcept { return bits == 0xFFFFFFFFu; }
+    [[nodiscard]] std::uint32_t mask() const noexcept { return bits; }
+};
 
 // Which overlay families a rebuild generates. The View menu toggles map onto
 // these one-to-one, so a disabled family produces no geometry at all instead

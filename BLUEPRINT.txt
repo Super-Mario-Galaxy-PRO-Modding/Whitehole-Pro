@@ -130,11 +130,21 @@
             `zone templates`, `galaxy templates`. See section 15, including four
             bugs the test found -- two of them silent data loss.
 
-  What is NOT verified: two separate categories, and it matters that they are
+  [done]  LAYER FILTERING AND THE OBJECT TREE. LayerFilter is no longer a
+           tested type waiting to be wired -- it is a parameter on rebuild(),
+           and the coupling that made the wiring dangerous is GONE:
+           ViewportScene::boxFor() is the one place a stage index becomes a box,
+           and the six sites that used to reach into boxes() directly all go
+           through it. Hidden boxes are flagged, not dropped, so indices stay
+           stable. View > Layers plus a per-layer object tree; the mask persists
+           in Settings. See section 16 item 3.
+
+   What is NOT verified: two separate categories, and it matters that they are
   different. First, the nine manual checks in section 8.5 -- automation should
-  prove that, and cannot. Second, FOUR things needing a human with a mouse: the
-  four checks now listed in section 16 item 1 (created zone on retail, the create
-  dialog, collision picking's wiring, an SMG1 zone on a real archive). Section 16
+  prove that, and cannot. Second, FIVE things needing a human with a mouse: the
+  five checks now listed in section 16 item 1 (created zone on retail, the create
+  dialog, collision picking's wiring, an SMG1 zone on a real archive, and the
+  View > Layers panel). Section 16
   ranks what is left; section 17 is opinion, not plan.
 
   ONE TESTING TRAP THAT HAS ALREADY COST A SESSION: an std::ofstream still open
@@ -988,7 +998,8 @@ BUILD RECIPE CORRECTIONS (verified this session -- the two commands above are
   2ba3fac  test-only: collision picking, wireframe welding, create plans
   89c33c9  the create dialog's GUI layer picker (roadmap 5)
   0328496  collision-aware picking + wireframe overlay, canonicalLayerName,
-           render::LayerFilter                               <- HEAD
+           render::LayerFilter
+           (uncommitted) layer filtering wired + boxFor() + object tree <- HEAD
 
  The four newest subjects are not meaningful, so the content is written above
  instead. Do not trust a subject in this repo as a description of what shipped;
@@ -1297,7 +1308,7 @@ Six of those commits are the camera feature and the next nine are the
   UNBLOCKS THE MOST, with the two non-code items first -- because the highest
   value thing on this list is not a feature and is not mine to do.
 
-  1. VERIFY ON HARDWARE -- and the list is now FOUR items, not one. Everything
+  1. VERIFY ON HARDWARE -- and the list is now FIVE items, not one. Everything
      below is proven against Whitehole Pro's own readers and nothing else; no
      retail game has been run, and no human has clicked anything.
        (a) A created zone opens and plays (section 15's open claim).
@@ -1307,7 +1318,14 @@ Six of those commits are the camera feature and the next nine are the
            wall. The DECISION is unit-tested; the WIRING is compile-verified only.
        (d) An SMG1 zone loads with correct layer names (the canonicalLayerName
            fix rests on synthetic tables, never a real SMG1 archive).
-     Ten minutes each, and they are the only way to close any of it. The debt
+     (e) NEW, from §16.3: View > Layers. Hide a layer and confirm (i) its
+          geometry disappears, (ii) clicking where it WAS selects nothing, (iii)
+          its rows are still in the object tree, dimmed but selectable, (iv)
+          "frame all" moves to what is left, and (v) Ctrl+Z still undoes an edit
+          made on a hidden layer. The DECISION is unit-tested; the WIRING is
+          compile-verified only, and (ii) especially is the one a test can prove
+          and a human still has to feel.
+      FIVE items now, not four. Ten minutes each, and they are the only way to close any of it. The debt
      grows faster than it is paid, and it reads as zero risk until a modder hits
      it. DO THIS BEFORE ANY MORE FORMAT WORK.
 
@@ -1331,38 +1349,68 @@ Six of those commits are the camera feature and the next nine are the
      toast rather than implying it is open. That is what `galaxy scenario layer`
      fixes. A galaxy create has no such gap.
 
-  3. LAYER FILTERING + HIERARCHICAL OBJECT TREE (roadmap 3). What makes a LARGE
-     galaxy usable. The Scenarios panel made the structure legible, but the
-     viewport still cannot hide a layer or navigate a galaxy's zones as a tree.
-     This is the biggest usability win left per unit of work.
-[STARTED -- read this before wiring it] render::LayerFilter now exists and is
-     tested (testLayerFilter), but it is deliberately NOT yet a parameter on
-     ViewportScene::rebuild(). THE BLOCKER IS A LATENT COUPLING, and it is the
-     single most important thing to know about this item:
+  3. LAYER FILTERING + HIERARCHICAL OBJECT TREE (roadmap 3). [DONE] What makes a
+     LARGE galaxy usable. See the [DONE] block below for what shipped, and for a
+     correction to what this item used to claim.
 
-       rebuild() builds boxes_ one-to-one with the object list, IN ORDER, and the
-       entire editor relies on `boxes_[i].objectIndex == i`. pickAt() returns a
-       BOX index; gui_win32's applyPlainPick stores it in state.selectedObject;
-       and every consumer from there on treats that value as a STAGE OBJECT
-       index. Nothing declares this. It is true only by construction.
+     [DONE] LAYER FILTERING AND THE OBJECT TREE. What shipped:
+       * ViewportScene::rebuild() takes a LayerFilter; every box carries its layer
+         and a `hidden` flag. Hidden boxes are FLAGGED, not dropped, so
+         boxes_[i].objectIndex == i still holds and a selection index keeps
+         meaning across a visibility change.
+       * Hidden boxes are skipped by pick / pickForgiving / pickRect, the draw
+         pass, the HUD legend count, the camera-area-gravity overlays,
+         buildSnapScene(), and frame-all's centre.
+       * ViewportScene::boxFor(objectIndex, includeHidden=false) is now the ONE
+         place a stage index becomes a box. Six call sites used to index boxes()
+         directly -- halfHeightFor, frameSelection, gizmoAnchor, the HUD selected
+         line, the collision-gated pick, setScene's prune -- and all six go
+         through it now.
+       * View > Layers panel, plus the Objects list grouped by layer with a
+         per-group visibility checkbox, collapse arrow, live count and
+         select-all-in-layer.
+       * Settings::visibleLayerMask persists it. Deliberately NOT undoable: it is
+         a view preference, exactly like showAxis, never written to a zone.
 
-       So the obvious implementation -- skip hidden objects while building boxes_
-       -- does not hide anything. It shifts every index, and the effect is that
-       clicking object 5 selects object 4. The feature would appear to work, the
-       geometry would look right, and picking would be quietly broken for every
-       object after the first hidden one.
+     THE OBJECT TREE IS FLATTENED, NOT RECURSIVE, and that is a performance
+     decision rather than a stylistic one. ImGuiListClipper only works over a
+     contiguous row vector, and a zone can hold 10k objects, while a recursive
+     tree issues one ImGui item per node per frame with nothing clipping it. So
+     rebuildObjectTree() flattens into state.objectRows and the panel clips that,
+     guarded by objectTreeStamp() so it rebuilds on CHANGE and never per frame.
+     Expansion is remembered by layer NAME, because a group index shifts whenever
+     a zone gains or loses a layer.
 
-     Two shapes can fix it, and NEITHER is a one-line change:
-       (a) pickAt() translates box index -> boxes()[i].objectIndex, and every
-           consumer of the selection agrees the value is a stage index; or
-       (b) boxes_ stays parallel to the object list with hidden boxes FLAGGED,
-           and draw and pick skip them.
-     (b) keeps indices stable and is the smaller thing to reason about.
+     A CORRECTION TO THE PREVIOUS VERSION OF THIS ITEM, because it was wrong in a
+     way that would have misled the next session. It claimed "pickAt() returns a
+     BOX index; the GUI stores it in state.selectedObject; every consumer treats
+     that value as a STAGE object index." That had ALREADY stopped being true --
+     pick()/pickForgiving()/pickRect() return box.objectIndex, and there is no
+     pickAt. What the note got RIGHT was the danger, and the danger was still
+     real somewhere else: the six boxes()[stageIndex] sites above. This file
+     keeps teaching the same lesson -- the COUPLING was real, the DESCRIPTION of
+     it had drifted, and only reading the code reveals which.
 
-     LayerFilter itself is done and its decisions are pinned, including the two
-     that would each have been silent: Common is NEVER hideable (it owns no bit,
-     so a bit-test would hide most of most zones), and an unrecognised layer name
-     stays VISIBLE rather than vanishing with no way to bring it back.
+     Three decisions worth not re-deriving:
+       * HIDDEN OBJECTS STAY IN THE OBJECT TREE, dimmed. Hiding a layer is a
+         viewport filter, not a delete, so they stay selectable and undoable.
+         Dropping the rows would answer "where did my objects go" with a blank
+         panel and leave no way back.
+       * SNAP IGNORES HIDDEN LAYERS, so an invisible surface cannot silently
+         decide where an object lands. buildSnapScene() is the one line to change
+         if that is ever reversed.
+       * canonicalLayerName() is applied INSIDE rebuild(). An SMG1 archive spells
+         its layer directories lowercase and scenarioLayerBit() is CASE-SENSITIVE,
+         so a filter on the raw string would hide nothing on SMG1 and everything
+         on SMG2, with no error anywhere. Both spellings are pinned by test.
+
+     Tests: testLayerFilter (the value type), testLayerFilteredScene (the wiring
+     -- index stability, unpickable hidden objects, the marquee, frame-all with
+     its all-hidden fallback, overlays, the SMG1 case, the mask round trip) and
+     testSnapSkipsHiddenLayers. Registered next to testLayerFilter in main().
+
+     STILL UNVERIFIED, like everything else here: compile-verified and unit
+     tested, but no human has clicked a layer checkbox. See section 16 item 1.
 
   4. ANIMATIONS (roadmap 2). Spin platforms, doors, live stars. The largest
      single feature: it needs BCK/BPK/BRK/BTK parsers AND a timeline UI AND a

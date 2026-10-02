@@ -183,6 +183,13 @@ std::optional<SnapHit> raycastDown(const SnapScene& scene, const math::Vec3f& or
         if (box.objectIndex == ignoreIndex) {
             continue;
         }
+        // A hidden layer does not catch drops. Same rule as picking: geometry the
+        // author cannot see should not silently decide where an object lands, or
+        // "End" while working on one layer would keep snapping to a platform in
+        // another that is not drawn.
+        if (box.hidden) {
+            continue;
+        }
         // A box entirely above the ray start cannot be landed on going down.
         if (box.center.y - box.halfExtents.y > origin.y) {
             continue;

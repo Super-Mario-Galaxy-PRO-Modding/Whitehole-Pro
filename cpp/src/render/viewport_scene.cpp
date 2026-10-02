@@ -195,7 +195,7 @@ math::Matrix4 overlayWorld(const smg::PlacementObject& object) noexcept {
 // axis can be sized from frameDistance_.
 void buildOverlays(const std::vector<smg::PlacementObject>& objects, OverlayFlags flags,
                    const std::vector<smg::RailPath>& paths, float frameDistance,
-                   std::vector<OverlayBatch>& out) {
+                   LayerFilter layers, std::vector<OverlayBatch>& out) {
     if (flags.axis) {
         const float length = std::clamp(frameDistance, 300.0F, 5000.0F);
         const math::Vec3f origin{};
@@ -210,13 +210,16 @@ void buildOverlays(const std::vector<smg::PlacementObject>& objects, OverlayFlag
         out.push_back(std::move(zAxis));
     }
 
-    const auto collect = [&objects, &out](bool enabled, const char* kind, std::uint32_t color) {
+    // A hidden layer's marker goes with it. Leaving a camera wireframe floating
+    // in an otherwise empty viewport looks like a rendering bug, and the author
+    // cannot click it to find out why -- the very layer it belongs to is hidden.
+    const auto collect = [&objects, &layers, &out](bool enabled, const char* kind, std::uint32_t color) {
         if (!enabled) {
             return;
         }
         auto batch = makeBatch(color);
         for (const auto& object : objects) {
-            if (object.kind == kind) {
+            if (object.kind == kind && layers.shows(object.layer)) {
                 appendBoxWire(batch, overlayWorld(object), {1.0F, 1.0F, 1.0F});
             }
         }
@@ -459,22 +462,37 @@ std::optional<float> rayIntersectsTriangles(const Ray& ray, const math::Matrix4&
 }
 
 void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models,
-                            const std::vector<smg::RailPath>* paths, OverlayFlags overlays) {
+                            const std::vector<smg::RailPath>* paths, OverlayFlags overlays,
+                            LayerFilter layers) {
     boxes_.clear();
     overlayBatches_.clear();
     paths_.clear();
+    layers_ = layers;
     pathsPickable_ = overlays.paths;
     if (paths != nullptr) {
         paths_ = *paths;
     }
     boxes_.reserve(objects.size());
-    math::Vec3f sum{0.0F, 0.0F, 0.0F};
+    // Accumulated over the boxes frame-all should actually look at. Two counters,
+    // because the fallback below needs to know whether the visible set was empty
+    // rather than inferring it from a zeroed centre.
+    std::size_t framed = 0;
+    math::Vec3f framedSum{0.0F, 0.0F, 0.0F};
+    std::size_t total = 0;
+    math::Vec3f totalSum{0.0F, 0.0F, 0.0F};
     for (std::size_t index = 0; index < objects.size(); ++index) {
         const auto& object = objects[index];
         ViewportBox box;
         box.objectIndex = index;
         box.name = object.name;
         box.kind = object.kind;
+        box.layer = object.layer;
+        // Resolved through canonicalLayerName(), because an SMG1 archive stores
+        // its layer directory lowercase ("layera") and scenarioLayerBit() is
+        // CASE-SENSITIVE -- so a filter built on the raw string hides nothing on
+        // SMG1 and everything on SMG2, with no error anywhere. See the note on
+        // canonicalLayerName for this exact bug family.
+        box.hidden = !layers.shows(smg::canonicalLayerName(object.layer));
         box.category = classifyObject(object.kind, object.name);
         box.center = object.position;
 
@@ -508,21 +526,46 @@ void ViewportScene::rebuild(const std::vector<smg::PlacementObject>& objects, Mo
             box.halfExtents = {extent, extent, extent};
         }
         boxes_.push_back(box);
-        sum = sum + object.position;
+        totalSum = totalSum + object.position;
+        ++total;
+        if (!box.hidden) {
+            framedSum = framedSum + object.position;
+            ++framed;
+        }
     }
-    if (!boxes_.empty()) {
-        const float count = static_cast<float>(boxes_.size());
-        center_ = {sum.x / count, sum.y / count, sum.z / count};
+    // Frame-all looks at what the author can SEE, so hiding a layer re-frames onto
+    // what is left instead of leaving the camera out in the middle of geometry
+    // that is no longer drawn.
+    //
+    // THE FALLBACK, and it is not cosmetic: a zone can be entirely hidden (every
+    // object in LayerA..LayerP, with an empty Common layer). Framing the empty
+    // visible set would centre the camera on the world origin and pull it to the
+    // 200-unit floor, so "frame all" after hiding everything would fly the author
+    // somewhere useless and look like the camera broke. Framing the full zone
+    // instead keeps the view where they left it.
+    const bool haveVisible = framed > 0;
+    const std::size_t basis = haveVisible ? framed : total;
+    if (basis == 0) {
+        center_ = {};
+        frameDistance_ = 800.0F;
+    } else {
+        const math::Vec3f baseSum = haveVisible ? framedSum : totalSum;
+        center_ = {baseSum.x / static_cast<float>(basis), baseSum.y / static_cast<float>(basis),
+                   baseSum.z / static_cast<float>(basis)};
         float maxRadius = 0.0F;
         for (const auto& box : boxes_) {
+            // A hidden box still counts toward the RADIUS once the visible set is
+            // the basis: an object just off the visible edge still pushes the
+            // camera back far enough to see its neighbours. Only the CENTRE is
+            // taken from the visible set.
+            if (!haveVisible && box.hidden) {
+                continue;
+            }
             maxRadius = std::max(maxRadius, (box.center - center_).length() + box.halfExtents.length());
         }
         frameDistance_ = std::clamp(maxRadius * 1.6F, 200.0F, 12000.0F);
-    } else {
-        center_ = {};
-        frameDistance_ = 800.0F;
     }
-    buildOverlays(objects, overlays, paths_, frameDistance_, overlayBatches_);
+    buildOverlays(objects, overlays, paths_, frameDistance_, layers_, overlayBatches_);
 }
 
 void ViewportScene::clear() noexcept {
@@ -530,8 +573,33 @@ void ViewportScene::clear() noexcept {
     overlayBatches_.clear();
     paths_.clear();
     pathsPickable_ = false;
+    // Reset too: leaving the last zone's filter on an emptied scene would make
+    // the next zone open with layers already hidden by a preference they never
+    // set for it.
+    layers_ = LayerFilter::allVisible();
     center_ = {};
     frameDistance_ = 800.0F;
+}
+
+const ViewportBox* ViewportScene::boxFor(std::size_t objectIndex, bool includeHidden) const noexcept {
+    const auto accept = [includeHidden](const ViewportBox& box) {
+        return includeHidden || !box.hidden;
+    };
+    // Fast path: boxes_ is parallel to the object list, so the answer is at the
+    // same index. This is the shape rebuild() guarantees, so it is also the shape
+    // every caller hits in practice.
+    if (objectIndex < boxes_.size() && boxes_[objectIndex].objectIndex == objectIndex) {
+        return accept(boxes_[objectIndex]) ? &boxes_[objectIndex] : nullptr;
+    }
+    // Fallback: the invariant does not hold, so look the index up properly. Slow,
+    // but it returns the RIGHT box instead of a plausible wrong one -- which is
+    // the entire failure mode this accessor exists to prevent.
+    for (const auto& box : boxes_) {
+        if (box.objectIndex == objectIndex && accept(box)) {
+            return &box;
+        }
+    }
+    return nullptr;
 }
 
 std::optional<RailPointRef> ViewportScene::pickRailPoint(const ViewportCamera& camera, float screenX,
@@ -591,6 +659,13 @@ std::optional<std::size_t> ViewportScene::pick(const ViewportCamera& camera, flo
     std::optional<std::size_t> best;
     float bestDistance = maxDistance;
     for (const auto& box : boxes_) {
+        // A hidden box is not on screen, so clicking where it would be must not
+        // select it. Without this, hiding a layer would leave its objects
+        // invisible but still clickable -- the author would click empty space and
+        // something would come back selected.
+        if (box.hidden) {
+            continue;
+        }
         // Broad phase: the oriented proxy (placeholder cube, or the cube around
         // a model's bounding sphere) contains everything drawn for the object,
         // so a proxy miss can never hide visible geometry -- and a proxy entry
@@ -631,6 +706,13 @@ std::optional<std::size_t> ViewportScene::pickForgiving(const ViewportCamera& ca
     std::optional<std::size_t> best;
     float bestPx = slopPx;
     for (const auto& box : boxes_) {
+        // Same rule as pick(): a hidden object must not come back from the
+        // forgiving path either. The proximity fallback is a "you probably meant
+        // this" gesture, and it would be an especially confusing one here --
+        // the author clicked near where an invisible object used to be.
+        if (box.hidden) {
+            continue;
+        }
         float px = 0.0F;
         float py = 0.0F;
         if (!camera.worldToScreen(box.center, width, height, px, py)) {
@@ -656,6 +738,12 @@ std::vector<std::size_t> ViewportScene::pickRect(const ViewportCamera& camera, f
     const float lowY = std::min(y0, y1);
     const float highY = std::max(y0, y1);
     for (const auto& box : boxes_) {
+        // A marquee must not sweep up invisible geometry, or hiding a layer and
+        // dragging a box across where it was would silently select everything in
+        // it -- the one gesture that would make a big invisible selection.
+        if (box.hidden) {
+            continue;
+        }
         float px = 0.0F;
         float py = 0.0F;
         if (!camera.worldToScreen(box.center, width, height, px, py)) {
@@ -730,6 +818,30 @@ void LayerFilter::set(std::string_view layer, bool visible) noexcept {
     } else {
         bits &= ~(1u << bit);
     }
+    // Never let a stray high bit accumulate: the mask is compared against
+    // kAllLayersMask by everythingVisible(), so a bit set outside the 16 the game
+    // addresses would make a fully-visible filter report otherwise.
+    bits &= kAllLayersMask;
+}
+
+int LayerFilter::visibleLayerCount() const noexcept {
+    int count = 0;
+    for (int bit = 0; bit < 16; ++bit) {
+        if (((bits >> bit) & 1u) != 0u) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t ViewportScene::visibleObjectCount() const noexcept {
+    std::size_t count = 0;
+    for (const auto& box : boxes_) {
+        if (!box.hidden) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 std::vector<OverlaySegment> collisionSegmentsFor(const std::vector<SnapTriangle>& triangles) {

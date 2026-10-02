@@ -945,16 +945,23 @@ void ViewportWindow::destroy() noexcept {
 
 void ViewportWindow::setScene(ViewportScene scene) {
     scene_ = std::move(scene);
-    if (selected_.has_value() && *selected_ >= scene_.boxes().size()) {
+    // A selection is a set of STAGE object indices, so it is pruned against the
+    // scene's object COUNT, not by asking each index for a visible box: an object
+    // on a hidden layer is still in the zone, still selected, and still undoable.
+    // Dropping it here because its layer is hidden would lose the selection the
+    // moment the author filtered it out, which reads as "hiding a layer deleted my
+    // selection".
+    const std::size_t count = scene_.objectCount();
+    if (selected_.has_value() && *selected_ >= count) {
         selected_.reset();
     }
-    if (hover_.has_value() && *hover_ >= scene_.boxes().size()) {
+    if (hover_.has_value() && *hover_ >= count) {
         hover_.reset();
     }
     // A rebuild re-indexes boxes by objectIndex (not position), so prune stale
     // members instead of dropping the whole multi-selection.
     selection_.erase(std::remove_if(selection_.begin(), selection_.end(),
-                                    [&](std::size_t index) { return index >= scene_.boxes().size(); }),
+                                    [&](std::size_t index) { return index >= count; }),
                      selection_.end());
     invalidate();
 }
@@ -1070,6 +1077,14 @@ SnapScene ViewportWindow::buildSnapScene() const {
     snap.kcl = collisionTriangles_;
     snap.boxes.reserve(scene_.boxes().size());
     for (const auto& box : scene_.boxes()) {
+        // Hidden boxes are filtered out HERE, at the one place that decides what
+        // a drop can land on, rather than relying on raycastDown's flag check --
+        // so this snapshot only ever contains what is actually there. SnapBox
+        // still carries the flag so the raycast's own skip stays testable in
+        // isolation (this Win32 file cannot be).
+        if (box.hidden) {
+            continue;
+        }
         SnapBox entry;
         entry.objectIndex = box.objectIndex;
         entry.center = box.center;
@@ -1091,10 +1106,12 @@ std::optional<SnapHit> ViewportWindow::snapDownwards(const math::Vec3f& position
 }
 
 float ViewportWindow::halfHeightFor(std::size_t objectIndex) const noexcept {
-    if (objectIndex >= scene_.boxes().size()) {
-        return 0.0F;
-    }
-    return scene_.boxes()[objectIndex].halfExtents.y;
+    // includeHidden = true: this is asked "how tall is the object I am moving",
+    // and an object the author has selected and is dragging must keep its real
+    // height even if its layer is hidden -- otherwise dragging it off a surface
+    // would sink it, and the bug would look like the snap code, not the filter.
+    const auto* box = scene_.boxFor(objectIndex, true);
+    return box != nullptr ? box->halfExtents.y : 0.0F;
 }
 
 void ViewportWindow::frameAll() {
@@ -1111,14 +1128,21 @@ void ViewportWindow::frameSelection() {
     }
     // Frame the whole selection, not just the first object: a two-object
     // selection framed as one object would still leave the other off-screen.
+    //
+    // includeHidden = true, and deliberately: the author pressed F (or double-
+    // clicked a row in the tree) on THESE objects, so the camera goes to them
+    // whether or not their layer happens to be hidden. Refusing to frame a
+    // hidden object would leave "frame selection" silently doing nothing, which
+    // is indistinguishable from the key not being bound.
     math::Vec3f low{0.0F, 0.0F, 0.0F};
     math::Vec3f high{0.0F, 0.0F, 0.0F};
     bool any = false;
     for (const auto index : selection_) {
-        if (index >= scene_.boxes().size()) {
+        const auto* found = scene_.boxFor(index, true);
+        if (found == nullptr) {
             continue;
         }
-        const auto& box = scene_.boxes()[index];
+        const auto& box = *found;
         if (!any) {
             low = {box.center.x - box.halfExtents.x, box.center.y - box.halfExtents.y,
                    box.center.z - box.halfExtents.z};
@@ -1665,6 +1689,12 @@ bool ViewportWindow::drawFrameContent(bool pollInputFrame) {
         // box order. Translucency off keeps the legacy single pass.
         const auto drawBoxes = [&](ModelPass pass) {
             for (const auto& box : scene_.boxes()) {
+                // A hidden layer is not drawn. The flag lives on the box rather
+                // than being absent from the list precisely so this is one branch
+                // here rather than an index shift that breaks every consumer.
+                if (box.hidden) {
+                    continue;
+                }
                 const bool selected =
                     std::find(selection_.begin(), selection_.end(), box.objectIndex) != selection_.end();
                 const bool hovered = !selected && hover_.has_value() && *hover_ == box.objectIndex;
@@ -2084,6 +2114,12 @@ void ViewportWindow::drawLabels() {
     float textWidth = 0.0F;
     int legendLines = 0;
     for (const auto& box : scene_.boxes()) {
+        // Count what is DRAWN, not what exists. A legend reading "Terrain x 400"
+        // over an empty viewport after hiding that layer is worse than no legend:
+        // it is a count of geometry the author cannot see.
+        if (box.hidden) {
+            continue;
+        }
         const auto index = static_cast<std::size_t>(box.category);
         if (index < counts.size()) {
             counts[index]++;
@@ -2144,15 +2180,22 @@ void ViewportWindow::drawLabels() {
         legendY += legendHeight + 6.0F;
     }
 
-    // Selected object line directly under the legend.
-    if (selected_.has_value() && *selected_ < scene_.boxes().size()) {
-        const auto& box = scene_.boxes()[*selected_];
+    // Selected object line directly under the legend. includeHidden = true: a hidden
+    // object can still be selected (the tree lists hidden layers), and the line
+    // naming it is how the author finds out which one they have -- dropping it
+    // would make a hidden selection look like an empty one.
+    if (selected_.has_value()) {
+        const auto* selected = scene_.boxFor(*selected_, true);
+        if (selected != nullptr) {
+        const auto& box = *selected;
         const auto& style = categoryStyle(box.category);
-        const std::string line = box.name + " — " + style.label + " (" + box.kind + ")";
+        const std::string line = box.name + " — " + style.label + " (" + box.kind + ")" +
+                                 (box.hidden ? "  · hidden" : "");
         const float lineWidth = labelFont.measure(line);
         rect(legendX, legendY, lineWidth + padding * 2.0F, 22.0F, translucent(palette.panelBg, 0.92F));
         text(legendX + padding, legendY + 2.0F, line, palette.unsaved);
         legendY += 26.0F;
+        }
     }
 
     // Fly-speed readout: the wheel changes the flycam speed while RMB is held,
@@ -2504,7 +2547,7 @@ std::optional<std::size_t> ViewportWindow::pickAt(int x, int y) {
     // behind it, which is the single most common way an editor feels broken.
     //
     // Why the distance is re-derived here rather than returned by pickForgiving:
-    // that function answers with a box INDEX, and the occlusion rule needs a
+    // that function answers with an OBJECT index, and the occlusion rule needs a
     // DISTANCE to compare against. rayIntersectsBox() is already a free function
     // over the same box, so one more ray on a discrete click costs nothing, and
     // changing pick/pickForgiving's signature would reach the camera, the gizmo
@@ -2530,13 +2573,24 @@ std::optional<std::size_t> ViewportWindow::pickAt(int x, int y) {
     if (!occluder.has_value()) {
         return candidate;
     }
-    const auto reached = rayIntersectsBox(ray, scene_.boxes()[*candidate]);
+    const auto candidate_box = scene_.boxFor(*candidate, true);
+    if (candidate_box == nullptr) {
+        return candidate;
+    }
+    const auto reached = rayIntersectsBox(ray, *candidate_box);
     if (!reached.has_value() || !collisionOccludes(occluder, *reached)) {
         return candidate;
     }
     // The candidate is behind a face. Selecting that face's OWNER is the whole
     // point: clicking a planet's hull selects the planet, not the room behind it.
     if (occluder->sourceIndex != kCollisionNoOwner) {
+        // ...but only if that owner is actually visible. Handing back an index the
+        // author cannot see would select something they never clicked and cannot
+        // find, which is worse than selecting nothing: it reads as "the click hit
+        // the wrong object" rather than "the click hit hidden geometry".
+        if (scene_.boxFor(occluder->sourceIndex) == nullptr) {
+            return std::nullopt;
+        }
         return occluder->sourceIndex;
     }
     return std::nullopt;
@@ -2565,12 +2619,17 @@ float ViewportWindow::pickDistance() const noexcept {
 math::Vec3f ViewportWindow::gizmoAnchor() const noexcept {
     math::Vec3f sum{};
     std::size_t count = 0;
+    // includeHidden = true: the gizmo has to sit on the selection even when part
+    // of it is on a hidden layer. Dropping hidden members would make the pivot
+    // jump the instant a layer was filtered -- mid-drag, that reads as the gizmo
+    // teleporting out from under the cursor.
     for (const auto index : selection_) {
-        if (index < scene_.boxes().size()) {
-            sum = {sum.x + scene_.boxes()[index].center.x, sum.y + scene_.boxes()[index].center.y,
-                   sum.z + scene_.boxes()[index].center.z};
-            ++count;
+        const auto* box = scene_.boxFor(index, true);
+        if (box == nullptr) {
+            continue;
         }
+        sum = {sum.x + box->center.x, sum.y + box->center.y, sum.z + box->center.z};
+        ++count;
     }
     if (count == 0) {
         return {};

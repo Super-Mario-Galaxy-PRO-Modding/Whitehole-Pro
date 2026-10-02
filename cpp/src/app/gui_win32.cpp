@@ -166,6 +166,37 @@ struct EditorState {
     std::string filter;
     // Visible object rows after the search filter; maps list row -> stage index.
     std::vector<std::size_t> visibleObjects;
+    // --- Object tree: grouping + expansion -----------------------------------
+    // WHY A FLATTENED ROW LIST AND NOT RECURSIVE TreeNodes: ImGuiListClipper only
+    // works over a contiguous row vector, and a zone can hold 10k objects. A
+    // recursive tree issues one ImGui item per node per frame with nothing
+    // clipping it, which is the difference between a usable list and a stuttering
+    // one. So the tree is flattened by rebuildObjectTree() and clipped like the
+    // flat list was.
+    //
+    // COLLAPSED BY NAME, not by group index: the index shifts whenever a zone
+    // gains or loses a layer, so an index-keyed expansion would silently reopen a
+    // group after an unrelated edit. Names are at most 17 strings.
+    std::vector<std::string> collapsedLayers;
+    // Bumped by expand/collapse so objectTreeStamp() notices and the rows rebuild.
+    std::size_t treeExpandRevision{0};
+    // One rendered row: either a group header (isGroup) or a leaf object.
+    // groupIndex is the canonical layer BUCKET (0 = Common, 1..16 = LayerA..P).
+    struct ObjectListRow {
+        std::size_t stageIndex{0}; // meaningless when isGroup
+        std::size_t groupIndex{0};
+        std::size_t leafCount{0};  // group rows: objects the search left in it
+        std::uint8_t depth{0};
+        bool isGroup{false};
+        bool expanded{true}; // groups only
+    };
+    std::vector<ObjectListRow> objectRows;
+    // Last stamp objectTreeStamp() returned when objectRows was built. Compared
+    // against a fresh stamp each frame so the flattening happens on CHANGE, not
+    // every frame.
+    std::size_t treeRevision{0};
+    // Sentinel for ObjectListRow::stageIndex on a group header row.
+    static constexpr std::size_t kNoTreeObject = static_cast<std::size_t>(-1);
 
     HWND window{nullptr};
     render::ViewportWindow viewport;
@@ -415,6 +446,11 @@ struct EditorState {
     bool showProject{true};
     bool showObjects{true};
     bool showProperties{true};
+    // The layer visibility panel (View > Layers). Closed by default: it is a
+    // targeted tool for a large zone, and the Object tree already carries a
+    // per-layer checkbox for the same job, so opening a second one uninvited
+    // would be two places to look.
+    bool showLayersPanel{false};
     // The BCAM camera table editor. Distinct from settings.showCameras, which
     // toggles the in-viewport camera marker overlay; this one is a panel.
     bool showCamerasPanel{false};
@@ -756,6 +792,9 @@ std::optional<std::filesystem::path> pickOpenFile(HWND owner) {
 
 // --- data layer --------------------------------------------------------------
 
+void refreshViewport(EditorState& state, bool frame);
+void selectObject(EditorState& state, std::optional<std::size_t> stageIndex);
+
 void refreshObjects(EditorState& state) {
     state.visibleObjects.clear();
     if (!state.stage) {
@@ -772,6 +811,163 @@ void refreshObjects(EditorState& state) {
         }
         state.visibleObjects.push_back(i);
     }
+}
+
+// Canonical group order: Common first, then LayerA..LayerP in bit order, then any
+// unrecognised layer name.
+//
+// WHY BIT ORDER AND NOT ALPHABETICAL: the alphabet puts "Common" wherever it
+// likes and would reshuffle every row when a modder adds a layer called "AAA",
+// while bit order is the order the GAME addresses layers in, so it is stable and
+// means something. Returns the canonical name for each bucket.
+struct LayerBuckets {
+    std::array<std::string, 17> names;
+    std::size_t bucketOf(const smg::PlacementObject& object) const {
+        const int bit = smg::scenarioLayerBit(smg::canonicalLayerName(object.layer));
+        return static_cast<std::size_t>(bit < 0 ? 0 : bit + 1);
+    }
+};
+
+LayerBuckets makeLayerBuckets() {
+    LayerBuckets buckets;
+    buckets.names[0] = "Common";
+    const auto layers = smg::scenarioLayerNames();
+    for (std::size_t bit = 0; bit < 16 && bit < layers.size(); ++bit) {
+        buckets.names[bit + 1] = layers[bit];
+    }
+    return buckets;
+}
+
+// Flattens the layer tree into state.objectRows for the Objects panel.
+//
+// WHY FLATTENED AND NOT RECURSIVE TreeNodes: ImGuiListClipper only works over a
+// contiguous row vector, and a zone can hold 10k objects. A recursive tree issues
+// one ImGui item per node per frame with nothing clipping it, which is the
+// difference between a usable list and a stuttering one.
+//
+// A HIDDEN LAYER STILL EMITS ITS GROUP, and its children with it. Visibility is a
+// viewport concern: the object still exists, is still selectable and is still
+// undoable. Dropping hidden rows from the list would answer "where did my objects
+// go" with a blank panel, which is the first question anyone asks after hiding a
+// layer -- and they would have no way to get them back.
+void rebuildObjectTree(EditorState& state) {
+    state.objectRows.clear();
+    if (!state.stage) {
+        return;
+    }
+    const auto& objects = state.stage->objects();
+    const LayerBuckets buckets = makeLayerBuckets();
+
+    // Bucket each matching object ONCE. The obvious version -- loop the buckets on
+    // the outside and rescan visibleObjects inside -- costs 17 passes, and since
+    // bucketOf() canonicalises the layer name (a std::string allocation) that is
+    // 170k allocations for a 10k-object zone, on the very keystroke the author is
+    // typing into the search box. One pass, one small vector, done.
+    std::vector<std::size_t> bucketOfRow(state.visibleObjects.size(), 0);
+    std::array<std::size_t, 17> counts{};
+    for (std::size_t row = 0; row < state.visibleObjects.size(); ++row) {
+        const std::size_t bucket = buckets.bucketOf(objects[state.visibleObjects[row]]);
+        bucketOfRow[row] = bucket;
+        ++counts[bucket];
+    }
+
+    state.objectRows.reserve(state.visibleObjects.size() + 17);
+    for (std::size_t bucket = 0; bucket < 17; ++bucket) {
+        if (counts[bucket] == 0) {
+            continue;
+        }
+        // Expansion is remembered BY NAME, not by group index: the index shifts
+        // whenever a zone loses or gains a layer, and a collapsed group that
+        // silently reopened after an edit would look like the panel ignoring it.
+        const std::string& layer = buckets.names[bucket];
+        const bool expanded =
+            std::find(state.collapsedLayers.begin(), state.collapsedLayers.end(), layer) ==
+            state.collapsedLayers.end();
+        state.objectRows.push_back(EditorState::ObjectListRow{EditorState::kNoTreeObject, bucket, counts[bucket],
+                                                              0, true, expanded});
+        if (!expanded) {
+            continue;
+        }
+        for (std::size_t row = 0; row < state.visibleObjects.size(); ++row) {
+            if (bucketOfRow[row] != bucket) {
+                continue;
+            }
+            state.objectRows.push_back(
+                EditorState::ObjectListRow{state.visibleObjects[row], bucket, 0, 1, false, true});
+        }
+    }
+}
+
+// Live object count per layer for the open zone, so the Layers panel can say how
+// much geometry each checkbox actually controls. std::array, not a map: the group
+// count is fixed at 17 and a 10k-object zone must not allocate per lookup.
+std::array<std::size_t, 17> countObjectsByLayer(const std::vector<smg::PlacementObject>& objects) {
+    std::array<std::size_t, 17> counts{};
+    for (const auto& object : objects) {
+        // Canonicalised for the same reason the scene's filter is: an SMG1 zone
+        // spells its layer directories lowercase, and an un-canonicalised lookup
+        // would file every SMG1 object under Common -- reporting "Common: 4000"
+        // for a zone whose objects are all in LayerA.
+        const int bit = smg::scenarioLayerBit(smg::canonicalLayerName(object.layer));
+        counts[static_cast<std::size_t>(bit < 0 ? 0 : bit + 1)]++;
+    }
+    return counts;
+}
+
+// Toggles one layer's visibility bit in the PERSISTED mask and rebuilds.
+//
+// THE ONE PLACE a visibility change happens, so the group header, the Layers
+// panel and the View menu cannot each implement their own version and drift.
+//
+// Bucket 0 is Common, which owns no bit: asking to hide it is a no-op rather than
+// a silently-ignored bit, because LayerFilter::shows() keeps Common visible no
+// matter what the mask says.
+void applyLayerVisibility(EditorState& state, std::size_t bucket, bool visible) {
+    if (bucket == 0) {
+        return;
+    }
+    const int bit = static_cast<int>(bucket) - 1;
+    std::uint32_t mask = static_cast<std::uint32_t>(state.settings.visibleLayerMask);
+    if (visible) {
+        mask |= (1u << bit);
+    } else {
+        mask &= ~(1u << bit);
+    }
+    state.settings.visibleLayerMask = static_cast<int>(mask & 0xFFFFu);
+    state.settings.save();
+    // frame = false: hiding a layer is a viewing decision, and flying the camera
+    // because of it would be startling. Frame-all still respects the filter, so
+    // pressing End gets the author back to a sensible view on demand.
+    refreshViewport(state, false);
+}
+
+// Collapses or expands one layer group, remembered BY NAME so it survives a zone
+// gaining or losing layers.
+void toggleLayerCollapsed(EditorState& state, const std::string& layerName) {
+    const auto it = std::find(state.collapsedLayers.begin(), state.collapsedLayers.end(), layerName);
+    if (it != state.collapsedLayers.end()) {
+        state.collapsedLayers.erase(it);
+    } else {
+        state.collapsedLayers.push_back(layerName);
+    }
+    ++state.treeExpandRevision;
+}
+
+// A monotonic stamp of everything the flattened rows depend on, so the panel
+// rebuilds on change instead of every frame. The layer mask is folded in because
+// a group header's visibility checkbox changes what the header must display.
+std::size_t objectTreeStamp(const EditorState& state) {
+    std::size_t stamp = 1469598103934665603ull;
+    const auto mix = [&stamp](std::size_t value) {
+        stamp ^= value + 0x9e3779b97f4a7c15ull + (stamp << 6) + (stamp >> 2);
+    };
+    for (const auto c : state.filter) {
+        mix(static_cast<std::size_t>(static_cast<unsigned char>(c)));
+    }
+    mix(state.treeExpandRevision);
+    mix(static_cast<std::size_t>(state.settings.visibleLayerMask));
+    mix(state.stage ? state.stage->objects().size() : 0);
+    return stamp;
 }
 
 // --- object database bootstrap ----------------------------------------------
@@ -846,6 +1042,12 @@ void refreshViewport(EditorState& state, bool frame) {
         overlays.cameras = state.settings.showCameras;
         overlays.gravity = state.settings.showGravity;
         overlays.paths = state.settings.showPaths;
+        // The layer filter is read from Settings (the persisted copy) rather than
+        // from a second EditorState field, so the View > Layers panel, the object
+        // tree's group checkboxes and the viewport cannot disagree about what is
+        // visible -- the one place that decides.
+        render::LayerFilter layers;
+        layers.setMask(static_cast<std::uint32_t>(state.settings.visibleLayerMask));
         // Game models come from the open workspace's ObjectData archives, and
         // from the custom-object registry when the modder registered one. A
         // custom entry's model path is a plain OS path that needs no workspace
@@ -854,7 +1056,7 @@ void refreshViewport(EditorState& state, bool frame) {
         if (state.modelLibrary.bound() || state.modelLibrary.hasCustomObjects()) {
             state.modelLibrary.resetCounters();
             state.viewportScene.rebuild(state.stage->objects(), &state.modelLibrary, &state.stagePaths,
-                                        overlays);
+                                        overlays, layers);
             // Diagnose a workspace where NOTHING loaded -- once per bind, and
             // only when a workspace is actually open (without one there is no
             // ObjectData to be missing, and the message would be a lie). The
@@ -871,7 +1073,7 @@ void refreshViewport(EditorState& state, bool frame) {
                                    "whitehole-pro-console models check <game directory>");
             }
         } else {
-            state.viewportScene.rebuild(state.stage->objects(), nullptr, &state.stagePaths, overlays);
+            state.viewportScene.rebuild(state.stage->objects(), nullptr, &state.stagePaths, overlays, layers);
         }
     } else {
         state.stagePaths.clear();
@@ -2669,6 +2871,221 @@ void drawGalaxyZonePanel(EditorState& state) {
     ImGui::End();
 }
 
+// Ticks every object in one layer's bucket, or clears it. Used by the group
+// header's context menu so "hide this layer's objects" is one gesture rather than
+// a shift-click marathon on a 400-object layer.
+//
+// Returns true when the selection actually changed, so the caller only rebuilds
+// the scene when it did.
+bool selectAllInLayer(EditorState& state, std::size_t bucket, bool additive) {
+    if (!state.stage) {
+        return false;
+    }
+    const LayerBuckets buckets = makeLayerBuckets();
+    std::vector<std::size_t> chosen;
+    chosen.reserve(state.stage->objects().size());
+    for (std::size_t i = 0; i < state.stage->objects().size(); ++i) {
+        if (buckets.bucketOf(state.stage->objects()[i]) == bucket) {
+            chosen.push_back(i);
+        }
+    }
+    if (chosen.empty()) {
+        return false;
+    }
+    if (!additive) {
+        state.selection.clear();
+    }
+    for (const auto index : chosen) {
+        if (std::find(state.selection.begin(), state.selection.end(), index) == state.selection.end()) {
+            state.selection.push_back(index);
+        }
+    }
+    state.selection.erase(std::unique(state.selection.begin(), state.selection.end()),
+                          state.selection.end());
+    if (state.selection.empty()) {
+        selectObject(state, std::nullopt);
+        return false;
+    }
+    state.selectedObject = state.selection.front();
+    state.viewportSelected = state.selectedObject;
+    state.viewport.setSelected(state.selectedObject);
+    state.viewport.setSelection(state.selection);
+    syncTransformBuffers(state);
+    return true;
+}
+
+// One layer header row: a visibility checkbox, a collapse arrow, the layer name
+// and how many objects the current search left in it.
+void drawLayerGroupRow(EditorState& state, const EditorState::ObjectListRow& entry,
+                       const std::string& layerName, const render::LayerFilter& filter) {
+    const bool isCommon = entry.groupIndex == 0;
+    // Common owns NO bit, so there is nothing to write and no bit to clear.
+    // Showing it as an editable checkbox would be a lie the save cannot honour --
+    // the same trap the scenario layer matrix already locks against.
+    const bool visible = filter.shows(layerName);
+    ImGui::PushID(static_cast<int>(entry.groupIndex) + 0x40000);
+    ImGui::AlignTextToFramePadding();
+    bool shown = visible;
+    ImGui::BeginDisabled(isCommon);
+    if (ImGui::Checkbox("##vis", &shown)) {
+        applyLayerVisibility(state, entry.groupIndex, shown);
+    }
+    // isCommon is the same condition BeginDisabled() is given, so the last item
+    // submitted before the flag can only be the disabled checkbox. Older ImGui
+    // has no IsItemDisabled(), and the point is only to explain WHY it is locked.
+    if (isCommon && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Common is always visible: it owns no layer bit in the scenario file.");
+    }
+    ImGui::EndDisabled();
+    if (!isCommon && ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show or hide this whole layer in the viewport.\n"
+                          "A view preference -- not undoable, and not written to the zone.");
+    }
+    ImGui::SameLine();
+    if (ImGui::ArrowButton("##exp", entry.expanded ? ImGuiDir_Up : ImGuiDir_Right)) {
+        toggleLayerCollapsed(state, layerName);
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    if (!visible) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.45F);
+    }
+    ImGui::TextUnformatted(layerName.c_str());
+    ImGui::PopStyleVar();
+    ImGui::SameLine();
+    // The MATCHED count, not the layer's total: after a search, "3" beside a layer
+    // holding 400 objects would misreport what the group and its checkbox control.
+    ImGui::TextDisabled("(%d)", static_cast<int>(entry.leafCount));
+    if (ImGui::BeginPopupContextItem("##layerctx")) {
+        if (ImGui::MenuItem("Select all in layer")) {
+            if (selectAllInLayer(state, entry.groupIndex, false)) {
+                refreshViewport(state, false);
+            }
+        }
+        if (ImGui::BeginMenu("Add to selection", !state.selection.empty())) {
+            if (selectAllInLayer(state, entry.groupIndex, true)) {
+                refreshViewport(state, false);
+            }
+            ImGui::EndMenu();
+        }
+        if (!isCommon) {
+            ImGui::Separator();
+            if (ImGui::MenuItem(visible ? "Hide layer" : "Show layer")) {
+                applyLayerVisibility(state, entry.groupIndex, !visible);
+            }
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+
+// View > Layers: the whole layer list at once, with the object count each
+// checkbox controls. The Object tree's group headers do the same job inline;
+// this is the panel you open when the tree is too narrow to read, or when you
+// want to see all sixteen layers including the empty ones.
+void drawLayersPanel(EditorState& state) {
+    if (!state.showLayersPanel) {
+        return;
+    }
+    if (!ImGui::Begin("Layers", &state.showLayersPanel)) {
+        ImGui::End();
+        return;
+    }
+    render::LayerFilter filter;
+    filter.setMask(static_cast<std::uint32_t>(state.settings.visibleLayerMask));
+
+    ImGui::TextDisabled("Hiding a layer hides it in the viewport only. "
+                        "The objects stay in the zone and stay editable.");
+    ImGui::TextDisabled("This is a view preference: not undoable, not saved to the zone.");
+
+    // Disabled with a STATED REASON rather than a greyed box: a disabled control
+    // that does not say why is the same lie as an editable Common checkbox.
+    if (!state.stage.has_value()) {
+        ImGui::Separator();
+        ImGui::BeginDisabled();
+        ImGui::Button("Show all", ImVec2(80.0F, 0.0F));
+        ImGui::SameLine();
+        ImGui::Button("Hide all", ImVec2(80.0F, 0.0F));
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("Open a zone to choose which layers to show.");
+        ImGui::End();
+        return;
+    }
+
+    // Live counts from the open zone, so a modder can see which layer is the
+    // 4,000-object one before hiding it rather than after.
+    const auto counts = countObjectsByLayer(state.stage->objects());
+
+    ImGui::Separator();
+    if (ImGui::Button("Show all")) {
+        state.settings.visibleLayerMask = static_cast<int>(render::LayerFilter::kAllLayersMask);
+        state.settings.save();
+        refreshViewport(state, false);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Hide all")) {
+        // Common has no bit and stays visible, so "hide all" genuinely means every
+        // ADDRESSABLE layer is hidden and Common is the only thing left. The
+        // summary line below says so rather than letting the author wonder why
+        // the viewport is not empty.
+        state.settings.visibleLayerMask = 0;
+        state.settings.save();
+        refreshViewport(state, false);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Invert")) {
+        std::uint32_t mask = static_cast<std::uint32_t>(state.settings.visibleLayerMask);
+        mask = (~mask) & render::LayerFilter::kAllLayersMask;
+        state.settings.visibleLayerMask = static_cast<int>(mask);
+        state.settings.save();
+        refreshViewport(state, false);
+    }
+    const int shown = filter.visibleLayerCount();
+    ImGui::TextDisabled("%d of 16 layers shown  ·  %d of %d objects visible", shown,
+                        static_cast<int>(state.viewportScene.visibleObjectCount()),
+                        static_cast<int>(state.stage->objects().size()));
+    ImGui::Separator();
+
+    // Common first, always ticked and disabled: it owns no bit, so a checkbox
+    // that could be cleared would be a lie the mask cannot honour.
+    bool common = true;
+    ImGui::BeginDisabled(true);
+    if (ImGui::Checkbox("Common##layers", &common)) {
+        applyLayerVisibility(state, 0, common);
+    }
+    // Same reasoning as the tree header: the last item before the flag is the
+    // disabled checkbox, so a hover on it is what we want to explain.
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Always visible. Common owns no layer bit in the scenario file, "
+                          "so it cannot be hidden.");
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d)  always on", static_cast<int>(counts[0]));
+
+    if (ImGui::BeginChild("##layerlist")) {
+        const auto layers = smg::scenarioLayerNames();
+        for (std::size_t bit = 0; bit < layers.size(); ++bit) {
+            const std::size_t bucket = bit + 1;
+            bool visible = filter.shows(layers[bit]);
+            ImGui::PushID(static_cast<int>(bucket) + 0x50000);
+            if (ImGui::Checkbox(layers[bit].c_str(), &visible)) {
+                applyLayerVisibility(state, bucket, visible);
+            }
+            ImGui::PopID();
+            ImGui::SameLine();
+            const std::size_t count = counts[bucket];
+            if (count == 0) {
+                ImGui::TextDisabled("(%d)  empty in this zone", 0);
+            } else {
+                ImGui::TextDisabled("(%d)", static_cast<int>(count));
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 void drawObjectsPanel(EditorState& state) {
     if (!state.showObjects) {
         return;
@@ -2736,14 +3153,28 @@ void drawObjectsPanel(EditorState& state) {
     }
 
     const auto& objects = state.stage->objects();
+    // The flattened tree is rebuilt only when one of its inputs actually changes,
+    // never per frame -- that is the whole reason it is flattened rather than
+    // recursed into live.
+    const std::size_t stamp = objectTreeStamp(state);
+    if (stamp != state.treeRevision) {
+        rebuildObjectTree(state);
+        state.treeRevision = stamp;
+    }
+    const LayerBuckets buckets = makeLayerBuckets();
+    render::LayerFilter layerFilter;
+    layerFilter.setMask(static_cast<std::uint32_t>(state.settings.visibleLayerMask));
+
     ImGui::BeginChild("##objectlist");
     ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(state.visibleObjects.size()));
+    clipper.Begin(static_cast<int>(state.objectRows.size()));
     // After an add/duplicate the new row must be visible even when it sits far
-    // outside the current scroll window, so it is exempted from clipping.
+    // outside the current scroll window, so it is exempted from clipping. The row
+    // index is now into the flattened tree, so this scans objectRows.
     if (state.scrollToSelected && state.selectedObject.has_value()) {
-        for (std::size_t row = 0; row < state.visibleObjects.size(); ++row) {
-            if (state.visibleObjects[row] == *state.selectedObject) {
+        for (std::size_t row = 0; row < state.objectRows.size(); ++row) {
+            if (!state.objectRows[row].isGroup &&
+                state.objectRows[row].stageIndex == *state.selectedObject) {
                 clipper.IncludeItemByIndex(static_cast<int>(row));
                 break;
             }
@@ -2751,17 +3182,34 @@ void drawObjectsPanel(EditorState& state) {
     }
     while (clipper.Step()) {
         for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            const std::size_t stageIndex = state.visibleObjects[static_cast<std::size_t>(row)];
+            const auto& entry = state.objectRows[static_cast<std::size_t>(row)];
+            const std::string& layerName = buckets.names[entry.groupIndex];
+            if (entry.isGroup) {
+                drawLayerGroupRow(state, entry, layerName, layerFilter);
+                continue;
+            }
+
+            const std::size_t stageIndex = entry.stageIndex;
             const auto& object = objects[stageIndex];
             const bool selected = state.selectedObject == stageIndex;
+            // A hidden layer's rows are listed but DIMMED. They stay listed
+            // because the object still exists and is still editable -- hiding a
+            // layer is a viewport preference, not a delete -- and dropping the
+            // rows would leave an author who hid a layer with no way to find the
+            // objects again.
+            const bool layerShown = layerFilter.shows(layerName);
+            if (!layerShown) {
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.45F);
+            }
+            ImGui::Indent(static_cast<float>(entry.depth) * 14.0F);
             // Category color chip.
             ImGui::PushStyleColor(ImGuiCol_Text, categoryColor(object));
             ImGui::TextUnformatted("*");
             ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) {
                 const auto& style = render::objectStyle(object.kind, object.name);
-                ImGui::SetTooltip("%s  [%s / %s]", style.label,
-                                  object.kind.c_str(), object.layer.c_str());
+                ImGui::SetTooltip("%s  [%s / %s]%s", style.label, object.kind.c_str(),
+                                  object.layer.c_str(), layerShown ? "" : "\nHidden in the viewport.");
             }
             ImGui::SameLine();
             std::string label = object.name;
@@ -2803,6 +3251,10 @@ void drawObjectsPanel(EditorState& state) {
                 ImGui::EndPopup();
             }
             ImGui::PopID();
+            ImGui::Unindent(static_cast<float>(entry.depth) * 14.0F);
+            if (!layerShown) {
+                ImGui::PopStyleVar();
+            }
         }
     }
     ImGui::EndChild();
@@ -6034,6 +6486,9 @@ void drawMenuBar(EditorState& state, bool& done) {
         ImGui::Separator();
         ImGui::MenuItem("Project", nullptr, &state.showProject);
         ImGui::MenuItem("Objects", nullptr, &state.showObjects);
+        // Named for what it filters, not for the scenario concept it reuses: the
+        // Layers panel hides whole layers in the VIEWPORT, and says so.
+        ImGui::MenuItem("Layers", nullptr, &state.showLayersPanel);
         ImGui::MenuItem("Properties", nullptr, &state.showProperties);
         // "Cameras" already means the viewport's camera-marker overlay in this
         // menu, so the panel and that toggle are named apart on purpose: the
@@ -7721,6 +8176,10 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
                                         &dockBottom, &dockCenter);
             ImGui::DockBuilderDockWindow("Project", dockLeft);
             ImGui::DockBuilderDockWindow("Objects", dockLeft);
+            // Under Objects in the left dock: the two panels are the same job at
+            // two zoom levels -- the tree groups by layer inline, this shows all
+            // sixteen including the empty ones.
+            ImGui::DockBuilderDockWindow("Layers", dockLeft);
             ImGui::DockBuilderDockWindow("Viewport", dockCenter);
             ImGui::DockBuilderDockWindow("Properties", dockRight);
             ImGui::DockBuilderDockWindow("Cameras", dockRight);
@@ -7739,6 +8198,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         // --- Panels ---
         drawGalaxyZonePanel(state);
         drawObjectsPanel(state);
+        drawLayersPanel(state);
         drawPropertiesPanel(state);
         drawCamerasPanel(state);
         drawScenariosPanel(state);

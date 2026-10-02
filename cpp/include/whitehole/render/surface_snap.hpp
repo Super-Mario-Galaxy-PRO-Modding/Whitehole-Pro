@@ -50,6 +50,17 @@ struct SnapBox {
     math::Vec3f center{};
     math::Vec3f halfExtents{};
     math::Matrix4 pickWorld{};
+    // Mirrors ViewportBox::hidden, and is skipped by raycastDown() for the same
+    // reason. The caller (ViewportWindow::buildSnapScene) filters these out
+    // rather than setting the flag, because a snapshot of the snap scene should
+    // only ever contain what is actually there to land on.
+    //
+    // THE ONE-LINE REVERSAL: if a hidden layer should still catch drops, set this
+    // true in buildSnapScene instead of omitting the box. That is a deliberate
+    // product decision, not a bug: consistency with picking says an invisible
+    // surface should not silently grab an object, and an author who wants to land
+    // on a hidden platform can simply unhide the layer.
+    bool hidden{false};
 };
 
 struct SnapScene {

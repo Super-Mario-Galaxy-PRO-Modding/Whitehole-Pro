@@ -35,6 +35,21 @@ struct ViewportBox {
     std::size_t objectIndex{0};
     std::string name;
     std::string kind;
+    // The object's scenario layer, copied from PlacementObject at rebuild time.
+    // Carried here so draw, the HUD and the object tree can label or filter a box
+    // without going back to the stage's object list -- the scene is what the
+    // renderer sees, and re-deriving the layer from an index it does not own is
+    // exactly the coupling boxFor() exists to remove.
+    std::string layer;
+    // True when the layer filter says this object should not be seen or clicked.
+    //
+    // WHY A FLAG AND NOT AN ABSENT BOX: boxes_ stays parallel to the object list,
+    // so boxes_[i].objectIndex == i always holds. Compacting boxes_ to hide a
+    // layer would not hide anything -- it would shift every later index and make
+    // every click select the WRONG object, silently. A flag keeps selection
+    // indices meaningful across a visibility change, which is what lets a hidden
+    // layer's objects stay in the undo history and the tree, just not on screen.
+    bool hidden{false};
     math::Matrix4 world{};     // draw matrix: placeholders include their box size
     math::Matrix4 pickWorld{}; // picking matrix: unit box [-1,1]^3 * per-axis extent
     math::Vec3f center{};
@@ -95,28 +110,31 @@ struct RailPointRef {
 // the Common layer, which in most zones is most of the geometry. That is the trap
 // this type exists to make impossible: shows() special-cases it rather than
 // leaving the caller to remember.
-// NOT YET WIRED INTO ViewportScene::rebuild(), and that is deliberate.
+// WIRED INTO ViewportScene::rebuild() as its `layers` argument, and the wiring
+// took the shape (b) this note originally recommended: boxes_ stays parallel to
+// the object list, hidden boxes are FLAGGED (ViewportBox::hidden), and draw, pick,
+// the marquee, the HUD legend, surface snapping and frame-all skip them.
 //
-// rebuild() builds boxes_ one-to-one with the object list, in order, and the WHOLE
-// editor relies on `boxes_[i].objectIndex == i`: pickAt() returns a box index, the
-// GUI stores it in state.selectedObject, and every consumer then treats that value
-// as a STAGE object index. Compacting boxes_ to hide a layer would therefore not
-// hide anything -- it would silently make every click select the WRONG object,
-// because box 5 would no longer be object 5. That coupling is invisible today and
-// is exactly the kind of thing that turns "layer filtering" into "picking is
-// broken now".
-//
-// So the filter lands as a tested type first, and the wiring must go through one
-// of two shapes, neither of which is a one-line change:
-//   (a) pickAt() translates box index -> boxes()[i].objectIndex, and every
-//       consumer of the selection agrees the value is a stage index; or
-//   (b) boxes_ stays parallel to the object list and hidden boxes are flagged,
-//       with draw and pick skipping them.
-// (b) keeps indices stable and is the smaller change to reason about.
+// A CORRECTION TO THE ORIGINAL NOTE, because the stale version was worse than no
+// note at all: it claimed "pickAt() returns a box index". That stopped being true
+// -- pick()/pickForgiving()/pickRect() all return box.objectIndex, a STAGE object
+// index, and there is no pickAt. What the note got RIGHT was the danger: six
+// consumers still reached into boxes()[i] with a stage index, which only worked
+// because boxes_ happened to be parallel to the object list. Those now go through
+// boxFor(), so the invariant is declared and defensively enforced rather than
+// true by accident. See boxFor() for why that distinction matters.
 struct LayerFilter {
+    // Every bit the game can address set, for the "show all" default and button.
+    static constexpr std::uint32_t kAllLayersMask = 0xFFFFu;
+
     // One bit per LayerA..LayerP (bit 0 = LayerA). All-on is the default, so a
     // caller that never thinks about layers sees the whole zone.
-    std::uint32_t bits{0xFFFFFFFFu};
+    //
+    // kAllLayersMask rather than 0xFFFFFFFF: only 16 layers are addressable, and a
+    // mask with meaningless high bits set would make everythingVisible() false for
+    // a filter that has in fact hidden nothing. That reads as "some layers are
+    // hidden" for a zone with none hidden.
+    std::uint32_t bits{kAllLayersMask};
 
     // Explicit constructor helpers, because "all visible" is spelled differently
     // from "nothing visible" and getting it backwards hides a whole zone.
@@ -129,8 +147,15 @@ struct LayerFilter {
     // mislabelled layer disappear with no way to get it back.
     [[nodiscard]] bool shows(std::string_view layer) const noexcept;
     void set(std::string_view layer, bool visible) noexcept;
-    [[nodiscard]] bool everythingVisible() const noexcept { return bits == 0xFFFFFFFFu; }
+    [[nodiscard]] bool everythingVisible() const noexcept { return bits == kAllLayersMask; }
     [[nodiscard]] std::uint32_t mask() const noexcept { return bits; }
+    // Round-trips the mask through Settings, so the panel's state survives a
+    // restart. The high bits are cleared rather than kept as a value no layer can
+    // ever read, which keeps everythingVisible() honest about what is hidden.
+    void setMask(std::uint32_t value) noexcept { bits = value & kAllLayersMask; }
+    // How many of the 16 addressable layers are currently visible. Lets the panel
+    // say "none of LayerA..LayerP" without the caller re-deriving it.
+    [[nodiscard]] int visibleLayerCount() const noexcept;
 };
 
 // Which overlay families a rebuild generates. The View menu toggles map onto
@@ -152,16 +177,58 @@ struct OverlayFlags {
 class ViewportScene {
 public:
     // `paths` feeds the rail overlays (null = no rails); `overlays` selects
-    // which families to generate. Both default so existing callers keep
-    // compiling unchanged.
+    // which families to generate; `layers` hides whole scenario layers.
+    //
+    // All three default so existing callers keep compiling unchanged -- and
+    // `layers` defaults to ALL VISIBLE specifically, because a filter that
+    // defaulted to nothing would open every project on an empty viewport.
+    //
+    // A hidden object still gets a box (flagged, not absent): see
+    // ViewportBox::hidden for why dropping it would shift every selection index.
     void rebuild(const std::vector<smg::PlacementObject>& objects, ModelLibrary* models = nullptr,
-                 const std::vector<smg::RailPath>* paths = nullptr, OverlayFlags overlays = {});
+                 const std::vector<smg::RailPath>* paths = nullptr, OverlayFlags overlays = {},
+                 LayerFilter layers = LayerFilter::allVisible());
     void clear() noexcept;
 
     [[nodiscard]] const std::vector<ViewportBox>& boxes() const noexcept { return boxes_; }
     [[nodiscard]] bool empty() const noexcept { return boxes_.empty(); }
+    // How many objects the last rebuild saw -- hidden ones INCLUDED, because a
+    // selection is a set of stage indices and an object on a hidden layer is
+    // still in the zone. This is what callers should prune a selection against;
+    // boxes().size() happens to equal it today but says the wrong thing.
+    [[nodiscard]] std::size_t objectCount() const noexcept { return boxes_.size(); }
+    // How many of those are currently drawn (not on a hidden layer).
+    [[nodiscard]] std::size_t visibleObjectCount() const noexcept;
     [[nodiscard]] const std::vector<OverlayBatch>& overlays() const noexcept { return overlayBatches_; }
     [[nodiscard]] const std::vector<smg::RailPath>& railPaths() const noexcept { return paths_; }
+    // The filter this scene was last rebuilt with, so a caller can render a panel
+    // from the same value the viewport is actually using rather than from a
+    // second copy it might have let drift.
+    [[nodiscard]] const LayerFilter& layerFilter() const noexcept { return layers_; }
+
+    // The ONE place that turns a stage object index into a box.
+    //
+    // WHY IT EXISTS: pick(), pickForgiving() and pickRect() answer with
+    // box.objectIndex -- a STAGE object index -- and the GUI stores that value in
+    // state.selectedObject, where everything downstream treats it as a stage
+    // index. Six call sites used to reach into boxes()[i] with it, which was
+    // correct only while boxes_ happened to be parallel to the object list. That
+    // is an invariant nothing declared, and it is invisible until broken: one
+    // compacted box does not hide a layer, it makes every later click select the
+    // WRONG object.
+    //
+    // The fast path is the parallel case -- one bounds check, one compare. The
+    // scan is the fallback, so a scene whose invariant does NOT hold still returns
+    // the right box rather than the wrong one. That is the whole point: the
+    // difference between "the filter stopped drawing geometry" and "the filter
+    // made clicking select the wrong object".
+    //
+    // Returns nullptr for an out-of-range index, and for a HIDDEN box only when
+    // `includeHidden` is false -- callers that ask "is this object on screen?"
+    // want nullptr, while the ones that want its geometry regardless (gizmo
+    // anchoring, framing a selection that is currently hidden) pass true.
+    [[nodiscard]] const ViewportBox* boxFor(std::size_t objectIndex,
+                                            bool includeHidden = false) const noexcept;
 
     // Closest box hit by a camera ray. Two-phase: the oriented proxy box
     // (broad) then the object's actual drawn triangles (narrow), so a click
@@ -198,6 +265,10 @@ public:
 
 private:
     std::vector<ViewportBox> boxes_;
+    // Kept so layerFilter() can report what the viewport is really using, and so
+    // clear() can put it back to "everything visible" rather than leaving the
+    // previous zone's filter to describe an empty scene.
+    LayerFilter layers_;
     std::vector<OverlayBatch> overlayBatches_;
     std::vector<smg::RailPath> paths_;
     bool pathsPickable_{false};

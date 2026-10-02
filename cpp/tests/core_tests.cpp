@@ -234,11 +234,13 @@ void testStageCreatePlans() {
     }
 }
 
-// LAYER FILTERING. The type that decides which objects a rebuild would show, kept
-// separate from the wiring because the wiring is entangled with a coupling this
-// test does not touch: rebuild() builds boxes_ one-to-one with the object list and
-// the whole editor treats a BOX index as a STAGE object index. Compacting boxes_
-// to hide a layer would make every click select the wrong object.
+// LAYER FILTERING, AS A VALUE TYPE. What it DECIDES is pinned here; the WIRING
+// into rebuild()/pick()/draw() is testLayerFilteredScene below.
+//
+// This is a mask of 16 layer bits with Common permanently excluded, because the
+// two failures this type exists to prevent are both silent: testing a bit for
+// Common would hide most of most zones' geometry, and letting boxes_ compact
+// would shift every selection index.
 //
 // So what is pinned here is the decision itself, which is where the silent bugs
 // live -- above all that "Common" must never be hideable.
@@ -291,6 +293,210 @@ void testLayerFilter() {
     LayerFilter unknown = LayerFilter::noneVisible();
     expect(unknown.shows("LayerZ") && unknown.shows("ObjInfo") && unknown.shows(""),
            "an unrecognised layer name must stay visible, not vanish");
+}
+
+// LAYER FILTERING, WIRED. testLayerFilter above pins the DECISION; this pins the
+// WIRING, which is where the silent failures were.
+//
+// The point of the flag-not-absent design is that hiding a layer changes what is
+// DRAWN and PICKED without changing what an INDEX MEANS. Every assertion here is
+// a way that could have gone wrong and been invisible:
+//
+//   * boxes_ compacting when a layer is hidden -> indices shift -> clicking
+//     object 5 selects object 4, and everything still LOOKS right.
+//   * a hidden object staying pickable -> click empty space, get a selection.
+//   * frame-all following hidden geometry -> the camera frames nothing.
+void testLayerFilteredScene() {
+    using whitehole::render::LayerFilter;
+    using whitehole::render::ViewportScene;
+    namespace smg = whitehole::smg;
+
+    auto makeObject = [](std::string layer, float x) {
+        smg::PlacementObject object;
+        object.kind = "obj";
+        object.layer = std::move(layer);
+        object.name = "Coin";
+        object.position = {x, 0.0F, 0.0F};
+        return object;
+    };
+    // Three objects: two in Common (x = 0 and 100) and one in LayerB (x = 10000,
+    // far away so hiding it visibly changes the frame).
+    const std::vector<smg::PlacementObject> objects{makeObject("Common", 0.0F),
+                                                    makeObject("Common", 100.0F),
+                                                    makeObject("LayerB", 10000.0F)};
+
+    // DEFAULT: everything visible. A filter that defaulted to nothing would open
+    // every project on an empty viewport.
+    ViewportScene all;
+    all.rebuild(objects);
+    expect(all.layerFilter().everythingVisible(), "a default rebuild must show every layer");
+    expect(all.visibleObjectCount() == 3, "the default rebuild hid an object");
+    expect(all.objectCount() == 3, "the default rebuild dropped a box");
+
+    // Hide LayerB.
+    LayerFilter noB = LayerFilter::allVisible();
+    noB.set("LayerB", false);
+    ViewportScene scene;
+    scene.rebuild(objects, nullptr, nullptr, {}, noB);
+    expect(scene.visibleObjectCount() == 2, "hiding LayerB must hide exactly its one object");
+    expect(scene.objectCount() == 3, "hiding a layer must not DROP a box -- that shifts indices");
+    expect(scene.layerFilter().mask() == noB.mask(), "the scene must report the filter it was built with");
+
+    // THE INVARIANT THAT MATTERS MOST. If this fails, every later click in the
+    // editor silently selects the wrong object and nothing looks broken.
+    for (std::size_t i = 0; i < scene.boxes().size(); ++i) {
+        expect(scene.boxes()[i].objectIndex == i,
+               "boxes_ must stay parallel to the object list under filtering (index " +
+                   std::to_string(i) + ")");
+    }
+    expect(scene.boxes()[2].hidden, "the LayerB box must be flagged hidden");
+    expect(!scene.boxes()[0].hidden && !scene.boxes()[1].hidden,
+           "Common objects must not be flagged hidden");
+    expect(scene.boxes()[2].layer == "LayerB", "the box must carry its layer for the tree");
+
+    // boxFor() is the declared way in and must agree with the array.
+    for (std::size_t i = 0; i < scene.boxes().size(); ++i) {
+        const auto* box = scene.boxFor(i, true);
+        expect(box != nullptr && box->objectIndex == i,
+               "boxFor must find the box for object " + std::to_string(i));
+    }
+    // By default it hides hidden boxes -- that is what "is this on screen?" means.
+    expect(scene.boxFor(0) != nullptr, "boxFor must return a visible box");
+    expect(scene.boxFor(2) == nullptr, "boxFor must NOT return a hidden box by default");
+    expect(scene.boxFor(999) == nullptr, "boxFor on an out-of-range index must be nullptr");
+
+    // A HIDDEN OBJECT MUST NOT BE PICKABLE. The object is not on screen, so
+    // clicking where it was must not select it. Aimed straight at object 2
+    // (the hidden one) so the ray provably intersects it -- otherwise this would
+    // pass just because the ray misses, which proves nothing.
+    whitehole::render::ViewportCamera camera;
+    camera.lookAt({10000.0F, 0.0F, 500.0F}, {10000.0F, 0.0F, 0.0F});
+    // Sanity: the SAME ray on an unfiltered scene does hit object 2. Without this
+    // the assertion below could be satisfied by a camera that simply misses.
+    ViewportScene unfiltered;
+    unfiltered.rebuild(objects);
+    expect(unfiltered.pick(camera, 400.0F, 300.0F, 800.0F, 600.0F) ==
+               std::optional<std::size_t>(2),
+           "the hidden-object ray must hit object 2 when nothing is filtered, or the next "
+           "assertion is vacuous");
+    expect(!scene.pick(camera, 400.0F, 300.0F, 800.0F, 600.0F).has_value(),
+           "a hidden object must never come back from pick()");
+    expect(!scene.pickForgiving(camera, 400.0F, 300.0F, 800.0F, 600.0F).has_value(),
+           "a hidden object must never come back from pickForgiving() either");
+
+    // ...but a VISIBLE one still is, so the above is not just "picking broke".
+    // Aimed straight down -Z at object 0's centre so the centre ray cannot miss:
+    // an off-centre eye would aim BETWEEN the two Common objects (x=0 and x=100)
+    // and prove nothing about whether picking still works.
+    whitehole::render::ViewportCamera nearCamera;
+    nearCamera.lookAt({0.0F, 0.0F, 500.0F}, {0.0F, 0.0F, 0.0F});
+    const auto hitVisible = scene.pick(nearCamera, 400.0F, 300.0F, 800.0F, 600.0F);
+    expect(hitVisible.has_value(), "a visible object must still be pickable under filtering");
+    expect(hitVisible == std::optional<std::size_t>(0),
+           "the centre ray must still select the visible object it is aimed at");
+
+    // The forgiving path too, since it is the one that used to fall back on a
+    // proximity loop over every box.
+    expect(scene.pickForgiving(nearCamera, 400.0F, 300.0F, 800.0F, 600.0F).has_value(),
+           "pickForgiving must still find the visible object");
+
+    // A MARQUEE must not sweep up invisible geometry: hiding a layer and dragging
+    // across where it was would otherwise silently select all of it.
+    const auto marquee = scene.pickRect(nearCamera, 0.0F, 0.0F, 800.0F, 600.0F, 800.0F, 600.0F);
+    for (const auto index : marquee) {
+        expect(index != 2, "pickRect must skip hidden objects");
+    }
+
+    // FRAME-ALL FOLLOWS WHAT IS VISIBLE, so hiding a layer re-frames onto what is
+    // left instead of leaving the camera among geometry nobody can see.
+    expect(scene.center().x < 100.0F,
+           "frame-all must centre on the visible objects, not the hidden one at x=10000");
+
+    // THE ALL-HIDDEN FALLBACK. A zone whose objects are all in LayerA..LayerP and
+    // whose Common layer is empty would otherwise frame an EMPTY set: the camera
+    // would drop to the world origin and the 200-unit floor, which reads as "the
+    // camera broke" rather than "you hid everything".
+    LayerFilter noneVisible = LayerFilter::noneVisible();
+    ViewportScene hidden;
+    hidden.rebuild(objects, nullptr, nullptr, {}, noneVisible);
+    // Common is never hideable, so the two Common objects are still visible.
+    expect(hidden.visibleObjectCount() == 2, "Common must survive even an all-hidden filter");
+    expect(hidden.center().x < 100.0F, "an all-hidden filter must still frame Common");
+    // And with NO Common objects at all, framing must fall back to the whole zone.
+    ViewportScene onlyB;
+    onlyB.rebuild({makeObject("LayerB", 5000.0F)}, nullptr, nullptr, {}, noneVisible);
+    expect(std::abs(onlyB.center().x - 5000.0F) < 0.01F,
+           "framing a fully hidden zone must fall back to the whole zone, not the origin");
+    expect(onlyB.frameDistance() >= 200.0F, "frame distance must stay clamped and sane");
+
+    // THE SMG1 TRAP. An SMG1 archive stores its layer directory LOWERCASE and
+    // scenarioLayerBit() is case-SENSITIVE, so a filter built on the raw string
+    // would hide nothing on SMG1 and everything on SMG2, with no error anywhere.
+    // The canonicalisation therefore has to live INSIDE rebuild().
+    LayerFilter noA = LayerFilter::allVisible();
+    noA.set("LayerA", false);
+    ViewportScene smg1;
+    smg1.rebuild({makeObject("common", 0.0F), makeObject("layera", 9000.0F)}, nullptr, nullptr, {},
+                 noA);
+    expect(!smg1.boxes()[0].hidden,
+           "SMG1 'common' must still resolve as Common through the filter");
+    expect(smg1.boxes()[1].hidden,
+           "SMG1 'layera' must be hidden when LayerA is -- the lowercase spelling is the game's");
+
+    // Overlays follow the filter too: a hidden layer's camera wireframe left
+    // floating over an empty viewport looks like a rendering bug, and there is no
+    // way to click it to find out why.
+    whitehole::render::OverlayFlags camerasOnly;
+    camerasOnly.axis = camerasOnly.areas = camerasOnly.gravity = camerasOnly.paths = false;
+    camerasOnly.cameras = true;
+    std::vector<smg::PlacementObject> withCamera{makeObject("Common", 0.0F),
+                                                 makeObject("LayerB", 50.0F)};
+    withCamera[0].kind = "camera";
+    withCamera[1].kind = "camera";
+    ViewportScene overlayScene;
+    overlayScene.rebuild(withCamera, nullptr, nullptr, camerasOnly, noB);
+    expect(overlayScene.overlays().size() == 1,
+           "the hidden layer's camera overlay must be dropped along with it");
+
+    // Mask round trip, which is how Settings persists it.
+    LayerFilter stored;
+    stored.setMask(0x1234u);
+    expect(stored.mask() == 0x1234u, "setMask must round-trip through Settings");
+    stored.setMask(0xFFFFFFFFu);
+    expect(stored.mask() == 0xFFFFu, "setMask must drop the bits no layer can address");
+    expect(stored.everythingVisible(), "an all-16 mask must report everything visible");
+    expect(stored.visibleLayerCount() == 16, "an all-16 mask must count sixteen layers");
+    expect(LayerFilter::noneVisible().visibleLayerCount() == 0, "noneVisible must count zero");
+
+    // clear() must reset the filter too, or the NEXT zone would open with layers
+    // hidden by a preference the author never set for it.
+    ViewportScene toClear;
+    toClear.rebuild(objects, nullptr, nullptr, {}, noB);
+    toClear.clear();
+    expect(toClear.layerFilter().everythingVisible(), "clear() must reset the layer filter");
+}
+
+// SURFACE SNAPPING IGNORES HIDDEN LAYERS. Pinned here, away from the Win32 code
+// that assembles the snap scene, because this rule is a product decision: what you
+// cannot see should not silently decide where an object lands.
+void testSnapSkipsHiddenLayers() {
+    namespace render = whitehole::render;
+    render::SnapScene scene;
+    // A floor in Common and another in LayerB, both centred at the origin.
+    for (int i = 0; i < 2; ++i) {
+        render::SnapBox box;
+        box.objectIndex = static_cast<std::size_t>(i);
+        box.center = {0.0F, 0.0F, 0.0F};
+        box.halfExtents = {100.0F, 10.0F, 100.0F};
+        box.pickWorld = render::placementWorldMatrix(whitehole::smg::PlacementObject{});
+        box.hidden = i == 1;
+        scene.boxes.push_back(box);
+    }
+    // A drop from high above must land on the VISIBLE floor only.
+    const auto hit = render::raycastDown(scene, {0.0F, 500.0F, 0.0F}, 5000.0F,
+                                         render::kCollisionNoOwner);
+    expect(hit.has_value(), "a visible box must still catch a drop");
+    expect(hit.has_value() && hit->sourceIndex == 0, "a hidden box must not catch a drop");
 }
 
 // THE COLLISION WIREFRAME MUST BE WELDED. A KCL is a closed mesh of prisms, so
@@ -6569,6 +6775,8 @@ int main() {
         testCollisionAwarePicking();
         testCollisionWireframeWelding();
         testLayerFilter();
+        testLayerFilteredScene();
+        testSnapSkipsHiddenLayers();
         testStageCreatePlans();
         testStageTemplates();
         testShippedTemplatesParse();

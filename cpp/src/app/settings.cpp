@@ -77,6 +77,10 @@ void Settings::load() {
     showGravity = getB(root, "showGravity", true);
     showPaths = getB(root, "showPaths", true);
     showCollision = getB(root, "showCollision", false);
+    // Clamped to the 16 layers the game can address: a hand-edited settings file
+    // with a negative or oversized value must not become a mask the filter reads
+    // as "some layers hidden" when the author never hid one.
+    visibleLayerMask = getI(root, "visibleLayerMask", 0xFFFF) & 0xFFFF;
     betterQuality = getB(root, "betterQuality", true);
     lowPolyModels = getB(root, "lowPolyModels", false);
     collisionModels = getB(root, "collisionModels", false);
@@ -135,6 +139,7 @@ void Settings::save() const {
     putB(o, "showGravity", showGravity);
     putB(o, "showPaths", showPaths);
     putB(o, "showCollision", showCollision);
+    putI(o, "visibleLayerMask", visibleLayerMask & 0xFFFF);
     putB(o, "betterQuality", betterQuality);
     putB(o, "lowPolyModels", lowPolyModels);
     putB(o, "collisionModels", collisionModels);
@@ -188,6 +193,7 @@ void Settings::reset() {
     openMaximized = false;
     showAxis = showAreas = showCameras = showGravity = showPaths = true;
     showCollision = false;
+    visibleLayerMask = 0xFFFF;
     betterQuality = true;
     lowPolyModels = collisionModels = false;
     texturedModels = translucentModels = true;

@@ -61,7 +61,15 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - **Add Object** picker (`Shift+A`) fed by the community database.
 - Duplicate (`Ctrl+D`), delete (`Del`), group transform — **every action one undo step**.
 - **Problems panel** — explains *and jumps to* each validation issue.
-- Multi-selection with group gizmo.
+- **Multi-selection with group gizmo.**
+
+### 🧅 Layers, for zones that are too big to look at
+- **View > Layers** hides whole scenario layers. Each checkbox shows how many objects it actually controls in the open zone, so you can see the 4,000-object layer before hiding it.
+- **The Objects list is grouped by layer** — visibility checkbox, collapse arrow, live count, and right-click **select all in layer**.
+- **Hiding is a viewport filter, not a delete.** The objects stay in the tree (dimmed), stay selectable, stay undoable, and stay in the file. Nothing is written to the zone — it's a view preference, like the axis toggle.
+- Hidden layers are excluded from picking, marquee selection, surface snapping, frame-all and the legend count, so what you see is genuinely what you can click.
+- **Common is always visible and its checkbox is locked**, because Common owns no layer bit in the scenario file — it cannot be hidden, and a checkbox that looked editable would be lying.
+- Your choice is remembered between sessions.
 
 ### 📚 Object database on autopilot
 - Friendly names + parameter descriptions download **once** from Luma's Workshop.
@@ -381,7 +389,7 @@ editor's core · full test suite.
 1. ✅ KCL collision rendering — collision-aware picking, and a wireframe overlay
       (View > Overlays > Collision, off by default)
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
-3. 🚧 Layer filtering & hierarchical object tree — `LayerFilter` is implemented and tested, **but not yet wired**: `rebuild()`'s box-index == object-index coupling would otherwise make clicks select the wrong object (see BLUEPRINT §16.3)
+3. ✅ Layer filtering & hierarchical object tree — **View > Layers** hides whole scenario layers in the viewport (Common is always on, because it owns no layer bit); the Objects list is grouped by layer with a per-group visibility checkbox, collapse arrow, live object count, and select-all-in-layer. Hidden layers are excluded from drawing, picking, marquee selection, surface snapping, the HUD legend count and camera/area/gravity overlays — but their objects stay in the tree (dimmed), stay selectable and stay undoable, because hiding a layer is a view preference, not a delete.
 4. 🚧 BCSV spreadsheet editor
 5. ✅ Galaxy & zone management — scenario editor (View > Scenarios), a full CLI for the scenario tables, `zone create` / `galaxy create` with the bundled templates, **and the GUI's layer picker** (Project > Create) with a "show what it writes" confirm step
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)

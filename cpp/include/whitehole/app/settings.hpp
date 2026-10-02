@@ -47,6 +47,18 @@ public:
     // genuinely expensive -- a dense zone is ~200k triangles -- so it is built
     // once on toggle and cached, not per frame.
     bool showCollision{false};
+    // Which scenario layers are VISIBLE, as a bit per LayerA..LayerP (bit 0 =
+    // LayerA). All-on by default: a saved mask defaulting to nothing would open
+    // every project on an empty viewport.
+    //
+    // A raw mask rather than a LayerFilter, deliberately: settings.hpp must not
+    // depend on the render layer, and this is the same "bit per scenarioLayerBit"
+    // shape createLayerMask already uses in the GUI. The panel converts with
+    // LayerFilter::setMask()/mask(). Only the low 16 bits are ever meaningful.
+    //
+    // This is a VIEW preference, not authored data: it is never written to a zone
+    // and is deliberately not undoable, exactly like showAxis.
+    int visibleLayerMask{0xFFFF};
     bool betterQuality{true};
     bool lowPolyModels{false};
     bool collisionModels{false};

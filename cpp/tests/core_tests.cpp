@@ -29,6 +29,7 @@
 #include "whitehole/render/object_visual.hpp"
 #include "whitehole/render/viewport_scene.hpp"
 #include "whitehole/smg/bcsv.hpp"
+#include "whitehole/smg/bcsv_csv.hpp"
 #include "whitehole/smg/bmd.hpp"
 #include "whitehole/smg/bti.hpp"
 #include "whitehole/smg/camera_param.hpp"
@@ -6966,7 +6967,136 @@ void testPlaytestExport() {
            "the CLI and the dialog print the same launch steps");
 }
 
+// The BCSV <-> CSV round trip is a BULK-EDIT contract: export a table, edit it in
+// a spreadsheet, import it back, and every cell nobody touched must be exactly
+// what it was. Each block below is one way that promise can break SILENTLY --
+// float precision, quoting, a masked field, a phantom row from a trailing
+// newline, a stray comma shifting every later column, a column that does not
+// exist in the table at all.
+void testBcsvCsv() {
+    using whitehole::io::Endian;
+    using whitehole::smg::BcsvTable;
+    using whitehole::smg::BcsvType;
+    using whitehole::smg::FieldHashes;
+
+    BcsvTable table(makeTinyBcsv(Endian::big), Endian::big);
+    // A float column, because "writes 123456.789F as 123457" is the failure this
+    // feature is most likely to ship with.
+    (void)table.ensureField("pos_x", BcsvType::floatingPoint);
+    table.setFloat(table.rows()[0], "pos_x", 123456.789F);
+    const auto second = table.addRow();
+    table.setInt(table.rows()[second], "number", 7);
+    table.setString(table.rows()[second], "label", "a,b\"c\nd");
+    table.setFloat(table.rows()[second], "pos_x", -0.0001234567F);
+    expect(table.fields().size() == 3 && table.rows().size() == 2, "the CSV fixture is malformed");
+
+    const std::string csv = whitehole::smg::bcsvToCsv(table);
+    expect(csv.rfind("[", 0) == 0, "a CSV header must start with the first field hash");
+    expect(csv.find("\r\n") != std::string::npos, "CSV rows must use CRLF, as Excel writes them");
+    // A value holding the delimiter, a quote AND a newline has to be quoted with
+    // its quotes doubled, or every column after it shifts by one.
+    expect(csv.find("\"a,b\"\"c\nd\"") != std::string::npos,
+           "a value with a comma, a quote and a newline must be quoted and escaped");
+
+    // ---- the round trip ----------------------------------------------------
+    const auto imported = whitehole::smg::planCsvImport(table, csv);
+    expect(imported.unknownColumns.empty(), "a round trip must resolve every column it wrote");
+    expect(imported.badCells.empty(), "a round trip must not refuse a cell it wrote");
+    expect(!imported.changesRows(), "a round trip must not change the row count");
+    expectTablesEqual(table, imported.table, "BCSV -> CSV -> BCSV");
+
+    // The masked field is the interesting one: "number" lives in 16 bits of a
+    // 32-bit word, so the import has to go through the same masking setter the
+    // panels use instead of writing a raw value that clobbers its neighbour.
+    expect(imported.table.getInt(imported.table.rows()[0], "number") == 42,
+           "a masked field must survive the round trip");
+    expect(imported.table.getFloat(imported.table.rows()[1], "pos_x") == -0.0001234567F,
+           "a float must come back bit-for-bit, not rounded to 6 digits");
+
+    // ---- named headers ----------------------------------------------------
+    // The CLI has hashlookup.txt, so its columns are readable. The NAME form has
+    // to import as well (jmapHash resolves it), or a readable export would be
+    // write-only and the feature would only work in one direction.
+    FieldHashes hashes;
+    hashes.addName("number");
+    hashes.addName("label");
+    hashes.addName("pos_x");
+    const std::string named = whitehole::smg::bcsvToCsv(table, &hashes);
+    expect(named.rfind("number,label,pos_x", 0) == 0, "a lookup table must name the columns");
+    const auto fromNames = whitehole::smg::planCsvImport(table, named);
+    expect(fromNames.unknownColumns.empty(), "a named header must resolve back to its field");
+    expectTablesEqual(table, fromNames.table, "BCSV -> named CSV -> BCSV");
+    // ---- an unknown column is reported, NEVER added ------------------------
+    {
+        const std::string hostile =
+            whitehole::smg::bcsvCsvHeader(whitehole::smg::jmapHash("number"), nullptr) +
+            ",[DEADBEEF]\r\n99,5\r\n";
+        const auto plan = whitehole::smg::planCsvImport(table, hostile);
+        expect(plan.unknownColumns.size() == 1, "an unknown column must be reported once");
+        expect(plan.table.fields().size() == table.fields().size(),
+               "an unknown column must NOT be added to the table");
+        expect(plan.table.getInt(plan.table.rows()[0], "number") == 99,
+               "the columns that DO resolve must still import");
+    }
+
+    // ---- a bad cell costs ONE cell, not the table -------------------------
+    {
+        const std::string bad = "number,label,pos_x\r\nnot-a-number,Still Here,1.5\r\n";
+        const auto plan = whitehole::smg::planCsvImport(table, bad);
+        expect(plan.badCells.size() == 1, "a non-numeric cell must be reported");
+        // The number a person can SEE: line 1 is the header, so the first data
+        // row is line 2. Off by one here and the message points at the wrong row.
+        expect(plan.badCells.front().rfind("line 2, ", 0) == 0,
+               "a refusal must name the CSV line the spreadsheet shows");
+        expect(plan.table.getInt(plan.table.rows()[0], "number") == 42,
+               "a refused cell must keep the value that was already there");
+        expect(plan.table.getString(plan.table.rows()[0], "label") == "Still Here",
+               "the other cells in the same row must still import");
+        expect(plan.rowsBefore == 2 && plan.rowsAfter == 1 && plan.changesRows(),
+               "the plan must report the row count it would leave, before applying");
+    }
+
+    // ---- an empty cell means zero -----------------------------------------
+    {
+        const auto plan =
+            whitehole::smg::planCsvImport(table, "number,label,pos_x\r\n,,1\r\n");
+        expect(plan.badCells.empty(), "clearing a cell is not an error");
+        expect(plan.table.getInt(plan.table.rows()[0], "number") == 0,
+               "an empty number cell means zero, which is how a person clears one");
+        expect(plan.table.getString(plan.table.rows()[0], "label").empty(),
+               "an empty string cell clears the string");
+    }
+
+    // ---- a stray comma refuses the ROW, not the file ----------------------
+    // An unescaped comma splits one value in two, and every later column then
+    // lands one place left: silently writing those numbers is worse than writing
+    // nothing.
+    {
+        const auto plan = whitehole::smg::planCsvImport(table, "number,label,pos_x\r\n1,oops,2,3\r\n");
+        expect(plan.badCells.size() == 1, "a row with too many cells must be reported");
+        expect(plan.table.getInt(plan.table.rows()[0], "number") == 42,
+               "a row whose columns no longer line up must not import misaligned");
+    }
+
+    // ---- a trailing newline is not a record, and no file is not a table ----
+    {
+        const auto one = whitehole::smg::planCsvImport(table, "number,label,pos_x\r\n1,a,0\r\n");
+        expect(one.rowsAfter == 1, "a file ending with a newline must not import a blank row");
+        const auto headerOnly = whitehole::smg::planCsvImport(table, "number,label,pos_x\r\n");
+        expect(headerOnly.rowsAfter == 0, "a header-only file clears every row");
+        expect(headerOnly.badCells.empty(), "a header-only file is not an error");
+        bool rejected = false;
+        try {
+            (void)whitehole::smg::planCsvImport(table, "");
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        expect(rejected, "an empty file must be refused rather than clearing the table");
+    }
+}
+
 int main() {
+
 
     try {
         testBinaryData();
@@ -7011,6 +7141,7 @@ int main() {
         testRarcEndianness();
         testRarcRoundTripProperties();
         testBcsvRoundTripProperties();
+        testBcsvCsv();
         testRarcWriterNeverLooseMatches();
         testProjectArchives();
         testArchiveTableEdit();

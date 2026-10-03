@@ -11,6 +11,7 @@
 #include "whitehole/io/rarc.hpp"
 #include "whitehole/io/yaz0.hpp"
 #include "whitehole/smg/bcsv.hpp"
+#include "whitehole/smg/bcsv_csv.hpp"
 #include "whitehole/smg/field_hashes.hpp"
 #include "whitehole/smg/game_archive.hpp"
 #include "whitehole/smg/hash.hpp"
@@ -85,6 +86,8 @@ void printUsage() {
         << "  whitehole-pro-console bcsv set <input.bcsv> <row> <field> <value> [--little] [--in-place]\n"
         << "  whitehole-pro-console bcsv add <input.bcsv> [--little] [--in-place] [--field1=value1]...\n"
         << "  whitehole-pro-console bcsv remove <input.bcsv> <row> [--little] [--in-place]\n"
+        << "  whitehole-pro-console bcsv export-csv <input.bcsv> <output.csv> [--little]\n"
+        << "  whitehole-pro-console bcsv import-csv <input.bcsv> <input.csv> [--little] [--in-place] [--dry-run]\n"
         << "  whitehole-pro-console hash <field-name>\n"
         << "  whitehole-pro-console objectdb check [--data <directory>] [--no-cache]\n"
         << "  whitehole-pro-console objectdb update [--data <directory>]\n"
@@ -116,6 +119,8 @@ void printUsage() {
 int bcsvSetCommand(int argc, char** argv);
 int bcsvAddCommand(int argc, char** argv);
 int bcsvRemoveCommand(int argc, char** argv);
+int bcsvExportCsvCommand(int argc, char** argv);
+int bcsvImportCsvCommand(int argc, char** argv);
 int zoneParamsCommand(int argc, char** argv);
 int zoneSetCommand(int argc, char** argv);
 int zoneListCommand(int argc, char** argv);
@@ -237,6 +242,12 @@ int bcsvCommand(int argc, char** argv) {
     }
     if (operation == "remove") {
         return bcsvRemoveCommand(argc, argv);
+    }
+    if (operation == "export-csv") {
+        return bcsvExportCsvCommand(argc, argv);
+    }
+    if (operation == "import-csv") {
+        return bcsvImportCsvCommand(argc, argv);
     }
     const bool littleEndian = std::string(argv[argc - 1]) == "--little";
     const auto endian = littleEndian ? whitehole::io::Endian::little : whitehole::io::Endian::big;
@@ -1651,6 +1662,128 @@ void reportBcsvOutput(const std::filesystem::path& inputPath, const std::filesys
     if (!inPlace) {
         std::cout << "Output: " << outPath.string() << '\n';
     }
+}
+
+// ---- bcsv export-csv / import-csv --------------------------------------------
+//
+// The bulk-editing half of the BCSV editor (BLUEPRINT section 16 item 6): hand a
+// table to a spreadsheet, work on a hundred rows at once, hand it back. Every
+// rule about quoting, types and column resolution lives in smg/bcsv_csv; this is
+// only flags and honest reporting of what the import would change.
+
+int bcsvExportCsvCommand(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error(
+            "bcsv export-csv requires: <input.bcsv> <output.csv> [--little] [--json]");
+    }
+    const std::filesystem::path inputPath = argv[3];
+    const std::filesystem::path outPath = argv[4];
+    const auto options = parseBcsvWriteOptions(argc, argv, 5);
+    const auto endian = options.littleEndian ? io::Endian::little : io::Endian::big;
+    const auto table = smg::BcsvTable::open(inputPath, endian);
+    // hashlookup.txt gives readable column names. Without it the header is the
+    // field hash, which imports back just the same -- a CSV written by this tool
+    // is always round-trippable.
+    const auto hashes = loadFieldHashes(argv[0]);
+    const std::string csv = smg::bcsvToCsv(table, &hashes);
+    io::writeFile(outPath, std::vector<std::uint8_t>(csv.begin(), csv.end()));
+
+    if (g_json) {
+        util::JsonObject root;
+        root["command"] = "bcsv export-csv";
+        root["input"] = inputPath.string();
+        root["output"] = outPath.string();
+        root["rows"] = static_cast<int>(table.rows().size());
+        root["columns"] = static_cast<int>(table.fields().size());
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+    std::cout << "Exported " << table.rows().size() << " rows x " << table.fields().size()
+              << " columns to " << outPath.string() << '\n';
+    return 0;
+}
+
+int bcsvImportCsvCommand(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error("bcsv import-csv requires: <input.bcsv> <input.csv> "
+                                 "[--little] [--in-place] [--dry-run] [--json]");
+    }
+    const std::filesystem::path inputPath = argv[3];
+    const std::filesystem::path csvPath = argv[4];
+    // The same flags as the other write commands, plus --dry-run: the plan is
+    // built either way, so a dry run costs the parse and nothing else.
+    bool littleEndian = false;
+    bool inPlace = false;
+    bool dryRun = false;
+    for (int index = 5; index < argc; ++index) {
+        const std::string flag = argv[index];
+        if (flag == "--little") {
+            littleEndian = true;
+        } else if (flag == "--in-place") {
+            inPlace = true;
+        } else if (flag == "--dry-run") {
+            dryRun = true;
+        } else if (flag == "--json") {
+            g_json = true;
+        } else {
+            throw std::runtime_error("Unknown flag: " + flag +
+                                     "\n(--little | --in-place | --dry-run | --json)");
+        }
+    }
+
+    const auto endian = littleEndian ? io::Endian::little : io::Endian::big;
+    const auto table = smg::BcsvTable::open(inputPath, endian);
+    const auto bytes = io::readFile(csvPath);
+    const std::string csv(bytes.begin(), bytes.end());
+    const auto plan = smg::planCsvImport(table, csv);
+    const auto outPath = inPlace ? inputPath : editedPathFor(inputPath);
+
+    if (g_json) {
+        util::JsonObject root;
+        root["command"] = "bcsv import-csv";
+        root["input"] = inputPath.string();
+        root["csv"] = csvPath.string();
+        root["rowsBefore"] = static_cast<int>(plan.rowsBefore);
+        root["rowsAfter"] = static_cast<int>(plan.rowsAfter);
+        util::JsonArray unknown;
+        for (const auto& column : plan.unknownColumns) unknown.emplace_back(column);
+        root["unknownColumns"] = std::move(unknown);
+        util::JsonArray bad;
+        for (const auto& cell : plan.badCells) bad.emplace_back(cell);
+        root["badCells"] = std::move(bad);
+        root["written"] = !dryRun;
+        if (!dryRun) {
+            io::writeFile(outPath, plan.table.serialize());
+            root["output"] = outPath.string();
+        }
+        std::cout << util::serializeJson(root) << '\n';
+        return 0;
+    }
+
+    if (dryRun) {
+        std::cout << "Dry run -- importing " << csvPath.string() << " would take " << inputPath.string()
+                  << " from " << plan.rowsBefore << " rows to " << plan.rowsAfter << ".\n";
+    } else {
+        io::writeFile(outPath, plan.table.serialize());
+        std::cout << "Imported " << csvPath.string() << ": " << plan.rowsBefore << " rows -> "
+                  << plan.rowsAfter << " rows.\n";
+        reportBcsvOutput(inputPath, outPath, inPlace);
+    }
+    for (const auto& column : plan.unknownColumns) {
+        std::cout << "  ignored unknown column \"" << column
+                  << "\" (no such field; the table's columns were left alone)\n";
+    }
+    for (const auto& cell : plan.badCells) {
+        std::cout << "  " << cell << " (cell left as it was)\n";
+    }
+    if (plan.unknownColumns.empty() && plan.badCells.empty()) {
+        std::cout << (dryRun ? "  (every cell would import)\n" : "  Every cell imported.\n");
+    }
+    if (!dryRun) {
+        std::cout << "  Re-import after editing, or use --in-place to overwrite " << inputPath.string()
+                  << " directly.\n";
+    }
+    return 0;
 }
 
 int bcsvSetCommand(int argc, char** argv) {

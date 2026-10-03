@@ -84,6 +84,7 @@ add_library(whitehole_core
     cpp/src/render/surface_snap.cpp
     cpp/src/render/viewport_scene.cpp
     cpp/src/smg/bcsv.cpp
+    cpp/src/smg/bcsv_csv.cpp
     cpp/src/smg/field_hashes.cpp
     cpp/src/smg/galaxy_archive.cpp
     cpp/src/smg/game_archive.cpp

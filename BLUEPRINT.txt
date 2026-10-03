@@ -148,6 +148,14 @@
            including what is STILL unverified (no patch from here has yet been
            opened inside Dolphin at all), which makes SIX items in §16.1.
 
+   [done]  BCSV <-> CSV, roadmap 4's bulk-editing half. "Export CSV..." writes
+           the whole table with readable column headers, and "Import CSV..."
+           plans its change (rows before/after, unknown columns, refused cells)
+           before touching anything. The round trip is byte-exact -- proven on a
+           real game table -- because floats go through std::to_chars and masked
+           fields through the panels' own setters. CLI: `bcsv export-csv` and
+           `bcsv import-csv --dry-run`. See section 19.
+
    What is NOT verified: two separate categories, and it matters that they are
   different. First, the nine manual checks in section 8.5 -- automation should
   prove that, and cannot. Second, SIX things needing a human with a mouse: the
@@ -1358,7 +1366,12 @@ Six of those commits are the camera feature and the next nine are the
           region does NOT apply, (iv) a zone created by Project > Create loads,
           (v) a second export of a different zone does not leave the first one
           in the game. See §18's checklist.
-      SIX items now, not five. Ten minutes each, and they are the only way to close any of it. The debt
+      (g) NEW, from §19: a CSV round trip through a REAL spreadsheet. Export a
+          table with rows, change a number in Excel, re-import, and confirm the
+          refused-cell report matches what Excel changed and the saved table
+          reopens correctly in the editor. The claim "Excel's quoting is what
+          the reader accepts" is written from the RFC4180 rules, not from Excel.
+      SEVEN items now, not six. Ten minutes each, and they are the only way to close any of it. The debt
      grows faster than it is paid, and it reads as zero risk until a modder hits
      it. DO THIS BEFORE ANY MORE FORMAT WORK.
 
@@ -1498,9 +1511,12 @@ THE DECISION IS PURE AND TESTED, in render/surface_snap, deliberately away
       STILL UNVERIFIED, and it needs a human: clicking through a wall is
       unit-tested at the decision level, but the wiring is only compile-verified.
 
-  6. BCSV SPREADSHEET (roadmap 4). Lower value than it looks: the panels now
-     cover the fields people actually edit. The real win is BULK editing, not
-     visibility.
+  6. BCSV SPREADSHEET (roadmap 4). [DONE] See section 19 for what shipped, the
+     six rules and what is still unverified. The judgement it was written under
+     still holds: the panels cover the fields people edit one at a time, so the
+     value here was always BULK editing, not visibility -- which is why the
+     round trip is byte-exact and the import plans its change first instead of
+     simply writing what it read.
 
   7. Model/texture browser, specialized renderers (star trajectories, world-map
      links), cross-platform GUI. All real, all later.
@@ -1746,6 +1762,71 @@ THE DECISION IS PURE AND TESTED, in render/surface_snap, deliberately away
  C:\msys64\ucrt64\bin\cmake.exe configures a Ninja tree fine. The recipe that
  says "ninja is not installed" and the Unix Makefiles workaround are stale; a
  fresh `-G Ninja` tree at C:\whp-build-mingw configures and builds in one pass.
+
+================================================================================
+19. BCSV <-> CSV, THE SPREADSHEET ROUND TRIP (smg/bcsv_csv.hpp)
+================================================================================
+
+ Roadmap 4's actual content (section 16 item 6): the panels already cover the
+ fields an author edits one at a time, so what the BCSV editor was missing was
+ MOVING A HUNDRED ROWS AT ONCE. This hands a table to Excel, Numbers or a text
+ editor and takes it back.
+
+ WHAT SHIPPED
+   [done]  smg/bcsv_csv.hpp + .cpp: bcsvToCsv(), planCsvImport(), bcsvCsvHeader()
+           and BcsvCsvPlan {table, rowsBefore/After, unknownColumns, badCells}.
+   [done]  GUI: "Export CSV..." and "Import CSV..." in the BCSV editor toolbar,
+           with a confirm modal that lists the plan (rows before/after, columns
+           it could not resolve, up to six refused cells, and where they kept
+           their old value). state.fieldHashes now loads hashlookup.txt, so a
+           spreadsheet column reads "Obj_arg0" instead of "[1A2B3C4D]" -- the
+           panel's own headers stay hashes, because a rename computes them.
+   [done]  CLI: `bcsv export-csv <in.bcsv> <out.csv> [--little] [--json]` and
+           `bcsv import-csv <in.bcsv> <in.csv> [--little] [--in-place]
+           [--dry-run] [--json]`.
+   [done]  testBcsvCsv(): round trip with a comma+quote+newline value, masked
+           field, bit-exact float, named headers, unknown column, bad cell, empty
+           cell, stray-comma row, trailing newline, header-only, empty file.
+
+ THE SIX RULES, and why each one is there:
+  1. THE ROUND TRIP IS THE CONTRACT. Export, edit nothing, import -> the table
+     must be identical: same fields (hash/mask/offset/shift/type), same row
+     count, same values, floats included. expectTablesEqual() asserts exactly
+     that.
+  2. FLOATS USE std::to_chars, NEVER smg::toString. toString streams an
+     ostringstream at default precision (6 significant digits), so 123456.789F
+     would come back as 123457. That is the failure this feature is most likely
+     to ship with, and it moves level geometry silently.
+  3. EVERY ROW IS EXPORTED, never the filtered view. A CSV written from a search
+     and re-imported would delete every row the search hid -- the one failure of
+     this feature that looks like it worked.
+  4. AN IMPORT NEVER ADDS A COLUMN. A header that resolves to no field is
+     reported and its cells ignored, because adding a column changes the bytes
+     the game reads and that stays a deliberate act (Add column...). Resolution
+     is "[XXXXXXXX]" or 8 hex digits or a NAME through jmapHash, so a file
+     written with or without hashlookup.txt both come back.
+  5. A ROW WITH MORE CELLS THAN COLUMNS IS REFUSED WHOLE. That shape means a
+     quote went missing (an unescaped comma split a value), and every cell after
+     it would land one column left: silently writing those numbers is worse than
+     writing nothing.
+  6. A BAD CELL COSTS ONE CELL. Its value is kept and the message names the CSV
+     line, the column and why ("'abc' is not a whole number"). An empty cell
+     means ZERO, because clearing a cell is how a person says zero -- and "leave
+     it alone" could not be told apart from a cleared one.
+  Plus: NaN/inf are refused on import (see section 4's NaN lesson), a blank line
+  is not a record, and an EMPTY file is thrown rather than clearing the table.
+
+ ROW COUNT: the CSV is the truth. Extra rows are appended, surplus rows at the
+ end are dropped, both counted in the plan so the dialog and the CLI can say so
+ BEFORE applying -- same plan/apply discipline as section 15's create and section
+ 18's playtest.
+
+ STILL UNVERIFIED: the GUI path is compile-verified only, and a round trip
+ through a REAL spreadsheet has not been run (Excel rewrites quotes and formats
+ floats; the reader accepts RFC4180 quoting and CRLF/LF, which is what Excel
+ writes, but that claim wants a human). Add to section 16 item 1: open a real
+ table, export, change a number, import, confirm the refused-cell report matches
+ what Excel changed, save, and reopen it in the editor.
 
  END OF BLUEPRINT - keep it true, or delete it.
 ================================================================================

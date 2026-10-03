@@ -40,6 +40,8 @@
 #include "whitehole/smg/object_model.hpp"
 #include "whitehole/smg/scenario_model.hpp"
 #include "whitehole/smg/stage_archive.hpp"
+#include "whitehole/smg/field_hashes.hpp"
+#include "whitehole/smg/bcsv_csv.hpp"
 
 #include <d3d11.h>
 #include <imgui.h>
@@ -433,6 +435,18 @@ struct EditorState {
     std::vector<std::size_t> bcsvVisibleRows;
     std::size_t bcsvLastRowCount{0};
     bool bcsvAddColumnPopup{false};      // "Add column" modal
+    // --- CSV round trip (the bulk-editing path, roadmap 4) -------------------
+    // The plan of an import being CONFIRMED. planCsvImport() builds it so the
+    // dialog shows what the file would really change -- rows before and after,
+    // columns it could not resolve, cells it refused -- rather than promising
+    // "apply this file" and letting the table find out.
+    std::optional<whitehole::smg::BcsvCsvPlan> bcsvCsvPlan;
+    std::string bcsvCsvPath;        // the .csv chosen for that import
+    bool bcsvCsvPopup{false};       // opens the confirm modal on the next frame
+    // Column names for CSV export only. hashlookup.txt was never loaded in the
+    // GUI (the panel's headers are hashes), so an export used to read as
+    // [1A2B3C4D] -- right for the game, opaque for the modder holding Excel.
+    smg::FieldHashes fieldHashes;
     char bcsvNewColumnName[96]{};
     int bcsvNewColumnType{0};
     bool bcsvConfirmClose{false};        // guard for closing a dirty table
@@ -797,14 +811,14 @@ std::optional<std::filesystem::path> pickFolder(HWND owner) {
     return result;
 }
 
-std::optional<std::filesystem::path> pickOpenFile(HWND owner) {
+std::optional<std::filesystem::path> pickOpenFile(HWND owner, const wchar_t* filter = L"RARC Archives (*.arc;*.szs)\0*.arc;*.szs\0All Files\0*.*\0") {
     wchar_t file[MAX_PATH]{};
     OPENFILENAMEW info{};
     info.lStructSize = sizeof(info);
     info.hwndOwner = owner;
     info.lpstrFile = file;
     info.nMaxFile = MAX_PATH;
-    info.lpstrFilter = L"RARC Archives (*.arc;*.szs)\0*.arc;*.szs\0All Files\0*.*\0";
+    info.lpstrFilter = filter;
     info.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
     if (!GetOpenFileNameW(&info)) {
         return std::nullopt;
@@ -7613,6 +7627,53 @@ void drawBcsvEditorWindow(EditorState& state) {
     if (ImGui::Button("Add column...")) {
         state.bcsvAddColumnPopup = true;
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Export CSV...")) {
+        try {
+            // Written NEXT TO the table: the modder already knows that folder, and
+            // a save dialog would only ask them to navigate to somewhere they
+            // already are. Every row goes out, never the filtered view -- a
+            // re-import of a filtered export would delete the rows it hid.
+            auto outPath = state.bcsvPath;
+            outPath.replace_extension(".csv");
+            const std::string text = whitehole::smg::bcsvToCsv(state.bcsvTable, &state.fieldHashes);
+            io::writeFile(outPath, std::vector<std::uint8_t>(text.begin(), text.end()));
+            pushToast(state, "Wrote " + outPath.string() +
+                                 ". Edit it in any spreadsheet, then use Import CSV.");
+        } catch (const std::exception& error) {
+            pushToast(state, std::string("Could not export CSV: ") + error.what(), true);
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip(
+            "Write the whole table as a spreadsheet file, next to this BCSV.\n"
+            "Columns come out with their game names (Obj_arg0) when known.\n"
+            "Edit it in Excel, Numbers or a text editor, then Import CSV.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Import CSV...")) {
+        static constexpr wchar_t kCsvFilter[] = L"CSV files (*.csv)\0*.csv\0All Files\0*.*\0";
+        if (const auto picked = pickOpenFile(state.window, kCsvFilter)) {
+            try {
+                const auto bytes = io::readFile(*picked);
+                const std::string text(bytes.begin(), bytes.end());
+                // Planned first, so the confirm step can list the real change
+                // before the table is touched: rows, columns it cannot resolve,
+                // and every cell it would refuse.
+                state.bcsvCsvPlan = whitehole::smg::planCsvImport(state.bcsvTable, text);
+                state.bcsvCsvPath = picked->string();
+                state.bcsvCsvPopup = true;
+            } catch (const std::exception& error) {
+                pushToast(state, std::string("Could not read that CSV: ") + error.what(), true);
+            }
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip(
+            "Read a spreadsheet back into this table.\n"
+            "The confirm step shows the row counts and every cell that would be\n"
+            "refused. Cells that refuse keep the value they already have.");
+    }
     if (state.bcsvPath.empty()) {
         ImGui::Separator();
         ImGui::TextDisabled("Open a .bcsv file to start editing.");
@@ -7804,6 +7865,90 @@ void drawBcsvEditorWindow(EditorState& state) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
+    }
+
+    // The CSV confirm step. Everything here comes from the PLAN, which was built
+    // before anything was touched: rows before/after, the columns it could not
+    // resolve, and the cells it refused. Same "say what will happen, then happen
+    // it" rule as the create dialog and Test in Dolphin.
+    if (state.bcsvCsvPopup) {
+        ImGui::OpenPopup("Import CSV");
+        state.bcsvCsvPopup = false;
+    }
+    if (ImGui::BeginPopupModal("Import CSV", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!state.bcsvCsvPlan.has_value()) {
+            ImGui::TextUnformatted("Nothing to import.");
+            if (ImGui::Button("Close")) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        } else {
+            auto& plan = *state.bcsvCsvPlan;
+            ImGui::Text("File: %s",
+                        std::filesystem::path(state.bcsvCsvPath).filename().string().c_str());
+            ImGui::Separator();
+            ImGui::Text("Rows: %zu -> %zu", plan.rowsBefore, plan.rowsAfter);
+            if (plan.rowsAfter > plan.rowsBefore) {
+                ImGui::TextDisabled("%zu row(s) appended, as the CSV has them.",
+                                    plan.rowsAfter - plan.rowsBefore);
+            } else if (plan.rowsAfter < plan.rowsBefore) {
+                ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.25F, 1.0F),
+                                   "%zu row(s) removed: the CSV is the truth for this table.",
+                                   plan.rowsBefore - plan.rowsAfter);
+            }
+            if (!plan.unknownColumns.empty()) {
+                ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.25F, 1.0F), "%zu column(s) match no field:",
+                                   plan.unknownColumns.size());
+                for (const auto& column : plan.unknownColumns) {
+                    ImGui::TextDisabled("- %s (its column is left out)", column.c_str());
+                }
+                ImGui::TextDisabled("A new column is never added by an import; use Add column.");
+            }
+            if (!plan.badCells.empty()) {
+                ImGui::TextColored(ImVec4(1.0F, 0.72F, 0.25F, 1.0F), "%zu cell(s) could not be read:",
+                                   plan.badCells.size());
+                const std::size_t shown = std::min<std::size_t>(plan.badCells.size(), 6);
+                for (std::size_t index = 0; index < shown; ++index) {
+                    ImGui::TextDisabled("- %s", plan.badCells[index].c_str());
+                }
+                if (plan.badCells.size() > shown) {
+                    ImGui::TextDisabled("...and %zu more.", plan.badCells.size() - shown);
+                }
+                ImGui::TextDisabled("Those cells keep the value they have now.");
+            }
+            ImGui::Separator();
+            ImGui::TextWrapped("This edits the table in memory. Nothing reaches the file until "
+                               "you press Save.");
+            if (ImGui::Button("Import")) {
+                try {
+                    state.bcsvTable = std::move(plan.table);
+                    state.bcsvDirty = true;
+                    state.bcsvSelectedRow = -1;
+                    state.bcsvRenameColumn = -1;
+                    state.bcsvTypeColumn = -1;
+                    // Row numbers moved under the filter cache, so drop both: a
+                    // stale visible list would leave the author scrolling into
+                    // rows that are no longer there.
+                    state.bcsvLastSearch.clear();
+                    state.bcsvLastRowCount = 0;
+                    state.bcsvVisibleRows.clear();
+                    syncBcsvCustomObjects(state);
+                    pushToast(state, "Imported rows " +
+                                         std::to_string(plan.rowsBefore) + " -> " +
+                                         std::to_string(plan.rowsAfter) + ". Save to write it.");
+                    state.bcsvCsvPlan.reset();
+                    ImGui::CloseCurrentPopup();
+                } catch (const std::exception& error) {
+                    pushToast(state, std::string("Import refused: ") + error.what(), true);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                state.bcsvCsvPlan.reset();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
     }
 
     if (state.bcsvConfirmClose) {
@@ -8323,6 +8468,12 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
     if (!state.dataRoot.empty()) {
         state.galaxyNames.loadJson(state.dataRoot / "galaxies.json");
         state.zoneNames.loadJson(state.dataRoot / "zones.json");
+        // Field names (data/hashlookup.txt). The column headers stay hashes --
+        // that is what the game writes and what a rename must compute -- but CSV
+        // export passes this in so the spreadsheet shows "Obj_arg0" instead of
+        // "[1A2B3C4D]". A missing file leaves it empty and the export degrades to
+        // the hash form, which imports back identically.
+        state.fieldHashes.loadFile(state.dataRoot / "hashlookup.txt");
         // Model substitutions (data/modelsubstitutions.json) map an object name
         // onto the archive that actually holds its model -- LuigiIntrusively to
         // LuigiNPC, TimerCoinBlock to CoinBlock, Creeper to CreeperFlower and

@@ -106,6 +106,12 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - **Read-only on your workspace.** It only reads your zones; it never edits them. Re-export after every save — the old copy is replaced, and files you dropped are pruned so last week's zone cannot keep patching itself in.
 - Then in Dolphin: **right-click the game → Start With Riivolution Patches… → enable the Whitehole Pro entry → Start.** (A real Wii works too — copy the folder the export wrote next to its XML onto the SD card.)
 
+### 📊 BCSV ↔ spreadsheet — bulk editing
+- **Export CSV…** in the BCSV editor writes the whole table next to the file, with **real column names** (`name, l_id, pos_x…`) when the lookup table is available, so a modder can edit a hundred rows in Excel, Numbers or a text editor.
+- **Import CSV…** plans the change first and shows it: **rows before → after**, any column that matches no field, and every cell it refused (those keep the value they have).
+- **The round trip is exact.** Export → import gives byte-identical output: floats keep full precision (`123456.79`, not `123457`), a value with commas/quotes/newlines survives quoting, and masked fields go through the same writer the panels use.
+- **It will not grow your table.** A column that matches no field is reported and skipped — adding columns is a deliberate act (`Add column…`), never a side effect of pasting numbers in. The CLI has the same thing with `--dry-run`.
+
 ### 💻 CLI — the same engine, scriptable
 - `map objects`, `map paths`, `objectdb check`, `hash`, `bcsv inspect`, and more.
 - The **exact same C++ core** as the GUI — no duplicated logic.
@@ -280,6 +286,11 @@ whitehole-pro-console.exe hash Obj_arg0
 # Inspect a BCSV table
 whitehole-pro-console.exe bcsv inspect <file.arc> /Stage/MapObj/StageObjInfo.bcsv
 
+# Take a table to a spreadsheet and bring it back (bulk editing)
+whitehole-pro-console.exe bcsv export-csv StageObjInfo StageObjInfo.csv
+whitehole-pro-console.exe bcsv import-csv StageObjInfo StageObjInfo.csv --dry-run
+whitehole-pro-console.exe bcsv import-csv StageObjInfo StageObjInfo.csv --in-place
+
 # Check / update the object database
 whitehole-pro-console.exe objectdb check
 ```
@@ -407,7 +418,7 @@ step, handed to Dolphin exactly where it scans for patches).
       (View > Overlays > Collision, off by default)
 2. 🚧 Animations (BCK/BPK/BRK/BTK/BTP/BVA) — spin platforms, doors, live stars
 3. ✅ Layer filtering & hierarchical object tree — **View > Layers** hides whole scenario layers in the viewport (Common is always on, because it owns no layer bit); the Objects list is grouped by layer with a per-group visibility checkbox, collapse arrow, live object count, and select-all-in-layer. Hidden layers are excluded from drawing, picking, marquee selection, surface snapping, the HUD legend count and camera/area/gravity overlays — but their objects stay in the tree (dimmed), stay selectable and stay undoable, because hiding a layer is a view preference, not a delete.
-4. 🚧 BCSV spreadsheet editor
+4. ✅ BCSV spreadsheet editor — **Export CSV… / Import CSV…** in the BCSV editor, plus `bcsv export-csv` / `bcsv import-csv --dry-run` in the CLI. The import plans its change first (rows before → after, columns it cannot resolve, cells it refuses) and the round trip is byte-identical, so a table can be bulk-edited in Excel and come back unchanged.
 5. ✅ Galaxy & zone management — scenario editor (View > Scenarios), a full CLI for the scenario tables, `zone create` / `galaxy create` with the bundled templates, **and the GUI's layer picker** (Project > Create) with a "show what it writes" confirm step
 6. 🚧 Specialized object renderers (star trajectories, world-map links…)
 7. 🚧 Model/texture browser inside the app

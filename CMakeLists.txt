@@ -52,6 +52,7 @@ endfunction()
 
 add_library(whitehole_core
     cpp/src/app/settings.cpp
+    cpp/src/app/playtest.cpp
     cpp/src/db/name_table.cpp
     cpp/src/db/object_db.cpp
         cpp/src/db/data_holder.cpp

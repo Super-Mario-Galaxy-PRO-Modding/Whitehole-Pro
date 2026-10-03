@@ -116,6 +116,16 @@ public:
     // it (snap-to-object-tops) instead of moving freely through geometry.
     bool dropToSurfaceWhileDragging{false};
 
+    // --- Test in Dolphin (Riivolution) ---------------------------------------
+    // Where Dolphin's Riivolution root lives, the mod folder name an export
+    // uses, and the region picked last. The GAME comes from the open workspace,
+    // but the region cannot be: an extracted folder has no disc header left to
+    // read the disc id from, and a patch for the wrong id is silently ignored.
+    // So it is asked once and remembered.
+    std::string dolphinSdRoot;
+    std::string playtestName{"WhiteholePro"};
+    std::string playtestRegion{"E"};
+
     // Layout: when false (default) docked panels can be rearranged inside the
     // workspace but never torn off into floating OS windows, which is what made
     // the old UI feel messy.

@@ -17,6 +17,7 @@
 #include "whitehole/app/theme_palette.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
+#include "whitehole/app/playtest.hpp"
 #include "whitehole/db/custom_obj_db.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
 #include "whitehole/db/name_table.hpp"
@@ -441,6 +442,27 @@ struct EditorState {
     char tutorialSearch[96]{};
     int tutorialTopic{-1};
     bool tutorialsSeen{false}; // persisted via a marker file, like first boot
+
+    // --- Test in Dolphin (File > Test in Dolphin) ----------------------------
+    // The list of workspace files this session has SAVED, as workspace-relative
+    // paths. This is what an export hands to Dolphin, and it is recorded at the
+    // one save choke point (saveStage) plus the BCSV writer rather than by each
+    // panel, so a writer added later cannot forget to be counted.
+    std::vector<std::string> touchedFiles;
+    bool showPlaytest{false};
+    // The folder name is typed in a buffer that ImGui can edit; it is copied to
+    // settings.playtestName on export, the same as every other dialog buffer here.
+    char playtestNameBuf[64]{};
+    bool playtestNameSeeded{false};
+    // True on the confirm step, which lists the exact files before writing them.
+    bool playtestConfirm{false};
+    // The plan being confirmed, built when the dialog enters that step: the
+    // confirm step must list what apply() will really write, not a remembered
+    // guess, and it must not rebuild (and re-stat) the plan every frame.
+    std::optional<whitehole::app::PlaytestPlan> playtestPlan;
+    // What the last export wrote, so the dialog can print the launch steps next
+    // to the result instead of a bare "done".
+    std::string playtestResult;
 
     // --- Docked workspace visibility (View menu toggles, persisted) --------
     bool showProject{true};
@@ -2329,6 +2351,12 @@ void openGameImpl(EditorState& state, const std::filesystem::path& path, bool qu
     state.selectedObject.reset();
     state.undoStack.clear(); // a new workspace means a new history
     state.savedUndoCursor = 0;
+    // A new workspace also means a new export list: files saved into the
+    // previous one have no path in this game's /files tree, and carrying them
+    // over would make Test in Dolphin refuse on a file this workspace lacks.
+    state.touchedFiles.clear();
+    state.playtestConfirm = false;
+    state.playtestPlan.reset();
     state.modelFailureLogged = false; // re-log model failures for this workspace
     // The cached local KCLs belong to the workspace that was just replaced.
     state.kclCache.clear();
@@ -2394,6 +2422,36 @@ void selectZone(EditorState& state, int index) {
     }
 }
 
+// Records a workspace path this session has written, for Test in Dolphin.
+//
+// Workspace-relative, de-duplicated, and recorded only on SUCCESS: exporting a
+// file whose save failed would hand the game last week's bytes with no warning
+// anywhere. It deliberately runs off the save choke point rather than each panel,
+// so a writer added later is counted without knowing this feature exists.
+void recordTouchedFile(EditorState& state, std::string relativePath) {
+    // A map archive opened on its own has no /files tree to map onto, so there
+    // is nothing truthful to record -- the dialog says so instead of guessing.
+    if (!state.game.has_value() || relativePath.empty()) {
+        return;
+    }
+    if (relativePath.front() != '/') {
+        relativePath.insert(relativePath.begin(), '/');
+    }
+    // Only a file that is really there. A path recorded but never written would
+    // make the export refuse on a file the modder never had -- which is exactly
+    // what happens after Project > Create names the scenario archive a zone
+    // does not have.
+    const auto onDisk = std::filesystem::path(state.settings.lastGameDir)
+                        / std::filesystem::path(relativePath.substr(1));
+    if (!std::filesystem::is_regular_file(onDisk)) {
+        return;
+    }
+    if (std::find(state.touchedFiles.begin(), state.touchedFiles.end(), relativePath)
+        == state.touchedFiles.end()) {
+        state.touchedFiles.push_back(relativePath);
+    }
+}
+
 void saveStage(EditorState& state) {
     // A galaxy edit is its own document, so Ctrl+S has to save whichever of the
     // two is actually dirty. Saving both when both are costs nothing: save() on a
@@ -2403,6 +2461,7 @@ void saveStage(EditorState& state) {
     if (state.galaxy.has_value() && state.galaxy->dirty()) {
         state.galaxy->save();
         state.savedScenarioUndoCursor = state.scenarioUndoStack.cursor();
+        recordTouchedFile(state, smg::scenarioArchivePath(state.galaxy->name()));
         savedSomething = true;
         pushToast(state, "Saved the galaxy's scenario tables.");
     }
@@ -2685,6 +2744,13 @@ void drawCreateDialog(EditorState& state) {
                     smg::createStageZone(project, created, requested, *schema,
                                          state.game->gameType());
                 }
+                // Test in Dolphin: a brand-new archive is what a modder wants to
+                // try first, so what the create wrote counts as saved. Both
+                // reports are workspace-relative; recordTouchedFile drops the
+                // scenario path for a zone that has none.
+                recordTouchedFile(
+                    state, smg::stageMapFilesystemPath(created, state.game->gameType()));
+                recordTouchedFile(state, smg::scenarioArchivePath(created));
                 ImGui::CloseCurrentPopup();
                 state.createKind = Kind::None;
                 state.createConfirm = false;
@@ -6390,6 +6456,17 @@ void drawMenuBar(EditorState& state, bool& done) {
         if (ImGui::MenuItem("Save Zone", "Ctrl+S", false, canSave)) {
             requestSave(state);
         }
+        if (ImGui::MenuItem("Test in Dolphin...")) {
+            state.showPlaytest = true;
+            state.playtestConfirm = false;
+            state.playtestPlan.reset();
+            state.playtestResult.clear();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "Write a Riivolution patch that layers the files you saved over the retail "
+                "disc, so Dolphin plays your edit. Nothing in your workspace is changed.");
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4")) {
             if (safeToDiscard(state, EditorState::PendingAction::Exit)) {
@@ -7181,6 +7258,22 @@ const std::vector<TutorialTopic>& tutorialTopics() {
              {"The asterisk in the status bar means unsaved edits.", TutorialAction::None},
              {"Edits go through the BCSV rows, so saves reopen exactly.", TutorialAction::None},
          }},
+        {"Test your mod in Dolphin", "dolphin play test playtest riivolution wii emulator ingame run",
+         {
+             {"Save your zone (Ctrl+S), then File > Test in Dolphin... opens the export dialog.",
+              TutorialAction::None},
+             {"It writes a Riivolution patch that layers your saved files over the retail disc, "
+              "so the game plays your edit. Your workspace is only read, never changed.",
+              TutorialAction::None},
+             {"Choose your disc region. A patch for the wrong region is ignored with no warning "
+              "anywhere -- and an extracted folder cannot tell you which one you have.",
+              TutorialAction::None},
+             {"In Dolphin: right-click the game > Start With Riivolution Patches... > enable the "
+              "Whitehole Pro entry > Start.",
+              TutorialAction::None},
+             {"Re-export after every save; the patch is rebuilt and the old copy is replaced.",
+              TutorialAction::None},
+         }},
         {"Real models vs placeholders", "model bmd low poly placeholder objectdata workspace",
          {
              {"Open a game directory and the viewport resolves real BMD models from ObjectData.",
@@ -7382,6 +7475,18 @@ void saveBcsvFile(EditorState& state) {
     try {
         io::writeFile(state.bcsvPath, state.bcsvTable.serialize());
         state.bcsvDirty = false;
+        // Test in Dolphin: count a table saved from the BCSV editor only when it
+        // is inside the open workspace. A table opened from anywhere else on disk
+        // has no path in the game's /files tree to be patched onto, and recording
+        // it would make the export fail for a reason the dialog never names.
+        if (state.game.has_value()) {
+            const auto root = std::filesystem::path(state.settings.lastGameDir).lexically_normal();
+            const auto relative = state.bcsvPath.lexically_normal().lexically_relative(root);
+            if (!relative.empty() && relative.generic_string().rfind("..", 0) != 0) {
+                recordTouchedFile(state,
+                                  "/" + util::replaceSlashes(relative.generic_string()));
+            }
+        }
         pushToast(state, "Saved " + state.bcsvPath.string());
         pushLog(state, "BCSV saved: " + state.bcsvPath.string());
     } catch (const std::exception& error) {
@@ -7837,7 +7942,223 @@ void drawShortcutsDialog(EditorState& state) {
     ImGui::EndPopup();
 }
 
+// --- Test in Dolphin ---------------------------------------------------------
+// The one place the editor hands an edit to something else: it writes a
+// Riivolution patch plus a copy of every file this session saved into Dolphin's
+// Riivolution folder, so the change can actually be played. The format, the
+// directory layout and the refusals live in app/playtest.hpp; this is buttons.
+//
+// It never LAUNCHES Dolphin. The patch has to be enabled in Dolphin's own
+// dialog anyway, and a guessed emulator path would start the wrong program, so
+// the editor writes the patch and then prints the clicks -- the same "say what
+// will happen, then happen it" rule the create dialog follows.
+
+// The workspace-relative paths an export would take right now. Falls back to the
+// open zone when nothing has been saved yet: a fresh session has an empty list
+// even though the zone on disk is a perfectly good thing to test.
+std::vector<std::string> playtestPaths(const EditorState& state) {
+    std::vector<std::string> paths = state.touchedFiles;
+    if (paths.empty() && state.stage.has_value() && state.game.has_value()) {
+        paths.push_back(
+            smg::stageMapFilesystemPath(state.stage->stageName(), state.stage->gameType()));
+    }
+    return paths;
+}
+
+// The Dolphin folder a patch goes into: whatever was chosen, else the standard
+// install location. Empty only when the machine has no APPDATA at all.
+std::filesystem::path playtestSdRoot(const EditorState& state) {
+    if (!state.settings.dolphinSdRoot.empty()) {
+        return std::filesystem::path(state.settings.dolphinSdRoot);
+    }
+    return app::detectDolphinSdRoot();
+}
+
+void drawPlaytestDialog(EditorState& state) {
+    if (!state.showPlaytest) {
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(660.0F, 0.0F), ImGuiCond_Appearing);
+    if (!ImGui::Begin("Test in Dolphin", &state.showPlaytest, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
+    if (!state.playtestNameSeeded) {
+        std::snprintf(state.playtestNameBuf, sizeof(state.playtestNameBuf), "%s",
+                      state.settings.playtestName.c_str());
+        state.playtestNameSeeded = true;
+    }
+
+    // A workspace is not optional: the patch layers files over the disc's /files
+    // tree, and an archive opened on its own has no such tree. The reason is
+    // stated rather than a greyed-out dialog.
+    if (!state.game.has_value()) {
+        ImGui::TextWrapped(
+            "Testing in Dolphin needs a game directory open. The patch layers your saved "
+            "files over the extracted /files tree, so there has to be one to map onto.");
+        if (ImGui::Button("Open a game directory...")) {
+            requestOpenGame(state);
+        }
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextWrapped(
+        "Writes a Riivolution patch that layers your saved files over the retail disc, so "
+        "Dolphin (or a real Wii) plays your edit. Your workspace is only read, never "
+        "changed.");
+
+    // ---- 1. where the patch goes ------------------------------------------
+    ImGui::SeparatorText("1. Dolphin");
+    std::filesystem::path sdRoot = playtestSdRoot(state);
+    ImGui::TextDisabled("%s", sdRoot.string().c_str());
+    if (ImGui::Button("Choose...")) {
+        if (auto picked = pickFolder(state.window); picked.has_value()) {
+            state.settings.dolphinSdRoot = picked->string();
+            state.settings.save();
+            sdRoot = *picked;
+            state.playtestConfirm = false; // the destination changed
+            state.playtestPlan.reset();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(sdRoot.empty());
+    if (ImGui::Button("Open folder")) {
+        ShellExecuteW(nullptr, L"open", sdRoot.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    ImGui::EndDisabled();
+    if (sdRoot.empty() || !std::filesystem::is_directory(sdRoot)) {
+        ImGui::TextWrapped(
+            "That folder does not exist yet. Run Dolphin once (File > Open User Folder), or "
+            "point at its Load\\Riivolution folder -- this export creates it if you would "
+            "rather pick a fresh one.");
+    }
+
+    // ---- 2. mod name and the disc it is for --------------------------------
+    ImGui::SeparatorText("2. Mod and disc");
+    ImGui::SetNextItemWidth(-1.0F);
+    if (ImGui::InputText("Folder name", state.playtestNameBuf, sizeof(state.playtestNameBuf))) {
+        state.playtestConfirm = false; // the name moves every path in the patch
+        state.playtestPlan.reset();
+    }
+
+    char region = state.settings.playtestRegion.empty() ? 'E' : state.settings.playtestRegion.front();
+    if (app::regionLabel(region).empty()) {
+        region = 'E'; // a hand-edited settings file must not reach discIdFor()
+    }
+    const int gameType = state.game->gameType();
+    const std::string discId = app::discIdFor(gameType, region);
+    if (ImGui::BeginCombo("Disc", discId.c_str())) {
+        for (const auto& id : app::knownDiscIds(gameType)) {
+            const bool selected = (id == discId);
+            const std::string label = id + "   " + app::regionLabel(app::regionOfDiscId(id));
+            if (ImGui::Selectable(label.c_str(), selected)) {
+                state.settings.playtestRegion.assign(1, app::regionOfDiscId(id));
+                state.settings.save();
+                state.playtestConfirm = false;
+                state.playtestPlan.reset();
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip(
+            "Riivolution only applies a patch whose id matches the disc in the drive, so a "
+            "patch for the wrong region does nothing with no warning. Pick the region you "
+            "play. An extracted folder has no disc header left to read this from.");
+    }
+    // ---- 3. what goes ------------------------------------------------------
+    ImGui::SeparatorText("3. What gets copied");
+    const auto paths = playtestPaths(state);
+    if (state.unsaved) {
+        ImGui::TextColored(
+            ImVec4(1.0F, 0.72F, 0.25F, 1.0F),
+            "You have unsaved changes. Ctrl+S first -- the game reads the file on disk.");
+    }
+    if (paths.empty()) {
+        ImGui::TextDisabled("Nothing to export yet: open a zone and press Ctrl+S.");
+    } else {
+        if (state.touchedFiles.empty()) {
+            ImGui::TextWrapped(
+                "Nothing has been saved in this session, so the open zone goes across exactly "
+                "as it is on disk.");
+        }
+        ImGui::BeginChild("##playtestfiles", ImVec2(0.0F, 110.0F), true);
+        for (const auto& path : paths) {
+            ImGui::TextUnformatted(path.c_str());
+        }
+        ImGui::EndChild();
+    }
+    ImGui::TextDisabled("%d file(s), copied into %s", static_cast<int>(paths.size()),
+                        (sdRoot / std::string(state.playtestNameBuf)).string().c_str());
+
+    // ---- write -------------------------------------------------------------
+    ImGui::Separator();
+    if (state.playtestConfirm && state.playtestPlan.has_value()) {
+        ImGui::TextWrapped("This will write:");
+        ImGui::BeginChild("##playtestplan", ImVec2(0.0F, 110.0F), true);
+        for (const auto& file : state.playtestPlan->filesWritten()) {
+            ImGui::TextUnformatted(file.c_str());
+        }
+        ImGui::EndChild();
+        ImGui::TextWrapped(
+            "Outside your workspace: your zone is not edited, and nothing here is deleted "
+            "except an older copy of the SAME export. Close Dolphin first if it is running, "
+            "or it will not reload the files.");
+        if (ImGui::Button("Write it")) {
+            try {
+                app::applyPlaytest(*state.playtestPlan);
+                state.settings.playtestName = state.playtestNameBuf;
+                state.settings.save();
+                state.playtestResult = state.playtestPlan->xmlPath.string();
+                state.playtestConfirm = false;
+                state.playtestPlan.reset();
+                pushToast(state, "Wrote the Dolphin patch.");
+            } catch (const std::exception& error) {
+                pushToast(state, error.what(), true);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Back")) {
+            state.playtestConfirm = false;
+            state.playtestPlan.reset();
+        }
+    } else {
+        ImGui::BeginDisabled(paths.empty() || sdRoot.empty());
+        if (ImGui::Button("Write patch...")) {
+            try {
+                state.playtestPlan = app::planPlaytest(
+                    sdRoot, state.playtestNameBuf, discId, state.settings.lastGameDir, paths);
+                state.playtestConfirm = true;
+                state.playtestResult.clear();
+            } catch (const std::exception& error) {
+                pushToast(state, error.what(), true);
+            }
+        }
+        ImGui::EndDisabled();
+        if (paths.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Save a zone first.");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) {
+            state.showPlaytest = false;
+        }
+    }
+
+    if (!state.playtestResult.empty()) {
+        ImGui::SeparatorText("4. Play it");
+        ImGui::TextWrapped("Wrote %s", state.playtestResult.c_str());
+        ImGui::TextWrapped("%s", app::dolphinLaunchSteps().c_str());
+    }
+    ImGui::End();
+}
+
 void drawRealLogWindow(EditorState& state) {
+
     if (!state.showLog) {
         return;
     }
@@ -8212,6 +8533,7 @@ int runGui(const std::filesystem::path& executable, const std::filesystem::path&
         drawPreferencesDialog(state);
         pumpObjectDatabase(state);
         drawShortcutsDialog(state);
+        drawPlaytestDialog(state);
         drawAddObjectDialog(state);
         drawToasts(state);
         drawProblemsPanel(state);

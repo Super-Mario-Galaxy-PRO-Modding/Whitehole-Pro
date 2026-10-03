@@ -1,4 +1,5 @@
 #include "whitehole/app/settings.hpp"
+#include "whitehole/app/playtest.hpp"
 #include "whitehole/app/theme_palette.hpp"
 #include "whitehole/db/data_holder.hpp"
 #include "whitehole/db/name_table.hpp"
@@ -4687,6 +4688,18 @@ void testSettingsRoundTrip() {
     expect(loaded.darkMode == false, "settings darkMode mismatch");
     expect(loaded.showPaths == false, "settings showPaths mismatch");
     expect(loaded.recentMaps.size() == 2, "settings recentMaps mismatch");
+    // The playtest fields ride the same file, so the round trip must cover them
+    // too: an unrecorded region would ask the author again every export.
+    settings.dolphinSdRoot = "D:/Dolphin/Load/Riivolution";
+    settings.playtestName = "Comet";
+    settings.playtestRegion = "P";
+    settings.save();
+    whitehole::app::Settings reloaded;
+    reloaded.setConfigPath(temp.path / "settings.json");
+    reloaded.load();
+    expect(reloaded.dolphinSdRoot == "D:/Dolphin/Load/Riivolution", "settings dolphinSdRoot mismatch");
+    expect(reloaded.playtestName == "Comet", "settings playtestName mismatch");
+    expect(reloaded.playtestRegion == "P", "settings playtestRegion mismatch");
 }
 
 void testObjectDatabase() {
@@ -6767,7 +6780,194 @@ void testCameraPreviewChain() {
     }
 }
 
+// "Test in Dolphin" -- the export is the editor's only handshake with something
+// that is NOT this editor, so this pins what Dolphin's parser requires (see
+// app/playtest.hpp): version="1", a real disc id, a root-relative external path,
+// create="true". It also holds the export to the same plan/apply agreement the
+// create commands are held to: everything a dry run lists gets written, and
+// nothing else does.
+void testPlaytestExport() {
+    // ---- the disc ids the picker offers ------------------------------------
+    {
+        const auto smg1 = whitehole::app::knownDiscIds(1);
+        const auto smg2 = whitehole::app::knownDiscIds(2);
+        expect(smg1.size() == 4 && smg2.size() == 4, "each game has four retail discs");
+        expect(smg1.front() == "RMGE01" && smg2.front() == "SB4E01",
+               "the first region offered must be the US disc");
+        expect(whitehole::app::discIdFor(1, 'p') == "RMGP01",
+               "a region letter is accepted in either case");
+        expect(whitehole::app::regionOfDiscId("SB4J01") == 'J',
+               "a disc id must round trip to its region");
+        expect(whitehole::app::regionOfDiscId("XX0000") == '\0',
+               "an unknown id must not claim a region");
+        expect(!whitehole::app::regionLabel('E').empty(),
+               "regions need a human label for the picker");
+        bool rejected = false;
+        try {
+            (void)whitehole::app::discIdFor(2, 'X');
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        expect(rejected, "an id for a region with no retail disc must be refused");
+    }
+
+    // ---- planning writes NOTHING, and says exactly what it would -----------
+    {
+        TemporaryDirectory temporary;
+        const auto workspace = temporary.path / "game";
+        const auto zonePath = workspace / "StageData" / "Foo" / "FooMap.arc";
+        std::filesystem::create_directories(zonePath.parent_path());
+        whitehole::io::writeFile(zonePath, std::vector<std::uint8_t>{0x10, 0x20, 0x30});
+        const auto sdRoot = temporary.path / "Load" / "Riivolution";
+
+        const auto plan = whitehole::app::planPlaytest(sdRoot, "WhiteholePro", "SB4E01", workspace,
+                                                       {"/StageData/Foo/FooMap.arc"});
+        expect(!std::filesystem::exists(plan.xmlPath),
+               "planning a playtest must not write the patch");
+        expect(!std::filesystem::exists(plan.modFolder),
+               "planning a playtest must not create the mod folder");
+        expect(plan.files.size() == 1, "one requested file, one entry");
+        expect(plan.files.front().discPath == "/files/StageData/Foo/FooMap.arc",
+               "the disc path is the workspace path under /files");
+        expect(plan.files.front().targetPath == "/WhiteholePro/files/StageData/Foo/FooMap.arc",
+               "the external path is root-relative, so Dolphin resolves it against its root "
+               "rather than the XML's folder");
+        expect(plan.xmlPath == sdRoot / "riivolution" / "WhiteholePro.xml",
+               "the patch must sit where Dolphin scans: <root>/riivolution/");
+        const auto written = plan.filesWritten();
+        expect(written.size() == 2 && written.back() == plan.xmlPath.string(),
+               "filesWritten() is what --dry-run prints: copies first, the patch last");
+        expect(written.front().rfind(plan.modFolder.string(), 0) == 0,
+               "a dry run must name the copy INSIDE the mod folder -- `modFolder / "
+               "\"/path\"` discards modFolder and prints a path nobody wrote");
+        // An absolute path inside the workspace is accepted too -- that is what
+        // the GUI hands the planner.
+        const auto viaHostPath = whitehole::app::planPlaytest(
+            sdRoot, "WhiteholePro", "SB4E01", workspace, {zonePath.generic_string()});
+        expect(viaHostPath.files.front().relativePath == "/StageData/Foo/FooMap.arc",
+               "a host path inside the workspace must resolve to the same entry");
+    }
+
+    // ---- the XML itself, and every refusal ---------------------------------
+    TemporaryDirectory temporary;
+    const auto workspace = temporary.path / "game";
+    const auto zonePath = workspace / "StageData" / "Foo" / "FooMap.arc";
+    const auto otherPath = workspace / "StageData" / "Bar" / "BarMap.arc";
+    std::filesystem::create_directories(zonePath.parent_path());
+    std::filesystem::create_directories(otherPath.parent_path());
+    whitehole::io::writeFile(zonePath, std::vector<std::uint8_t>{0x10, 0x20, 0x30});
+    whitehole::io::writeFile(otherPath, std::vector<std::uint8_t>{0x40, 0x50});
+    const auto sdRoot = temporary.path / "Load" / "Riivolution";
+    const std::vector<std::string> oneFile{"/StageData/Foo/FooMap.arc"};
+
+    {
+        const auto plan = whitehole::app::planPlaytest(sdRoot, "My & Mod", "RMGP01", workspace,
+                                                       oneFile);
+        const std::string xml = whitehole::app::riivolutionXml(plan);
+        expect(xml.find("<wiidisc version=\"1\">") != std::string::npos,
+               "Dolphin rejects any wiidisc version other than 1, silently");
+        expect(xml.find("<id game=\"RMGP01\" />") != std::string::npos,
+               "the patch must name the disc id it is for");
+        expect(xml.find("disc=\"/files\"") != std::string::npos,
+               "the workspace is the disc's /files tree");
+        expect(xml.find("external=\"/My &amp; Mod/files\"") != std::string::npos,
+               "the mod folder path is root-relative and XML-escaped");
+        expect(xml.find("create=\"true\"") != std::string::npos,
+               "a zone created from scratch has no disc file to replace");
+        expect(xml.find("recursive=\"true\"") != std::string::npos,
+               "a zone is a folder, not one file");
+        expect(xml.find("default=\"1\"") != std::string::npos,
+               "Riivolution's option index is 1-based; 0 means the option is off");
+        expect(xml.find("<choice name=\"Enabled\">\n          <patch id=\"My &amp; Mod\" />") !=
+                   std::string::npos,
+               "the choice must reference the patch, or nothing is applied");
+        expect(xml.find("</wiidisc>") != std::string::npos, "the document must close");
+    }
+
+    const auto refuses = [](const auto& call) {
+        try {
+            call();
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    expect(refuses([&] {
+               (void)whitehole::app::planPlaytest(sdRoot, "", "SB4E01", workspace, oneFile);
+           }),
+           "an empty name must be refused");
+    expect(refuses([&] {
+               (void)whitehole::app::planPlaytest(sdRoot, "../evil", "SB4E01", workspace, oneFile);
+           }),
+           "a name that would escape the export folder must be refused");
+    expect(refuses([&] {
+               (void)whitehole::app::planPlaytest(sdRoot, "A/B", "SB4E01", workspace, oneFile);
+           }),
+           "a name with a path separator must be refused");
+    expect(refuses([&] {
+               (void)whitehole::app::planPlaytest(sdRoot, "WhiteholePro", "SB4E01", workspace, {});
+           }),
+           "an export with nothing to export must be refused");
+    expect(refuses([&] {
+               (void)whitehole::app::planPlaytest(sdRoot, "WhiteholePro", "SB4E01", workspace,
+                                                  {"/StageData/NotThere.arc"});
+           }),
+           "a file that was never saved must be refused rather than skipped");
+    expect(refuses([&] {
+               const auto outside = (temporary.path / "elsewhere" / "X.arc");
+               (void)whitehole::app::planPlaytest(sdRoot, "WhiteholePro", "SB4E01", workspace,
+                                                  {outside.generic_string()});
+           }),
+           "a file outside the workspace has no disc path and must be refused");
+    // ---- apply: what the plan promised, byte for byte ----------------------
+    const auto plan = whitehole::app::planPlaytest(sdRoot, "WhiteholePro", "SB4E01", workspace,
+                                                   oneFile);
+    whitehole::app::applyPlaytest(plan);
+    const auto destination = sdRoot / "WhiteholePro" / "files" / "StageData" / "Foo" / "FooMap.arc";
+    expect(std::filesystem::is_regular_file(destination),
+           "apply writes every file the plan listed");
+    expect(whitehole::io::readFile(destination) == whitehole::io::readFile(zonePath),
+           "the exported copy must be byte-identical to the workspace file");
+    expect(std::filesystem::is_regular_file(plan.xmlPath), "apply writes the patch");
+    {
+        const auto bytes = whitehole::io::readFile(plan.xmlPath);
+        const std::string onDisk(bytes.begin(), bytes.end());
+        expect(onDisk == whitehole::app::riivolutionXml(plan),
+               "what lands on disk must be what the pure generator produces");
+    }
+    // writeFile() stages through a temporary; none may survive the export.
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(sdRoot)) {
+        expect(entry.path().filename().string().find(".tmp") == std::string::npos,
+               "an export must not leave a temporary behind: " + entry.path().string());
+    }
+
+    // ---- re-exporting: a zone dropped from the export must not come back ----
+    {
+        // A folder patch applies EVERY file it finds under the mod folder, so a
+        // zone exported once and then dropped from the list would keep patching
+        // itself into the game forever with nothing on screen to explain it.
+        const auto stale = sdRoot / "WhiteholePro" / "files" / "StageData" / "Old" / "OldMap.arc";
+        std::filesystem::create_directories(stale.parent_path());
+        whitehole::io::writeFile(stale, std::vector<std::uint8_t>{0xAA});
+
+        const auto next = whitehole::app::planPlaytest(sdRoot, "WhiteholePro", "SB4E01", workspace,
+                                                       {"/StageData/Bar/BarMap.arc"});
+        whitehole::app::applyPlaytest(next);
+        expect(!std::filesystem::exists(stale),
+               "a file from an earlier export must be pruned, or it keeps patching the game");
+        expect(std::filesystem::is_regular_file(
+                   sdRoot / "WhiteholePro" / "files" / "StageData" / "Bar" / "BarMap.arc"),
+               "the new export must land");
+        expect(std::filesystem::is_regular_file(zonePath)
+                   && std::filesystem::is_regular_file(otherPath),
+               "pruning must never reach into the workspace itself");
+    }
+    expect(!whitehole::app::dolphinLaunchSteps().empty(),
+           "the CLI and the dialog print the same launch steps");
+}
+
 int main() {
+
     try {
         testBinaryData();
         testStageBuilder();
@@ -6778,6 +6978,7 @@ int main() {
         testLayerFilteredScene();
         testSnapSkipsHiddenLayers();
         testStageCreatePlans();
+        testPlaytestExport();
         testStageTemplates();
         testShippedTemplatesParse();
         testWriteFileLeavesNoTemporaries();

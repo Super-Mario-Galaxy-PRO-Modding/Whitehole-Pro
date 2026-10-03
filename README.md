@@ -100,6 +100,12 @@ see [Prerequisites](#-prerequisites--what-you-need-first).
 - **Honest about undo:** creating writes whole new archives, so the confirm step says plainly that `Ctrl+Z` cannot undo it.
 - The same thing from the command line, with `--dry-run`:
 
+### 🎮 Test in Dolphin — see your edit in the game
+- **File > Test in Dolphin…** writes a **Riivolution patch** that layers everything you saved this session over the retail disc, into Dolphin's `Load\Riivolution` folder. Pick your **disc region** (a patch for the wrong region is ignored with no warning — an extracted folder cannot tell you which one you have, so it is asked once and remembered).
+- **Shows what it writes first**, like the create dialog: the confirm step lists the exact files and the patch before touching the disk.
+- **Read-only on your workspace.** It only reads your zones; it never edits them. Re-export after every save — the old copy is replaced, and files you dropped are pruned so last week's zone cannot keep patching itself in.
+- Then in Dolphin: **right-click the game → Start With Riivolution Patches… → enable the Whitehole Pro entry → Start.** (A real Wii works too — copy the folder the export wrote next to its XML onto the SD card.)
+
 ### 💻 CLI — the same engine, scriptable
 - `map objects`, `map paths`, `objectdb check`, `hash`, `bcsv inspect`, and more.
 - The **exact same C++ core** as the GUI — no duplicated logic.
@@ -173,6 +179,8 @@ ctest --test-dir build --output-on-failure
 5. **Add content** — `Shift+A` opens the searchable Add Object picker, fed by the
    community database (auto-downloaded on first run).
 6. **Save** — `Ctrl+S` round-trips the archive losslessly (verified by the test suite).
+7. **Play it** — `File → Test in Dolphin…` hands your saved files to Dolphin as a
+   Riivolution patch, then tells you the three clicks to boot it.
 
 ---
 
@@ -261,6 +269,11 @@ whitehole-pro-console.exe zone create C:\path\to\extracted\files Cave --layer La
 # ...or see exactly what it would write, without writing any of it
 whitehole-pro-console.exe zone create C:\path\to\extracted\files Cave --layer LayerA --dry-run
 
+# Hand a saved zone to Dolphin as a Riivolution patch (same engine as the dialog)
+whitehole-pro-console.exe playtest ids
+whitehole-pro-console.exe playtest export C:\path\to\extracted\files --zone Cave --region E --dry-run
+whitehole-pro-console.exe playtest export C:\path\to\extracted\files --zone Cave --region E
+
 # Field-name hashes (parity with the Java reader)
 whitehole-pro-console.exe hash Obj_arg0
 
@@ -285,6 +298,8 @@ Full reference: [`docs/CPP_REWRITE.md`](docs/CPP_REWRITE.md).
 | Tests fail but a `.exe` exists | App may still run. Copy the red text into an issue plus your `cmake --version` and compiler (`cl` vs `g++ --version`). |
 | `whitehole-pro-console.exe` flashes and closes | That's the console tool — run it **from a terminal** to see output, or use `whitehole-pro.exe` for the windowed editor. |
 | Editor is empty / says "Drag a map archive…" | Normal! **File → Open Stage…** → `data\templates\SMG2BigGalaxyMap.arc` for an instant demo. |
+| How do I *play* my change? | Save (`Ctrl+S`), then **File → Test in Dolphin…** — it writes a Riivolution patch into Dolphin's folder and tells you the three clicks. Needs a game directory open, not just a map archive. |
+| Dolphin does not list the patch | Pick the **region of your disc** in the dialog — a patch for the wrong region is silently ignored. Then check Dolphin's Riivolution "Root" points at its `Load\Riivolution` folder. |
 
 Still stuck? Open an issue with: your Windows version, `cmake --version`,
 which compiler you installed, and the last ~30 lines of the `Build.bat` window.
@@ -382,7 +397,9 @@ undo/redo · transform gizmo + picking · rail/path editing with undo · real
 BMD/BDL models in-viewport (joint-baked, textured, two-pass translucent) ·
 MSAA · per-material cull/alpha/blend/depth state · overlays (axis, rails,
 cameras, areas, gravity) · object database auto-download · CLI sharing the
-editor's core · full test suite.
+editor's core · full test suite · **Test in Dolphin — a Riivolution playtest
+export** (File menu and `playtest export`, with a show-what-it-writes confirm
+step, handed to Dolphin exactly where it scans for patches).
 
 **Next (in order):**
 

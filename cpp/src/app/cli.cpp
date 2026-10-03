@@ -1,6 +1,7 @@
 #include "whitehole/app/application.hpp"
 #include "whitehole/app/settings.hpp"
 #include "whitehole/app/object_db_update.hpp"
+#include "whitehole/app/playtest.hpp"
 
 #include "whitehole/db/object_db.hpp"
 #include "whitehole/db/modelsubstitutions.hpp"
@@ -95,6 +96,11 @@ void printUsage() {
         << "  whitehole-pro-console zone params <game-directory> <galaxy> <zone> <object> [--game 1|2]\n"
         << "  whitehole-pro-console zone set <game-directory> <galaxy> <zone> <object> <field> <value> [--game 1|2]\n"
         << "  whitehole-pro-console zone list <game-directory> <galaxy>\n"
+        << "  whitehole-pro-console playtest ids\n"
+        << "  whitehole-pro-console playtest export <game-directory> "
+           "(--file <path> | --zone <name>)... [--region E|P|J|K] [--name <name>] "
+           "[--dolphin <folder>] [--dry-run]\n"
+
         << "\nOptions:\n"
         << "  --json          Emit JSON on stdout instead of human-readable text\n"
         << "  --in-place      Overwrite the input file instead of writing <input>.edited\n"
@@ -120,6 +126,9 @@ int mapSetCommand(int argc, char** argv);
 int mapAddCommand(int argc, char** argv);
 int mapRemoveCommand(int argc, char** argv);
 int objectdbQueryCommand(int argc, char** argv);
+// Defined beside the other flag helpers further down; declared here because
+// `playtest export` (which sits above them) takes --game too.
+int parseGameType(std::string_view value);
 
 // The scenario commands sit ABOVE EditOptions and parseEditOptions(), which are
 // defined further down beside the other flag helpers, and those helpers are
@@ -965,6 +974,162 @@ int zoneCommand(int argc, char** argv) {
     throw std::runtime_error("Unknown zone operation '" + operation +
                              "'. Supported: objects, list, params, set.");
 }
+// `playtest` -- write the Riivolution patch that layers this workspace over the
+// retail disc, so an edit can actually be seen in Dolphin. The format and the
+// directory layout are documented in app/playtest.hpp; this is only the flags.
+int playtestExportCommand(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error(
+            "playtest export requires: <game-directory> (--file <path> | --zone <name>)... "
+            "[--name <name>] [--region E|P|J|K] [--id <disc-id>] [--game 1|2] "
+            "[--dolphin <folder>] [--dry-run] [--json]");
+    }
+    const std::string directory = argv[3];
+    std::vector<std::string> requested;
+    std::string name(kDefaultPlaytestName);
+    std::string discId;
+    std::string region(1, 'E');
+    int gameTypeOverride = 0;
+    std::string dolphinRoot;
+    bool dryRun = false;
+    for (int index = 4; index < argc; ++index) {
+        const std::string flag = argv[index];
+        const auto value = [&](const char* what) -> std::string {
+            if (index + 1 >= argc) {
+                throw std::runtime_error(std::string(what) + " needs a value");
+            }
+            return argv[++index];
+        };
+        if (flag == "--json") {
+            g_json = true;
+        } else if (flag == "--dry-run") {
+            dryRun = true;
+        } else if (flag == "--file" || flag == "--zone") {
+            // A zone NAME and a path are both accepted: the workspace already
+            // knows where its zones live, and asking an author to spell out
+            // /StageData/Foo/FooMap.arc is exactly what this command avoids.
+            requested.push_back(value(flag.c_str()));
+        } else if (flag == "--name") {
+            name = value("--name");
+        } else if (flag == "--region") {
+            region = value("--region");
+        } else if (flag == "--id") {
+            discId = value("--id");
+        } else if (flag == "--game") {
+            gameTypeOverride = parseGameType(value("--game"));
+        } else if (flag == "--dolphin") {
+            dolphinRoot = value("--dolphin");
+        } else if (flag.rfind("--", 0) == 0) {
+            throw std::runtime_error("Unknown flag: " + flag +
+                                     "\n(--file | --zone | --name | --region | --id | --game | "
+                                     "--dolphin | --dry-run | --json)");
+        } else {
+            throw std::runtime_error("Unexpected argument: " + flag);
+        }
+    }
+
+    smg::GameArchive game(directory);
+    const int gameType = gameTypeOverride != 0 ? gameTypeOverride : game.gameType();
+    if (gameType == 0) {
+        throw std::runtime_error("That folder is not an SMG1/SMG2 workspace: " + directory);
+    }
+    if (discId.empty()) {
+        discId = app::discIdFor(gameType, region.empty() ? 'E' : region.front());
+    } else {
+        discId = util::toUpper(discId);
+        if (app::regionOfDiscId(discId) == '\0') {
+            throw std::runtime_error(
+                "Unknown disc id \"" + discId +
+                "\". Known ids: SMG1 RMGE01/RMGP01/RMGJ01/RMGK01, "
+                "SMG2 SB4E01/SB4P01/SB4J01/SB4K01");
+        }
+    }
+
+    // A bare name is resolved as a zone: it is the spelling an author has in
+    // front of them in the Project panel, and the workspace knows the rest.
+    std::vector<std::string> paths;
+    paths.reserve(requested.size());
+    for (const auto& entry : requested) {
+        if (entry.find('/') != std::string::npos || entry.find('\\') != std::string::npos) {
+            paths.push_back(entry);
+            continue;
+        }
+        const auto zones = game.zones();
+        const auto found = std::find_if(zones.begin(), zones.end(), [&](const std::string& zone) {
+            return util::equalIgnoreCase(zone, entry);
+        });
+        if (found == zones.end()) {
+            throw std::runtime_error("Zone does not exist in this workspace: " + entry +
+                                     " (pass a path with --file to export something else)");
+        }
+        paths.push_back(smg::stageMapFilesystemPath(*found, gameType));
+    }
+
+    const std::filesystem::path root =
+        dolphinRoot.empty() ? app::detectDolphinSdRoot() : std::filesystem::path(dolphinRoot);
+    const auto plan = app::planPlaytest(root, name, discId, directory, paths);
+
+    if (dryRun) {
+        std::cout << "Dry run -- \"" << plan.name << "\" for " << plan.gameId << " would write:\n";
+        for (const auto& file : plan.filesWritten()) {
+            std::cout << "  " << file << '\n';
+        }
+        std::cout << "  (nothing was written)\n";
+        return 0;
+    }
+    app::applyPlaytest(plan);
+
+    if (g_json) {
+        util::JsonObject result;
+        result["command"] = "playtest export";
+        result["name"] = plan.name;
+        result["gameId"] = plan.gameId;
+        result["xml"] = plan.xmlPath.string();
+        result["modFolder"] = plan.modFolder.string();
+        util::JsonArray files;
+        for (const auto& entry : plan.files) {
+            util::JsonObject item;
+            item["disc"] = entry.discPath;
+            item["external"] = entry.targetPath;
+            item["source"] = entry.source.string();
+            files.emplace_back(std::move(item));
+        }
+        result["files"] = std::move(files);
+        std::cout << util::serializeJson(result) << '\n';
+        return 0;
+    }
+    std::cout << "Wrote a Riivolution patch for " << plan.gameId << " (\"" << plan.name << "\"):\n";
+    std::cout << "  " << plan.xmlPath.string() << '\n';
+    for (const auto& entry : plan.files) {
+        std::cout << "  " << entry.targetPath << "  for  " << entry.discPath << '\n';
+    }
+    std::cout << app::dolphinLaunchSteps() << '\n';
+    return 0;
+}
+
+int playtestCommand(int argc, char** argv) {
+    if (argc < 3) {
+        throw std::runtime_error("playtest requires an operation: ids | export");
+    }
+    const std::string operation = argv[2];
+    if (operation == "ids") {
+        std::cout << "Disc ids a playtest patch can be written for:\n";
+        for (int gameType = 1; gameType <= 2; ++gameType) {
+            std::cout << "  SMG" << gameType << '\n';
+            for (const auto& id : app::knownDiscIds(gameType)) {
+                std::cout << "    " << id << "  " << app::regionLabel(app::regionOfDiscId(id))
+                          << '\n';
+            }
+        }
+        return 0;
+    }
+    if (operation == "export") {
+        return playtestExportCommand(argc, argv);
+    }
+    throw std::runtime_error("Unknown playtest operation '" + operation +
+                             "'. Supported: ids, export.");
+}
+
 // Diagnoses why the editor viewport shows placeholders instead of game models:
 // runs the exact ModelLibrary pipeline (ObjectData listing, substitution,
 // archive open, BMD/BDL entry lookup, parse, mesh conversion) for every distinct
@@ -2247,6 +2412,9 @@ int runCli(int argc, char** argv) {
         }
         if (command == "map") {
             return mapCommand(effectiveArgc, subArgv);
+        }
+        if (command == "playtest") {
+            return playtestCommand(effectiveArgc, subArgv);
         }
         if (command == "objectdb") {
             return objectDbCommand(effectiveArgc, subArgv);

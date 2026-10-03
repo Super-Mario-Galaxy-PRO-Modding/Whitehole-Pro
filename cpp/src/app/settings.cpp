@@ -119,6 +119,11 @@ void Settings::load() {
     dropStandOff = getF(root, "dropStandOff", 0.0F);
     dropToSurfaceWhileDragging = getB(root, "dropToSurfaceWhileDragging", false);
     allowFloatingPanels = getB(root, "allowFloatingPanels", false);
+    dolphinSdRoot = getS(root, "dolphinSdRoot");
+    playtestName = getS(root, "playtestName");
+    if (playtestName.empty()) playtestName = "WhiteholePro";
+    playtestRegion = getS(root, "playtestRegion");
+    if (playtestRegion.empty()) playtestRegion = "E";
     recentMaps.clear();
     for (const auto& item : root.at("recentMaps").asArray()) {
         if (item.isString() && recentMaps.size() < 8) recentMaps.push_back(item.asString());
@@ -166,6 +171,9 @@ void Settings::save() const {
     putF(o, "dropStandOff", dropStandOff);
     putB(o, "dropToSurfaceWhileDragging", dropToSurfaceWhileDragging);
     putB(o, "allowFloatingPanels", allowFloatingPanels);
+    putS(o, "dolphinSdRoot", dolphinSdRoot);
+    putS(o, "playtestName", playtestName);
+    putS(o, "playtestRegion", playtestRegion);
     util::JsonArray recent;
     for (const auto& m : recentMaps) recent.emplace_back(m);
     o["recentMaps"] = util::JsonValue(std::move(recent));
@@ -218,6 +226,9 @@ void Settings::reset() {
     dropStandOff = 0.0F;
     dropToSurfaceWhileDragging = false;
     allowFloatingPanels = false;
+    dolphinSdRoot.clear();
+    playtestName = "WhiteholePro";
+    playtestRegion = "E";
     loaded_ = true;
 }
 void Settings::pushRecentMap(const std::string& path) {

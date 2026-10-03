@@ -1017,7 +1017,16 @@ BUILD RECIPE CORRECTIONS (verified this session -- the two commands above are
   89c33c9  the create dialog's GUI layer picker (roadmap 5)
   0328496  collision-aware picking + wireframe overlay, canonicalLayerName,
            render::LayerFilter
-           (uncommitted) layer filtering wired + boxFor() + object tree <- HEAD
+   (what shipped under those four subjects, because the subjects say nothing:
+   0328496 carries the collision HALF -- picking, the overlay, LayerFilter as a
+   value type, canonicalLayerName -- plus the full scenario-model follow-ups
+   (AppearPowerStarObj, LuigiModeTimer) and the first tutorials panel;
+   f696ac6 and 21b578b wired layer filtering into rebuild (flagged-not-dropped
+   boxes, boxFor as the one index-to-box site) and built the hierarchical
+   object tree with the View toggles. Read the stat, not the subjects.)
+   21b578b  layer filtering wired + the hierarchical object tree <- was HEAD
+   0156ab2  feat(playtest): export saved files as a Dolphin-playable
+            Riivolution patch (format from Dolphin's parser source) <- HEAD
 
  The four newest subjects are not meaningful, so the content is written above
  instead. Do not trust a subject in this repo as a description of what shipped;

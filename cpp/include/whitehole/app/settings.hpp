@@ -4,6 +4,9 @@
 // use a small JSON file under %LOCALAPPDATA%/WhiteholePro (or
 // ~/.config/whitehole-pro on other platforms) so settings survive reinstalls,
 // are human-editable, and work without a registry dependency.
+#include "whitehole/app/i18n.hpp"
+#include "whitehole/app/layout.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -130,6 +133,42 @@ public:
     // workspace but never torn off into floating OS windows, which is what made
     // the old UI feel messy.
     bool allowFloatingPanels{false};
+
+    // --- Appearance, language, and projection --------------------------------
+    //
+    // These are all CLOSED SETS persisted by machine key, so load() resolves each
+    // through its *FromKey fallback. A hand-edited settings file cannot leave the
+    // editor holding a value no switch statement handles.
+
+    // UI language. Stored as its "en"/"es"/"fr"/"de" key, never as a localised
+    // name -- the name is for humans to read in the picker, the key is what the
+    // file and the on-disk locale folder use.
+    Language language{Language::English};
+
+    // Pre-configured panel layout. Pro is today's full eleven-panel set, so
+    // nothing an existing user relies on moves.
+    UiLayout uiLayout{UiLayout::Pro};
+
+    // Orthographic viewport. False (perspective) is the default because that is
+    // how the game looks; ortho is an authoring aid, not a view the author
+    // expects to boot into.
+    bool orthographicView{false};
+
+    // World units across the vertical axis while orthographic. Only SEEDS the
+    // camera at startup and is written back at shutdown -- deliberately not read
+    // live. The camera owns orthoHeight at runtime and the smooth-focus tween
+    // owns it mid-zoom, so a live settings read would fight the tween and make
+    // 'F' snap back to a stale value.
+    //
+    // Clamped on load to render::ViewportCamera::kMin/kMaxOrthoHeight, so the
+    // bounds cannot drift away from the camera's own. Zero would collapse the
+    // frustum, so the minimum is the camera's, not 0.
+    float orthoScale{800.0F};
+
+    // Path to a custom theme file; empty means "use the built-in palette".
+    // Read through app::loadThemeFile(), which falls back per colour slot and
+    // reports failure rather than throwing.
+    std::string themeFile;
 
     void pushRecentMap(const std::string& path);
 

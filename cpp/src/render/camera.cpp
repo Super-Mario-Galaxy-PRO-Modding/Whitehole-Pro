@@ -116,11 +116,54 @@ math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float far
     return projection;
 }
 
+math::Matrix4 reversedZOrthographicMatrix(float aspect, float visibleHeight, float nearPlane,
+                                         float farPlane) noexcept {
+    const float safeAspect = aspect > 0.000001F ? aspect : 1.0F;
+    // A zero or negative height would divide the whole frustum away; clamp to
+    // something drawable so a bad value degrades to "very zoomed in" instead of
+    // filling the matrix with NaN and poisoning every pixel.
+    const float height = std::max(visibleHeight, 0.000001F);
+    const float halfHeight = height * 0.5F;
+    const float halfWidth = halfHeight * safeAspect;
+
+    // Same depth ROW as the perspective path: near -> +1, far -> 0, so "nearer is
+    // the larger value" and the GL_GEQUAL test behaves identically in both modes.
+    //
+    // BUT THE W ROW MUST DIFFER, and this is the whole subtlety of ortho:
+    // perspective keeps w_clip = -z and lets the divide make depth change
+    // magnification. Orthographic MUST set w_clip = 1 (w row zero, w column one),
+    // so the divide is by a constant and x/y stop depending on depth. Copying
+    // -z here -- the obvious "make it match" move -- silently reintroduces
+    // perspective foreshortening while still looking like a correct ortho matrix.
+    // With w = 1, solving a*(-near) + b = 1 and a*(-far) + b = 0 gives the row
+    // below, which is also what glOrtho does with its -2/(f-n) mapping before the
+    // reversed-Z flip.
+    const float nearValue = nearPlane > 0.000001F ? nearPlane : 0.000001F;
+    const float farValue = farPlane > nearValue ? farPlane : nearValue * 2.0F;
+    const float depthRange = farValue - nearValue;
+
+    math::Matrix4 projection;
+    projection.values.fill(0.0F);
+    // Orthographic x/y are a plain scale (2 / extent), NOT 1/tan(fov/2).
+    projection.values[0] = 1.0F / halfWidth;
+    projection.values[5] = 1.0F / halfHeight;
+    projection.values[10] = 1.0F / depthRange;
+    projection.values[14] = farValue / depthRange;
+    // w_clip = 1: constant, so the divide cannot rescale x or y by depth.
+    projection.values[11] = 0.0F;
+    projection.values[15] = 1.0F;
+    return projection;
+}
+
 math::Matrix4 ViewportCamera::projectionMatrix(float aspect) const noexcept {
     // Deliberately the same reversed-Z matrix the GL viewport loads, so nothing
     // projecting through this can disagree with the rendered image about which
     // way depth runs (the scene radius here only feeds the far plane, which the
     // renderer supplies itself).
+    if (orthographic) {
+        return reversedZOrthographicMatrix(aspect, orthoHeight, nearPlane(),
+                                           farPlane(10000.0F));
+    }
     return reversedZProjectionMatrix(aspect, nearPlane(), farPlane(10000.0F), fieldOfViewRadians);
 }
 
@@ -131,6 +174,36 @@ Ray ViewportCamera::screenToRay(float screenX, float screenY, float width, float
         return ray;
     }
     const float aspect = width / height;
+    // Same basis the view matrix (and therefore the renderer) uses, so a click
+    // always ray-casts through exactly the pixel it points at.
+    const math::Vec3f facing = forward();
+    const math::Vec3f sideways = right();
+    const math::Vec3f upwards = math::Vec3f::cross(sideways, facing);
+
+    if (orthographic) {
+        // Orthographic rays are PARALLEL: every pixel sends the same direction
+        // (the view axis) from a different point on the eye plane. Getting this
+        // wrong is the classic ortho-pick bug -- a perspective-style ray would
+        // make clicking a far object select whatever lies along that converging
+        // line instead, which reads as "picking is broken in ortho".
+        //
+        // The offset spans exactly the visible world height, centred on the eye,
+        // so the ray starts on the plane the ortho frustum maps to screen edges.
+        const float halfHeight = std::max(orthoHeight, 0.000001F) * 0.5F;
+        const float halfWidth = halfHeight * aspect;
+        const float ndcX = 2.0F * screenX / width - 1.0F;
+        const float ndcY = 1.0F - 2.0F * screenY / height;
+        const math::Vec3f pointOnPlane{eye().x + (sideways.x * ndcX * halfWidth +
+                                                   upwards.x * ndcY * halfHeight),
+                                       eye().y + (sideways.y * ndcX * halfWidth +
+                                                   upwards.y * ndcY * halfHeight),
+                                       eye().z + (sideways.z * ndcX * halfWidth +
+                                                   upwards.z * ndcY * halfHeight)};
+        ray.origin = pointOnPlane;
+        ray.direction = facing;
+        return ray;
+    }
+
     // A caller that leaves the FOV unset (or zeroes it) must not collapse the
     // frustum to a single ray: fall back to the editor default, matching
     // reversedZProjectionMatrix().
@@ -138,12 +211,6 @@ Ray ViewportCamera::screenToRay(float screenX, float screenY, float width, float
     const float tanHalf = std::tan(half);
     const float ndcX = (2.0F * screenX / width - 1.0F) * aspect * tanHalf;
     const float ndcY = (1.0F - 2.0F * screenY / height) * tanHalf;
-
-    // Same basis the view matrix (and therefore the renderer) uses, so a click
-    // always ray-casts through exactly the pixel it points at.
-    const math::Vec3f facing = forward();
-    const math::Vec3f sideways = right();
-    const math::Vec3f upwards = math::Vec3f::cross(sideways, facing);
     ray.direction = {facing.x + sideways.x * ndcX + upwards.x * ndcY, facing.y + sideways.y * ndcX + upwards.y * ndcY,
                      facing.z + sideways.z * ndcX + upwards.z * ndcY};
     ray.direction = ray.direction.normalized();
@@ -169,6 +236,17 @@ void ViewportCamera::dolly(float wheelDelta) noexcept {
     // wheelDelta is measured in wheel notches (1.0 per notch, negative when
     // scrolling back), so a fast flick zooms proportionally instead of one step.
     const float notches = std::clamp(wheelDelta, -4.0F, 4.0F);
+    // Orthographic zoom changes the visible world HEIGHT, not the orbit distance.
+    // Moving the eye instead would change what sits in front of it without
+    // changing how much is visible -- and the near plane would then have to chase
+    // it -- so a zoom in ortho would slide the scene sideways and clip it rather
+    // than magnify it. Same 0.9^notches curve, so both modes feel identical.
+    if (orthographic) {
+        const float next = std::clamp(orthoHeight * std::pow(0.9F, notches),
+                                      kMinOrthoHeight, kMaxOrthoHeight);
+        orthoHeight = next;
+        return;
+    }
     distance = std::clamp(distance * std::pow(0.9F, notches), kMinDistance, kMaxDistance);
 }
 
@@ -291,6 +369,17 @@ bool ViewportCamera::worldToScreen(const math::Vec3f& point, float width, float 
         return false;
     }
     const float aspect = width / height;
+    if (orthographic) {
+        // Orthographic project: divide by the frustum half-extents, with NO
+        // perspective divide. Two points at different depths therefore project
+        // to the same pixel when they share x/y, which is the property labels and
+        // the gizmo rely on to stay honest.
+        const float halfHeight = std::max(orthoHeight, 0.000001F) * 0.5F;
+        const float halfWidth = halfHeight * aspect;
+        outX = width * 0.5F * (1.0F + viewPoint.x / halfWidth);
+        outY = height * 0.5F * (1.0F - viewPoint.y / halfHeight);
+        return true;
+    }
     const float half = fieldOfViewRadians * 0.5F;
     const float f = 1.0F / std::tan(half);
     outX = width * 0.5F * (1.0F + (viewPoint.x * f / aspect) / -viewPoint.z);

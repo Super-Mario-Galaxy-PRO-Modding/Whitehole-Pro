@@ -267,4 +267,146 @@ bool reversePoints(std::vector<PathPoint>& points, int first, int last) noexcept
     return true;
 }
 
+// ---- circular arc generation -------------------------------------------------
+
+namespace {
+
+// Unit vectors spanning the plane whose normal is `axis`.
+//
+// Picked as right-handed triples so that increasing the angle always sweeps
+// anticlockwise about that normal. Hard-coding {+X,+Y} / {+Z,+X} style pairs
+// instead would silently flip the direction of travel for the odd axis, which is
+// the kind of bug that only shows up as "this circle goes the wrong way".
+struct ArcFrame {
+    math::Vec3f u;      // angle 0 direction
+    math::Vec3f v;      // angle 90 direction
+    math::Vec3f normal; // plane normal
+};
+
+ArcFrame arcFrame(ArcAxis axis) noexcept {
+    switch (axis) {
+        case ArcAxis::X:
+            return {{0.0F, 0.0F, 1.0F}, {0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}};
+        case ArcAxis::Z:
+            return {{1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}};
+        case ArcAxis::Y:
+        default:
+            return {{1.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.0F, 1.0F, 0.0F}};
+    }
+}
+
+// Sweep normalised into (0, 360] degrees. A negative sweep is re-expressed as a
+// positive one, so "-180" means the same arc as "180" rather than being rejected
+// -- an author typing a clockwise half-turn should not have to think about sign.
+float normalisedSweep(float sweepDegrees) noexcept {
+    if (!std::isfinite(sweepDegrees) || sweepDegrees == 0.0F) {
+        return 0.0F;
+    }
+    float sweep = std::fmod(sweepDegrees, 360.0F);
+    if (sweep < 0.0F) {
+        sweep += 360.0F;
+    }
+    // fmod of a tiny negative value can round up to exactly 360, and fmod maps
+    // every whole multiple of 360 (the most common input of all -- a circle)
+    // to exactly 0. Both of those are FULL TURNS, not empty arcs: folding them to
+    // 0 would make the default spec, a plain 360-degree circle, generate nothing.
+    if (sweep <= 0.0001F || sweep >= 360.0F) {
+        return 360.0F;
+    }
+    return sweep;
+}
+
+} // namespace
+
+bool isFullCircle(const ArcSpec& spec) noexcept {
+    // A sweep that normalises to a whole turn counts as closed. Comparing with a
+    // tolerance keeps 359.9999 (a float round-off from the GUI's slider) from
+    // being treated as an open arc with a sliver missing.
+    const float sweep = normalisedSweep(spec.sweepDegrees);
+    return sweep >= 360.0F - 0.001F;
+}
+
+std::vector<PathPoint> arcPoints(const ArcSpec& spec) {
+    std::vector<PathPoint> points;
+
+    // Guard the inputs BEFORE any trigonometry: a negative radius would mirror
+    // the arc, and a non-finite one would put NaN straight into BCSV floats,
+    // where it would survive a save and quietly poison the zone.
+    if (!std::isfinite(spec.radius) || spec.radius <= 0.0F || !std::isfinite(spec.center.x) ||
+        !std::isfinite(spec.center.y) || !std::isfinite(spec.center.z) ||
+        !std::isfinite(spec.startDegrees)) {
+        return points;
+    }
+
+    const float sweep = normalisedSweep(spec.sweepDegrees);
+    if (sweep <= 0.0F) {
+        return points; // an empty arc is not a degenerate arc: it is no geometry
+    }
+
+    // One segment per 90 degrees minimum, so even a single-segment request is a
+    // sane quarter-circle rather than a degenerate full turn bent onto itself.
+    const int segments = std::max(spec.segments, 1);
+    const ArcFrame frame = arcFrame(spec.axis);
+
+    const float start = spec.startDegrees * 3.14159265358979F / 180.0F;
+    const float sweepRadians = sweep * 3.14159265358979F / 180.0F;
+    const float step = sweepRadians / static_cast<float>(segments);
+
+    // Handle length for one exact circular-arc segment spanning `step` radians:
+    //     handle = (4/3) * tan(step / 4) * radius
+    //
+    // THE /4 IS THE WHOLE TRICK and is easy to get wrong. For a quarter-circle
+    // segment (step = 90 degrees) this gives (4/3) * tan(22.5deg) = 0.5522847 * r,
+    // the constant every textbook quotes. Dividing by 8 instead -- which looks
+    // equally plausible -- gives 0.2652 * r, roughly HALF the correct handle, and
+    // the curve visibly sags inside the circle: a 100-unit radius came out 3.84
+    // units short at every segment midpoint. Radius error, not wobble, because
+    // both handles are short by the same factor and the curve stays symmetric.
+    const float kappa = (4.0F / 3.0F) * std::tan(step * 0.25F);
+    const float handle = kappa * spec.radius;
+
+    points.reserve(static_cast<std::size_t>(segments) + 1U);
+    for (int index = 0; index <= segments; ++index) {
+        const float angle = start + step * static_cast<float>(index);
+        const auto cosine = std::cos(angle);
+        const auto sine = std::sin(angle);
+
+        // Position on the circle, and the unit tangent (the derivative of the
+        // position with respect to the angle).
+        const math::Vec3f radial{frame.u.x * cosine + frame.v.x * sine,
+                                  frame.u.y * cosine + frame.v.y * sine,
+                                  frame.u.z * cosine + frame.v.z * sine};
+        const math::Vec3f tangent{-frame.u.x * sine + frame.v.x * cosine,
+                                  -frame.u.y * sine + frame.v.y * cosine,
+                                  -frame.u.z * sine + frame.v.z * cosine};
+
+        PathPoint point;
+        point.id = static_cast<std::int16_t>(index); // renumbered again on write
+        point.position = spec.center + radial * spec.radius;
+        // The OUTGOING handle leaves along the tangent; the INCOMING one arrives
+        // from behind, i.e. against it. See the convention note in path.hpp --
+        // a section is bezier(A.pnt0, A.pnt2, B.pnt1, B.pnt0), so filling both
+        // handles with the forward tangent puts a visible kink at every point.
+        point.control2 = point.position + tangent * handle;
+        point.control1 = point.position - tangent * handle;
+        // args default to 0 from the struct; leave the speed at -1 like
+        // addPathPoint() does, so a generated rail does not silently override
+        // the game's default point speed.
+        point.args.fill(-1);
+        points.push_back(point);
+    }
+    return points;
+}
+
+std::vector<PathPoint> circlePoints(const ArcSpec& spec) {
+    std::vector<PathPoint> points = arcPoints(spec);
+    // Drop the duplicated endpoint so the rail's last section wraps back to its
+    // first instead of drawing a zero-length spur from the end to the start.
+    // Only for a full turn: for a partial arc that endpoint is real geometry.
+    if (isFullCircle(spec) && points.size() > 1U) {
+        points.pop_back();
+    }
+    return points;
+}
+
 } // namespace whitehole::smg

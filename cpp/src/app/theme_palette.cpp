@@ -1,7 +1,13 @@
 #include "whitehole/app/theme_palette.hpp"
 
+#include "whitehole/io/binary_file.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <optional>
+#include <sstream>
+#include <vector>
 
 namespace whitehole::app {
 namespace {
@@ -105,5 +111,176 @@ Rgba blend(const Rgba& fg, const Rgba& bg, float alpha) noexcept {
 const Palette& themePalette(bool dark) noexcept { return dark ? kDark : kLight; }
 
 Rgba shellBackground(bool dark) noexcept { return themePalette(dark).windowBg; }
+
+// ---- custom themes -----------------------------------------------------------
+namespace {
+
+// Writes one colour as an [r,g,b,a] array of doubles.
+util::JsonValue toJson(const Rgba& color) {
+    util::JsonArray values;
+    values.push_back(util::JsonValue(static_cast<double>(color.r)));
+    values.push_back(util::JsonValue(static_cast<double>(color.g)));
+    values.push_back(util::JsonValue(static_cast<double>(color.b)));
+    values.push_back(util::JsonValue(static_cast<double>(color.a)));
+    return util::JsonValue(std::move(values));
+}
+
+// A channel is usable only if it is finite AND within [0, 1]. A NaN or an
+// out-of-range value is what a hand-edited file produces by accident (a typo, or
+// a colour copied from a 0-255 scale). Clamping silently would give a
+// wrong-but-plausible colour; falling back keeps the slot honest.
+bool usableChannel(double value) noexcept {
+    return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+}
+
+// Reads one colour: an [r,g,b] or [r,g,b,a] array. Anything else -- a bare
+// number, a string, a short array, a non-finite channel -- returns nullopt so
+// the caller keeps the fallback for this ONE slot.
+std::optional<Rgba> colourFromJson(const util::JsonValue& value) {
+    if (!value.isArray()) {
+        return std::nullopt;
+    }
+    const auto& values = value.asArray();
+    if (values.size() < 3 || values.size() > 4) {
+        return std::nullopt;
+    }
+    double channels[4] = {0.0, 0.0, 0.0, 1.0};
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (!values[index].isNumber() || !usableChannel(values[index].asNumber())) {
+            return std::nullopt;
+        }
+        channels[index] = values[index].asNumber();
+    }
+    return Rgba{static_cast<float>(channels[0]), static_cast<float>(channels[1]),
+                static_cast<float>(channels[2]), static_cast<float>(channels[3])};
+}
+
+} // namespace
+
+Palette defaultPalette(bool dark) noexcept { return themePalette(dark); }
+
+util::JsonValue themeToJson(const Palette& palette, std::string name, bool dark) {
+    util::JsonObject root;
+    root["name"] = util::JsonValue(std::move(name));
+    root["dark"] = util::JsonValue(dark);
+    root["disabledAlpha"] = util::JsonValue(static_cast<double>(palette.disabledAlpha));
+
+    root["windowBg"] = toJson(palette.windowBg);
+    root["panelBg"] = toJson(palette.panelBg);
+    root["frameBg"] = toJson(palette.frameBg);
+    root["frameHover"] = toJson(palette.frameHover);
+    root["frameActive"] = toJson(palette.frameActive);
+    root["header"] = toJson(palette.header);
+    root["headerHover"] = toJson(palette.headerHover);
+    root["headerActive"] = toJson(palette.headerActive);
+    root["tabSelected"] = toJson(palette.tabSelected);
+    root["border"] = toJson(palette.border);
+    root["text"] = toJson(palette.text);
+    root["textDim"] = toJson(palette.textDim);
+    root["accent"] = toJson(palette.accent);
+    root["accentFg"] = toJson(palette.accentFg);
+    root["unsaved"] = toJson(palette.unsaved);
+    root["error"] = toJson(palette.error);
+    root["selectionBg"] = toJson(palette.selectionBg);
+    return util::JsonValue(std::move(root));
+}
+
+Palette themeFromJson(const util::JsonValue& value, const Palette& fallback) {
+    // Start from the fallback, then overwrite slot by slot. That is what makes a
+    // PARTIAL theme file work: only the colours it actually names change.
+    Palette result = fallback;
+    if (!value.isObject()) {
+        return result;
+    }
+
+    const auto readSlot = [&value, &result](const char* key, Rgba& slot) {
+        if (const auto parsed = colourFromJson(value.at(key))) {
+            slot = *parsed;
+        }
+        // No entry, wrong type, or an unusable channel: the slot keeps what it
+        // already had. Never an error -- a shared theme with one bad colour
+        // should load with that one colour wrong, not refuse to load at all.
+    };
+
+    readSlot("windowBg", result.windowBg);
+    readSlot("panelBg", result.panelBg);
+    readSlot("frameBg", result.frameBg);
+    readSlot("frameHover", result.frameHover);
+    readSlot("frameActive", result.frameActive);
+    readSlot("header", result.header);
+    readSlot("headerHover", result.headerHover);
+    readSlot("headerActive", result.headerActive);
+    readSlot("tabSelected", result.tabSelected);
+    readSlot("border", result.border);
+    readSlot("text", result.text);
+    readSlot("textDim", result.textDim);
+    readSlot("accent", result.accent);
+    readSlot("accentFg", result.accentFg);
+    readSlot("unsaved", result.unsaved);
+    readSlot("error", result.error);
+    readSlot("selectionBg", result.selectionBg);
+
+    // disabledAlpha gates EVERY disabled control's contrast at once, so a bad
+    // value here breaks legibility everywhere rather than in one place. Same
+    // per-slot fallback: out-of-range keeps the fallback rather than clamping.
+    const auto& alpha = value.at("disabledAlpha");
+    if (alpha.isNumber()) {
+        const double parsed = alpha.asNumber();
+        if (std::isfinite(parsed) && parsed > 0.0 && parsed <= 1.0) {
+            result.disabledAlpha = static_cast<float>(parsed);
+        }
+    }
+    return result;
+}
+
+bool saveThemeFile(const std::string& path, const Palette& palette, std::string name, bool dark) {
+    if (path.empty()) {
+        return false;
+    }
+    const std::string text = util::serializeJson(themeToJson(palette, std::move(name), dark));
+    const std::vector<std::uint8_t> bytes(text.begin(), text.end());
+    try {
+        // Staged temp + rename, so an interrupted save cannot leave a truncated
+        // theme file that fails to parse on the next launch.
+        io::writeFile(std::filesystem::path(path), bytes);
+    } catch (const std::exception&) {
+        return false; // best effort, matching Settings::save()
+    }
+    return true;
+}
+
+bool loadThemeFile(const std::string& path, Palette& outPalette) {
+    if (path.empty()) {
+        return false;
+    }
+    std::vector<std::uint8_t> bytes;
+    try {
+        bytes = io::readFile(std::filesystem::path(path));
+    } catch (const std::exception&) {
+        return false; // missing file, permission denied, a directory: all "no"
+    }
+    std::string text(bytes.begin(), bytes.end());
+    // A UTF-8 BOM from Notepad would make the parser reject the whole file -- the
+    // same trap Settings::load() already handles.
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+    }
+    try {
+        const auto root = util::parseJson(text);
+        if (!root.isObject()) {
+            return false;
+        }
+        // Which built-in palette to fall back on: the file says, and only when it
+        // says something usable. A theme saved from light mode keeps light mode's
+        // readable defaults for any colour it omits.
+        const bool dark = root.at("dark").asBool(true);
+        outPalette = themeFromJson(root, themePalette(dark));
+    } catch (const std::exception&) {
+        return false; // malformed JSON surfaces as "could not read", never throws
+    }
+    return true;
+}
 
 } // namespace whitehole::app

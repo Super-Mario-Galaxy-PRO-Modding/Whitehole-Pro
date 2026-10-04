@@ -63,6 +63,8 @@ add_library(whitehole_core
     cpp/src/db/modelsubstitutions.cpp
     cpp/src/db/specialrenderers.cpp
     cpp/src/app/theme_palette.cpp
+    cpp/src/app/i18n.cpp
+    cpp/src/app/layout.cpp
     cpp/src/edit/authoring.cpp
     cpp/src/edit/commands.cpp
     cpp/src/edit/rails.cpp

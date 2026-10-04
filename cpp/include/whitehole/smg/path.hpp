@@ -106,4 +106,72 @@ void ensurePathPointSchema(BcsvTable& table);
 // moves (Java RailUtil.reversePath). Returns false for out-of-range indices.
 bool reversePoints(std::vector<PathPoint>& points, int first, int last) noexcept;
 
+// ---- circular arc generation (pure maths) ---------------------------------
+//
+// WHY THIS EXISTS: authoring a round rail by hand means placing points and
+// guessing handles until the curve looks circular. The result is only visually
+// round, and the error is worst where it is most visible -- a big circle is
+// obviously polygonal at any segment count a person would place by hand.
+//
+// The fix is the exact circular-arc bezier: a cubic segment spanning angle
+// theta is a true arc when its two handles sit at distance
+//
+//     kappa = (4/3) * tan(theta / 4)
+//
+// from the point, along the tangent. Note the /4, not the /8 that looks just as
+// plausible. For a quarter circle (theta = 90 degrees) this yields the textbook
+// 0.5522847 * radius; /8 yields 0.2652 * radius, about half, and the rail visibly
+// sags inside the circle. The construction is exact for any theta, so a circle
+// built from 4 segments and one built from 64 are both genuinely round rather than
+// merely close.
+
+// Which plane a generated arc lies in: the normal axis of that plane.
+enum class ArcAxis : std::uint8_t { X, Y, Z };
+
+struct ArcSpec {
+    math::Vec3f center{};
+    float radius{100.0F};
+    // Start angle in DEGREES, measured from the in-plane +X direction and
+    // increasing anticlockwise about the plane normal. Degrees because that is
+    // what an author types; the maths converts once, here.
+    float startDegrees{0.0F};
+    // How far to sweep, in degrees. Clamped to (0, 360]; 360 produces a closed
+    // circle. Negative sweeps are normalised rather than rejected, so "clockwise
+    // half turn" is -180 and not an error the caller has to pre-screen.
+    float sweepDegrees{360.0F};
+    // Cubic bezier segments. More segments means a longer point list, NOT a
+    // rounder curve -- every segment is already an exact arc. It exists to let
+    // an author trade path precision (how smoothly a moving object turns) for
+    // point count. Clamped to at least 1.
+    int segments{8};
+    ArcAxis axis{ArcAxis::Y};
+};
+
+// Points tracing the arc, INCLUDING both endpoints.
+//
+// HANDLE CONVENTION, which is the easy thing to get backwards: a section from
+// A to B is evaluated as bezier(t, A.position, A.control2, B.control1,
+// B.position) -- so `control2` (pnt2) leaves A and `control1` (pnt1) arrives at
+// B. The incoming handle of a point is therefore the one pointing BACK along the
+// curve, and the outgoing one points FORWARD. arcPoints() honours that; a
+// generator that filled both handles with the same tangent direction produces
+// rails with a visible kink at every point.
+//
+// Returns an empty vector (never a partial arc) for a non-positive radius or a
+// sweep that normalises to nothing. Never throws and never emits NaN: callers
+// wire these straight into BCSV floats, where one NaN would silently poison a
+// saved zone.
+[[nodiscard]] std::vector<PathPoint> arcPoints(const ArcSpec& spec);
+
+// Same arc, but as a CLOSED circle: the duplicate endpoint is dropped so the
+// last section wraps back to the first. Only meaningful at 360 degrees; for any
+// smaller sweep it returns exactly what arcPoints() would, since dropping the
+// final point of a partial arc would throw away real geometry.
+[[nodiscard]] std::vector<PathPoint> circlePoints(const ArcSpec& spec);
+
+// True when the spec describes a full turn, i.e. its circlePoints() form would
+// drop the duplicate endpoint. Callers use it to decide the rail's CLOSE/OPEN
+// flag without duplicating the clamping rules.
+[[nodiscard]] bool isFullCircle(const ArcSpec& spec) noexcept;
+
 } // namespace whitehole::smg

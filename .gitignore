@@ -54,6 +54,10 @@ restore_labels.diff
 _*
 *.tmp
 
+# GCC/MinGW out-of-tree build used by _build.ps1 (Phase 0 harness: the only
+# cmake on this machine is devkitPro's MSYS2 build, which mangles Windows paths).
+/build-gcc
+
 # Reference-only sibling tools (Supernova, Takochu, bmd-bdl-export, ...):
 # studied for ideas, never compiled or shipped — especially Takochu (GPL-3.0).
 GalaxyTools/

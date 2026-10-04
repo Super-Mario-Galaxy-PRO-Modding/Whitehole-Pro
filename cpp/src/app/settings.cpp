@@ -1,8 +1,10 @@
 #include "whitehole/app/settings.hpp"
 
 #include "whitehole/io/binary_file.hpp"
+#include "whitehole/render/camera.hpp" // kMin/kMaxOrthoHeight: the ortho clamp
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include "whitehole/util/json.hpp"
 #include <cstdlib>
@@ -124,6 +126,22 @@ void Settings::load() {
     if (playtestName.empty()) playtestName = "WhiteholePro";
     playtestRegion = getS(root, "playtestRegion");
     if (playtestRegion.empty()) playtestRegion = "E";
+    // Closed sets resolve through their *FromKey fallback, so an unknown or empty
+    // value in a hand-edited file lands on a usable default instead of a value
+    // no switch statement handles.
+    language = languageFromKey(getS(root, "language"));
+    uiLayout = uiLayoutFromKey(getS(root, "uiLayout"));
+    orthographicView = getB(root, "orthographicView", false);
+    // Clamped to the CAMERA's own bounds rather than numbers copied here: the two
+    // must not be able to drift apart, and a 0 here would collapse the ortho
+    // frustum (the camera's minimum is deliberately above 0 for exactly that).
+    // A NaN falls to the default too, since std::clamp leaves NaN alone.
+    const float requested = getF(root, "orthoScale", 800.0F);
+    orthoScale = std::isfinite(requested)
+                     ? std::clamp(requested, render::ViewportCamera::kMinOrthoHeight,
+                                  render::ViewportCamera::kMaxOrthoHeight)
+                     : 800.0F;
+    themeFile = getS(root, "themeFile");
     recentMaps.clear();
     for (const auto& item : root.at("recentMaps").asArray()) {
         if (item.isString() && recentMaps.size() < 8) recentMaps.push_back(item.asString());
@@ -174,6 +192,12 @@ void Settings::save() const {
     putS(o, "dolphinSdRoot", dolphinSdRoot);
     putS(o, "playtestName", playtestName);
     putS(o, "playtestRegion", playtestRegion);
+    // Machine keys, not localised names: see the field comments in settings.hpp.
+    putS(o, "language", languageKey(language));
+    putS(o, "uiLayout", uiLayoutKey(uiLayout));
+    putB(o, "orthographicView", orthographicView);
+    putF(o, "orthoScale", orthoScale);
+    putS(o, "themeFile", themeFile);
     util::JsonArray recent;
     for (const auto& m : recentMaps) recent.emplace_back(m);
     o["recentMaps"] = util::JsonValue(std::move(recent));
@@ -229,6 +253,11 @@ void Settings::reset() {
     dolphinSdRoot.clear();
     playtestName = "WhiteholePro";
     playtestRegion = "E";
+    language = Language::English;
+    uiLayout = UiLayout::Pro;
+    orthographicView = false;
+    orthoScale = 800.0F;
+    themeFile.clear();
     loaded_ = true;
 }
 void Settings::pushRecentMap(const std::string& path) {

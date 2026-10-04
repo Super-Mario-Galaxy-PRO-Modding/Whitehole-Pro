@@ -34,6 +34,29 @@ public:
     float fieldOfViewRadians{kFieldOfView};
     float rollRadians{0.0F};
 
+    // --- Orthographic mode ---------------------------------------------------
+    //
+    // WHY THIS EXISTS: a level editor wants both. Perspective matches how the
+    // game looks, but orthographic is what you author layouts in -- parallel
+    // edges stay parallel, so a platform you lined up against a grid line is
+    // still lined up when you rotate the view. Without it, aligning two
+    // rectangles at a distance is guesswork.
+    //
+    // The ortho frustum is sized in WORLD UNITS OF VERTICAL VISIBLE HEIGHT, not
+    // by a field of view, because that is the number an author reasons about
+    // ("the view is 400 units tall"). `distance` still positions the eye, so
+    // orbiting, panning and gizmo projection keep working unchanged -- only the
+    // x/y magnification stops depending on depth.
+    bool orthographic{false};
+    float orthoHeight{800.0F};
+
+    // Bounds for orthoHeight. The floor stops a zero-height frustum from
+    // collapsing the projection (a division by zero reaching the GL matrix);
+    // the ceiling matches the perspective zoom ceiling so the two modes cannot
+    // disagree about what "fully zoomed out" means.
+    static constexpr float kMinOrthoHeight = 1.0F;
+    static constexpr float kMaxOrthoHeight = 150000.0F;
+
     static constexpr float kFieldOfView = 1.2217305F; // 70 deg in radians
     // Floor of the dynamic near plane (see nearPlane()). The old fixed
     // 1..60000 frustum quantised depth to ~20 world units at galaxy range,
@@ -134,6 +157,22 @@ public:
 // tests share one definition.
 [[nodiscard]] math::Matrix4 reversedZProjectionMatrix(float aspect, float nearPlane, float farPlane,
                                                       float fovRadians = ViewportCamera::kFieldOfView) noexcept;
+
+// Orthographic projection with the SAME reversed-Z depth contract as
+// reversedZProjectionMatrix(): near maps to NDC depth +1, far to 0, w_clip = -z.
+//
+// WHY REVERSED-Z HERE TOO: it is not a perspective-only trick. The GL viewport
+// clears depth to 0 and keeps GL_GEQUAL as the frame default and drawFrame relies
+// on both, so giving ortho the standard -1..1 depth would make every model draw
+// inside-out and z-fight the overlays. One shared convention means toggling the
+// projection cannot change which surface owns a pixel.
+//
+// `visibleHeight` is world units across the vertical axis (the camera's
+// orthoHeight) and the width follows from the aspect ratio, so the frustum is
+// shaped like the viewport instead of being a fixed box. `nearPlane`/`farPlane`
+// are distances along the view axis, matching the perspective call's meaning.
+[[nodiscard]] math::Matrix4 reversedZOrthographicMatrix(float aspect, float visibleHeight,
+                                                        float nearPlane, float farPlane) noexcept;
 
 // Viewport grid sizing for one camera distance: the patch must cover the
 // whole visible ground (2x orbit distance spans any aspect ratio), snapped to

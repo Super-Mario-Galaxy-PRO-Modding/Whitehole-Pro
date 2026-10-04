@@ -1,4 +1,6 @@
 #include "whitehole/app/settings.hpp"
+#include "whitehole/app/i18n.hpp"
+#include "whitehole/app/layout.hpp"
 #include "whitehole/app/playtest.hpp"
 #include "whitehole/app/theme_palette.hpp"
 #include "whitehole/db/data_holder.hpp"
@@ -15,6 +17,7 @@
 #include "whitehole/edit/authoring.hpp"
 #include "whitehole/edit/commands.hpp"
 #include "whitehole/edit/undo.hpp"
+#include "whitehole/edit/rails.hpp"
 #include "whitehole/io/binary_file.hpp"
 #include "whitehole/io/directory_filesystem.hpp"
 #include "whitehole/io/rarc.hpp"
@@ -41,6 +44,18 @@
 #include "whitehole/smg/stage_archive.hpp"
 #include "whitehole/smg/stage_builder.hpp"
 #include "whitehole/smg/stage_templates.hpp"
+
+// CMake supplies WHITEHOLE_SOURCE_DIR on the command line. When the file is
+// compiled directly (no -D, e.g. the ad-hoc g++ harness) fall back to the
+// generated header, which bakes the same path in as a string literal.
+#if defined(__has_include)
+#  if __has_include("whitehole_source_dir.hpp") && !defined(WHITEHOLE_SOURCE_DIR)
+#    include "whitehole_source_dir.hpp"
+#  endif
+#endif
+#ifndef WHITEHOLE_SOURCE_DIR
+#  define WHITEHOLE_SOURCE_DIR "."
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -2080,6 +2095,617 @@ void testReversedZDepthBuffer() {
                reversedZProjectionMatrix(kAspect, camera.nearPlane(), camera.farPlane(10000.0F))
                    .values[10],
            "the CPU projection drifted from the renderer's depth mapping");
+}
+
+// Orthographic projection: the invariant that matters is that it shares the
+// perspective path's reversed-Z convention. The viewport clears depth to 0 and
+// keeps GL_GEQUAL, so a standard -1..1 ortho would render every model inside-out
+// and z-fight the overlays -- a bug that only appears when the author toggles the
+// projection, which is exactly when nobody is reading the depth code.
+void testOrthographicProjection() {
+    using whitehole::math::Matrix4;
+    using whitehole::render::reversedZOrthographicMatrix;
+    using whitehole::render::reversedZProjectionMatrix;
+    using whitehole::render::ViewportCamera;
+
+    constexpr float kNear = 10.0F;
+    constexpr float kFar = 20000.0F;
+    constexpr float kAspect = 4.0F / 3.0F;
+    constexpr float kHeight = 800.0F;
+    const Matrix4 ortho = reversedZOrthographicMatrix(kAspect, kHeight, kNear, kFar);
+
+    // x/y must not feed into w, and w_clip must be the CONSTANT 1 -- not the
+    // perspective path's -z. That single difference is what makes orthographic
+    // orthographic; sharing -z would keep perspective foreshortening while
+    // looking like a correct ortho matrix.
+    expect(ortho.values[3] == 0.0F && ortho.values[7] == 0.0F,
+           "the ortho projection must not feed x/y into w");
+    expect(ortho.values[11] == 0.0F,
+           "the ortho w row must be zero; a -z there would restore perspective depth scaling");
+    expect(ortho.values[15] == 1.0F,
+           "the ortho projection must set w_clip to a constant 1 so x/y cannot vary with depth");
+
+    // x/y are a plain 2/extent scale, NOT 1/tan(fov/2). Reusing the perspective
+    // terms would silently ignore orthoHeight and make the zoom do nothing.
+    const float halfHeight = kHeight * 0.5F;
+    const float halfWidth = halfHeight * kAspect;
+    expect(std::abs(ortho.values[0] - 1.0F / halfWidth) < 1e-5F,
+           "ortho x scale must be 2 over the visible width");
+    expect(std::abs(ortho.values[5] - 1.0F / halfHeight) < 1e-5F,
+           "ortho y scale must be 2 over the visible height");
+
+    struct Clip {
+        float x;
+        float y;
+        float z;
+        float w;
+    };
+    const auto clip = [&ortho](float x, float y, float z) {
+        const auto& v = ortho.values;
+        return Clip{x * v[0] + y * v[4] + z * v[8] + v[12],
+                    x * v[1] + y * v[5] + z * v[9] + v[13],
+                    x * v[2] + y * v[6] + z * v[10] + v[14],
+                    x * v[3] + y * v[7] + z * v[11] + v[15]};
+    };
+    const auto ndcDepth = [&clip](float distance) {
+        const Clip c = clip(0.0F, 0.0F, -distance);
+        return c.z / c.w;
+    };
+
+    // The whole point: identical reversed-Z endpoints to the perspective path.
+    expect(std::abs(ndcDepth(kNear) - 1.0F) < 1e-3F,
+           "the ortho near plane must map to NDC +1 under reversed-Z");
+    expect(std::abs(ndcDepth(kFar)) < 1e-3F,
+           "the ortho far plane must map to NDC 0 under reversed-Z");
+
+    // Nearer still wins, at every distance.
+    float previous = 2.0F;
+    for (const float distance : {kNear, 12.0F, 100.0F, 1000.0F, 10000.0F, kFar}) {
+        const float depth = ndcDepth(distance);
+        expect(depth <= 1.0F + 1e-4F && depth >= -1e-4F,
+               "an ortho NDC depth left the [-1, 1] range");
+        expect(depth < previous, "a nearer ortho surface did not get a larger depth value");
+        previous = depth;
+    }
+
+    // The defining property, and the reason the mode exists: two points at
+    // DIFFERENT depths but the same view-space x/y project to the SAME place.
+    const auto projectedX = [&ortho](float x, float y, float z) {
+        const auto& v = ortho.values;
+        const float w = x * v[3] + y * v[7] + z * v[11] + v[15];
+        return (x * v[0] + y * v[4] + z * v[8] + v[12]) / w;
+    };
+    expect(std::abs(projectedX(10.0F, 0.0F, -100.0F) - projectedX(10.0F, 0.0F, -5000.0F)) <
+               1e-5F,
+           "orthographic x must not depend on depth");
+    // ... and the perspective path genuinely does diverge, or this proves nothing.
+    const Matrix4 perspective = reversedZProjectionMatrix(kAspect, kNear, kFar);
+    const auto perspectiveX = [&perspective](float x, float z) {
+        const float w = z * perspective.values[11];
+        return (x * perspective.values[0]) / w;
+    };
+    expect(std::abs(perspectiveX(10.0F, -100.0F) - perspectiveX(10.0F, -5000.0F)) > 1e-3F,
+           "the perspective probe must diverge with depth, or this test proves nothing");
+
+    // The frustum corners must land exactly on the NDC edges.
+    expect(std::abs(projectedX(halfWidth, 0.0F, -500.0F) - 1.0F) < 1e-4F,
+           "the ortho frustum's right edge must reach NDC +1");
+    expect(std::abs(projectedX(-halfWidth, 0.0F, -500.0F) + 1.0F) < 1e-4F,
+           "the ortho frustum's left edge must reach NDC -1");
+
+    // Degenerate inputs must not poison the matrix: a zero height divides the
+    // frustum away and the resulting NaN would reach the GL matrix directly.
+    for (const float bad : {0.0F, -5.0F}) {
+        for (const float value : reversedZOrthographicMatrix(kAspect, bad, kNear, kFar).values) {
+            expect(std::isfinite(value),
+                   "a degenerate ortho height produced a non-finite matrix entry");
+        }
+    }
+    // Far <= near must not produce a zero or negative depth range.
+    for (const float value : reversedZOrthographicMatrix(kAspect, kHeight, kFar, kNear).values) {
+        expect(std::isfinite(value), "an inverted ortho clip range produced a non-finite entry");
+    }
+    // A degenerate aspect must not either.
+    for (const float value : reversedZOrthographicMatrix(0.0F, kHeight, kNear, kFar).values) {
+        expect(std::isfinite(value), "a zero ortho aspect produced a non-finite matrix entry");
+    }
+
+    // The camera must select the ortho matrix when asked, and the perspective one
+    // otherwise -- otherwise the toggle silently does nothing.
+    ViewportCamera camera;
+    camera.distance = 1000.0F;
+    camera.orthographic = true;
+    camera.orthoHeight = kHeight;
+    expect(std::abs(camera.projectionMatrix(kAspect).values[5] - 1.0F / halfHeight) < 1e-5F,
+           "an orthographic camera must project the orthographic matrix");
+    camera.orthographic = false;
+    expect(std::abs(camera.projectionMatrix(kAspect).values[5] -
+                    reversedZProjectionMatrix(kAspect, camera.nearPlane(),
+                                              camera.farPlane(10000.0F))
+                        .values[5]) < 1e-6F,
+           "clearing the ortho flag must restore the perspective projection exactly");
+}
+
+// Picking and labels share one projection, so screenToRay and worldToScreen have
+// to agree with the ortho frustum exactly. When they do not, a click lands on a
+// different object than the one under the cursor -- the worst failure a viewport
+// can have, and the reason this is checked rather than assumed.
+void testOrthographicPickingParity() {
+    using whitehole::math::Vec3f;
+    using whitehole::render::ViewportCamera;
+    constexpr float kWidth = 1280.0F;
+    constexpr float kHeight = 720.0F;
+    constexpr float kOrthoHeight = 600.0F;
+
+    ViewportCamera camera;
+    camera.orthographic = true;
+    camera.orthoHeight = kOrthoHeight;
+    camera.target = {0.0F, 0.0F, 0.0F};
+    camera.yawRadians = 0.0F;
+    camera.pitchRadians = 0.0F;
+    camera.distance = 1000.0F;
+
+    // Round trip: world point -> pixel -> ray -> the point again. The ray must
+    // pass through the original point: that IS "the click hit what it pointed at".
+    // The pixel is obtained by PROJECTING the point, never hand-picked, so the
+    // check cannot be satisfied by two agreed-upon wrong conventions.
+    const auto rayHitsProjected = [&camera](const Vec3f& point, float& outX, float& outY) {
+        if (!camera.worldToScreen(point, kWidth, kHeight, outX, outY)) {
+            return false;
+        }
+        const auto ray = camera.screenToRay(outX, outY, kWidth, kHeight);
+        const float along = Vec3f::dot(point - ray.origin, ray.direction);
+        if (along <= 0.0F) {
+            return false; // the ray points away from the point
+        }
+        const Vec3f closest = ray.origin + ray.direction * along;
+        return std::abs(closest.x - point.x) < 0.01F &&
+               std::abs(closest.y - point.y) < 0.01F &&
+               std::abs(closest.z - point.z) < 0.01F;
+    };
+
+    // The screen centre is the world origin, whatever the frustum height is.
+    float centreX = 0.0F;
+    float centreY = 0.0F;
+    expect(rayHitsProjected({0.0F, 0.0F, 0.0F}, centreX, centreY),
+           "an ortho pick at screen centre must hit the world origin");
+    expect(std::abs(centreX - kWidth * 0.5F) < 0.5F &&
+               std::abs(centreY - kHeight * 0.5F) < 0.5F,
+           "the world origin must project to the exact centre of an ortho viewport");
+
+    // Off-centre points, built from the camera BASIS rather than world axes: with
+    // the default 45-degree orbit, world x/y/z are all mixed into view space, so a
+    // hand-written "vary the z coordinate" probe would silently vary a LATERAL
+    // axis instead of depth and prove nothing.
+    const Vec3f lateral = camera.right() * 150.0F + camera.up() * 80.0F;
+    const Vec3f opposite = camera.right() * -120.0F + camera.up() * -90.0F;
+    // The same lateral position, pushed 900 units FURTHER along the view axis.
+    // forward() points from the eye TOWARD the target and view-space z is negative
+    // in front of the camera, so going DEEPER means moving ALONG forward().
+    const Vec3f deeper = lateral + camera.forward() * 900.0F;
+
+    float upRightX = 0.0F;
+    float upRightY = 0.0F;
+    expect(rayHitsProjected(lateral, upRightX, upRightY),
+           "an ortho pick off-centre must hit the projected point");
+    float lowLeftX = 0.0F;
+    float lowLeftY = 0.0F;
+    expect(rayHitsProjected(opposite, lowLeftX, lowLeftY),
+           "an ortho pick on the opposite side must hit the projected point");
+    float deepX = 0.0F;
+    float deepY = 0.0F;
+    expect(rayHitsProjected(deeper, deepX, deepY),
+           "an ortho pick of a distant point must hit the projected point");
+    // Depth independence, end to end: the same lateral position must project to
+    // the same pixel 900 units further away. Perspective would pull it inward.
+    expect(std::abs(deepX - upRightX) < 0.01F && std::abs(deepY - upRightY) < 0.01F,
+           "orthographic projection must place the same lateral position at the same pixel at any depth");
+    expect(std::abs(upRightX - lowLeftX) > 10.0F,
+           "the lateral probe must actually move across the screen, or it proves nothing");
+
+    // Ortho rays are PARALLEL: every pixel sends the same direction. A converging
+    // (perspective-style) ray would make far picks land on whatever happens to lie
+    // along the converging line instead.
+    const auto centre = camera.screenToRay(640.0F, 360.0F, kWidth, kHeight);
+    const auto corner = camera.screenToRay(1100.0F, 500.0F, kWidth, kHeight);
+    expect(std::abs(centre.direction.x - corner.direction.x) < 1e-5F &&
+               std::abs(centre.direction.y - corner.direction.y) < 1e-5F &&
+               std::abs(centre.direction.z - corner.direction.z) < 1e-5F,
+           "orthographic pick rays must all share the view direction");
+    expect(std::abs(centre.direction.length() - 1.0F) < 1e-5F,
+           "an ortho pick ray must stay normalized");
+    // ... but their ORIGINS differ, or every click would hit the same spot.
+    // Measured as a distance, not per-axis: the camera orbits at 45 degrees, so a
+    // per-axis comparison would depend on which world axis the lateral offset
+    // happens to land on and could pass or fail for the wrong reason.
+    const Vec3f originDelta = centre.origin - corner.origin;
+    expect(originDelta.length() > 1.0F,
+           "ortho pick rays must start from different points on the eye plane");
+    // And the two origins must sit at the same depth from the eye plane centre,
+    // which is what makes them parallel rather than merely distinct.
+    expect(std::abs(Vec3f::dot(originDelta, camera.forward())) < 0.01F,
+           "ortho pick origins must lie on one plane, or the rays are not parallel");
+
+    // worldToScreen must invert screenToRay: any point on the picked ray has to
+    // project back to the pixel it was picked from.
+    const auto pixelRoundTrip = [&camera](float px, float py) {
+        const auto ray = camera.screenToRay(px, py, kWidth, kHeight);
+        const Vec3f onRay = ray.origin + ray.direction * 400.0F;
+        float outX = 0.0F;
+        float outY = 0.0F;
+        if (!camera.worldToScreen(onRay, kWidth, kHeight, outX, outY)) {
+            return false;
+        }
+        return std::abs(outX - px) < 0.5F && std::abs(outY - py) < 0.5F;
+    };
+    expect(pixelRoundTrip(640.0F, 360.0F),
+           "worldToScreen must invert screenToRay at the centre");
+    expect(pixelRoundTrip(1050.0F, 120.0F),
+           "worldToScreen must invert screenToRay at a corner");
+    expect(pixelRoundTrip(200.0F, 640.0F),
+           "worldToScreen must invert screenToRay at the opposite corner");
+
+    // Every pick must travel AWAY from the camera, never behind it.
+    for (const float px : {100.0F, 640.0F, 1200.0F}) {
+        for (const float py : {80.0F, 360.0F, 660.0F}) {
+            const auto ray = camera.screenToRay(px, py, kWidth, kHeight);
+            expect(Vec3f::dot(ray.direction, camera.forward()) > 0.9F,
+                   "an ortho pick ray must travel away from the camera, not behind it");
+        }
+    }
+
+    // Zooming in ortho must MAGNIFY what is visible, not move the eye. If dolly
+    // changed `distance`, the scene would slide and clip instead of growing.
+    const float distanceBefore = camera.distance;
+    const float heightBefore = camera.orthoHeight;
+    camera.dolly(1.0F);
+    expect(camera.orthoHeight < heightBefore,
+           "an ortho dolly-in must reduce the visible world height");
+    expect(std::abs(camera.distance - distanceBefore) < 1e-4F,
+           "an ortho dolly must not move the eye by changing the orbit distance");
+    camera.dolly(-1.0F);
+    camera.dolly(-1.0F);
+    expect(camera.orthoHeight > heightBefore, "an ortho dolly-out must widen the view again");
+
+    // Zoom clamps: a long flick must not collapse the frustum or run away.
+    for (int i = 0; i < 200; ++i) {
+        camera.dolly(1.0F);
+    }
+    expect(camera.orthoHeight >= ViewportCamera::kMinOrthoHeight,
+           "ortho zoom must not collapse the visible height to nothing");
+    for (int i = 0; i < 2000; ++i) {
+        camera.dolly(-1.0F);
+    }
+    expect(camera.orthoHeight <= ViewportCamera::kMaxOrthoHeight,
+           "ortho zoom must stop at the same ceiling the perspective zoom uses");
+
+    // A perspective camera must be untouched by all of that.
+    ViewportCamera perspective;
+    perspective.distance = 800.0F;
+    const float perspectiveDistance = perspective.distance;
+    const float perspectiveOrthoHeight = perspective.orthoHeight;
+    perspective.dolly(1.0F);
+    expect(perspective.distance < perspectiveDistance,
+           "a perspective dolly must still zoom by moving the eye");
+    expect(perspective.orthoHeight == perspectiveOrthoHeight,
+           "a perspective dolly must not disturb the ortho height");
+}
+
+// Circular arc generation. The claim this feature makes is "a perfect round
+// circle", so roundness is MEASURED against the sampled bezier rather than
+// assumed from the construction -- a subtly wrong handle formula still produces
+// a smooth, plausible curve that is simply not a circle.
+void testArcPaths() {
+    using whitehole::math::Vec3f;
+    using namespace whitehole::smg;
+
+    // Worst distance from the centre over every section of a CLOSED point list.
+    const auto worstRoundness = [](const std::vector<PathPoint>& points, const Vec3f& center,
+                                   float radius) {
+        float worst = 0.0F;
+        for (std::size_t section = 0; section + 1 < points.size(); ++section) {
+            const auto& a = points[section];
+            const auto& b = points[(section + 1) % points.size()];
+            for (int step = 0; step <= 64; ++step) {
+                const auto t = static_cast<float>(step) / 64.0F;
+                const auto p = bezierPoint(t, a.position, a.control2, b.control1, b.position);
+                worst = std::max(worst, std::abs((p - center).length() - radius));
+            }
+        }
+        return worst;
+    };
+
+    ArcSpec spec;
+    spec.center = {10.0F, 5.0F, -20.0F};
+    spec.radius = 100.0F;
+    spec.sweepDegrees = 360.0F;
+    spec.segments = 8;
+    spec.axis = ArcAxis::Y;
+
+    // ---- shape and counts -------------------------------------------------
+    const auto open = arcPoints(spec);
+    expect(open.size() == 9, "arcPoints must emit segments + 1 points");
+    const auto closed = circlePoints(spec);
+    expect(closed.size() == 8, "circlePoints must drop the duplicated endpoint");
+    expect(isFullCircle(spec), "a 360 degree sweep is a full circle");
+
+    // ---- roundness --------------------------------------------------------
+    // Tolerances are RELATIVE to the radius, so they hold at any scale rather
+    // than only for the one radius used here.
+    const float relative = worstRoundness(closed, spec.center, spec.radius) / spec.radius;
+    expect(relative < 0.00001F,
+           "a generated circle must be round to float precision (handle formula error)");
+    // Coarser segments are still exact ARCS, but each approximates its own wider
+    // span, so the residual grows with the segment angle. 4 segments over 360
+    // degrees is a 90-degree span -- the coarsest a person would plausibly pick.
+    ArcSpec coarse = spec;
+    coarse.segments = 4;
+    expect(worstRoundness(circlePoints(coarse), spec.center, spec.radius) / spec.radius <
+               0.0005F,
+           "a 4-segment circle must stay near-exact for its wider segments");
+
+    // ---- handles ----------------------------------------------------------
+    // Both handles must be tangent to the circle and must point OPPOSITE ways.
+    // Filling both with the forward tangent -- the easy mistake -- leaves the
+    // curve smooth-looking but puts a visible kink at every point.
+    for (const auto& point : closed) {
+        const Vec3f radial = point.position - spec.center;
+        const Vec3f outgoing = point.control2 - point.position;
+        const Vec3f incoming = point.control1 - point.position;
+        expect(std::abs(Vec3f::dot(radial, outgoing)) < 1e-2F,
+               "the outgoing handle must lie along the tangent");
+        expect(std::abs(Vec3f::dot(radial, incoming)) < 1e-2F,
+               "the incoming handle must lie along the tangent");
+        expect(Vec3f::dot(incoming, outgoing) < 0.0F,
+               "the two handles must oppose, or the rail kinks at every point");
+        // A generated point carries speed -1, matching addPathPoint(), so a new
+        // rail never silently overrides the game's default point speed.
+        expect(point.args[0] == -1, "a generated point must not override the default speed");
+    }
+
+    // ---- arc length -------------------------------------------------------
+    for (const float sweep : {90.0F, 180.0F, 270.0F}) {
+        ArcSpec partial;
+        partial.radius = spec.radius;
+        partial.sweepDegrees = sweep;
+        partial.segments = 12;
+        const double length = pathLength(arcPoints(partial), false);
+        const double expected = 3.14159265358979 / 180.0 * partial.radius * sweep;
+        expect(std::abs(length - expected) / expected < 0.0005F,
+               "a generated arc's length must match radius * angle");
+    }
+
+    // ---- every axis -------------------------------------------------------
+    // A FRESH spec each time: reusing `spec` would silently carry over whatever
+    // segment count the coarse probe above set.
+    for (const auto axis : {ArcAxis::X, ArcAxis::Y, ArcAxis::Z}) {
+        ArcSpec onAxis;
+        onAxis.radius = spec.radius;
+        onAxis.sweepDegrees = 360.0F;
+        onAxis.segments = 8;
+        onAxis.axis = axis;
+        const auto points = circlePoints(onAxis);
+        expect(points.size() == 8, "every axis must produce the same point count");
+        const auto along = [axis](const Vec3f& v) {
+            return axis == ArcAxis::X ? v.x : (axis == ArcAxis::Y ? v.y : v.z);
+        };
+        const float fixed = along(points.front().position);
+        for (const auto& point : points) {
+            expect(std::abs(point.position.length() - spec.radius) < 0.01F,
+                   "every axis must produce the requested radius");
+            expect(std::abs(along(point.position) - fixed) < 1e-3F,
+                   "the circle must lie flat in the plane its axis names");
+        }
+        expect(worstRoundness(points, onAxis.center, spec.radius) / spec.radius < 0.00001F,
+               "every axis must produce a round circle");
+    }
+
+    // ---- degenerate input -------------------------------------------------
+    for (const float badRadius : {0.0F, -5.0F}) {
+        ArcSpec bad = spec;
+        bad.radius = badRadius;
+        expect(arcPoints(bad).empty(), "a non-positive radius must yield no arc");
+    }
+    // A whole turn is a real arc however many times it wraps. This includes the
+    // DEFAULT spec: folding a 360 sweep down to zero made a plain circle
+    // generate nothing at all, because fmod maps every multiple of 360 to 0.
+    for (const float sweep : {360.0F, 1080.0F, -360.0F}) {
+        ArcSpec whole = spec;
+        whole.sweepDegrees = sweep;
+        expect(!arcPoints(whole).empty(), "a whole turn must still be an arc");
+        expect(isFullCircle(whole), "a whole turn must count as a full circle");
+    }
+    {
+        ArcSpec zero = spec;
+        zero.sweepDegrees = 0.0F;
+        expect(arcPoints(zero).empty(), "a zero sweep must yield no arc");
+        // A negative partial sweep is normalised, not rejected.
+        ArcSpec negative = spec;
+        negative.sweepDegrees = -90.0F;
+        expect(arcPoints(negative).size() == 9,
+               "a negative sweep must be normalised into a positive arc");
+        expect(!isFullCircle(negative), "a half turn must not count as a full circle");
+    }
+    // Zero segments must clamp rather than divide by zero.
+    {
+        ArcSpec zeroSegments = spec;
+        zeroSegments.segments = 0;
+        const auto points = arcPoints(zeroSegments);
+        expect(points.size() == 2, "zero segments must clamp to one real segment");
+        for (const auto& point : points) {
+            const float values[] = {point.position.x,  point.position.y,  point.position.z,
+                                    point.control1.x, point.control1.y, point.control1.z,
+                                    point.control2.x, point.control2.y, point.control2.z};
+            for (const float value : values) {
+                expect(std::isfinite(value),
+                       "a zero segment count must not produce a non-finite coordinate");
+            }
+        }
+    }
+    // NaN / infinite input must produce NOTHING rather than NaN geometry: these
+    // values are written straight into BCSV floats, where they would survive a
+    // save and quietly poison the zone.
+    for (const float bad : {std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity()}) {
+        ArcSpec brokenRadius = spec;
+        brokenRadius.radius = bad;
+        expect(arcPoints(brokenRadius).empty(), "a NaN/inf radius must yield no arc");
+        ArcSpec brokenSweep = spec;
+        brokenSweep.sweepDegrees = bad;
+        expect(arcPoints(brokenSweep).empty(), "a NaN/inf sweep must yield no arc");
+    }
+}
+
+// Creating a rail from an arc spec: the part that has to survive a real save.
+// testArcPaths() covers the maths; this covers the authoring path writing handles
+// into BCSV, coming back out, and undoing as ONE step.
+void testArcPathAuthoring() {
+    using whitehole::edit::createArcPath;
+    using whitehole::edit::UndoStack;
+    using whitehole::smg::ArcAxis;
+    using whitehole::smg::ArcSpec;
+    using whitehole::smg::StageArchive;
+
+    const auto templates = std::filesystem::path(WHITEHOLE_SOURCE_DIR) / "data" / "templates";
+    auto stage = StageArchive::openMapFile(templates / "SMG2BigGalaxyMap.arc");
+    expect(whitehole::smg::loadPaths(stage).empty(), "the template must start without rails");
+
+    UndoStack stack;
+    ArcSpec spec;
+    spec.center = {0.0F, 10.0F, 0.0F};
+    spec.radius = 80.0F;
+    spec.sweepDegrees = 360.0F;
+    spec.segments = 8;
+    spec.axis = ArcAxis::Y;
+    const auto expected = whitehole::smg::circlePoints(spec);
+
+    const auto rowIndex = createArcPath(stage, stack, spec, "Test circle");
+    expect(rowIndex.has_value(), "createArcPath must return the new rail's row");
+    if (!rowIndex.has_value()) {
+        return;
+    }
+
+    // ONE undo entry for the whole rail, not one per point: an 8-point circle
+    // written through addPathPoint() would have needed eight presses of Ctrl+Z.
+    expect(stack.size() == 1, "the whole arc must be a single undo step");
+
+    auto paths = whitehole::smg::loadPaths(stage);
+    expect(paths.size() == 1, "the zone must now hold exactly one rail");
+    if (paths.empty() || expected.size() != 8) {
+        return;
+    }
+    const auto& rail = paths.front();
+    expect(rail.closed, "a whole-turn arc must be marked CLOSE");
+    expect(rail.points.size() == 8, "a 360 degree arc of 8 segments must store 8 points");
+
+    // THE decisive check: the handles must have survived the write. addPathPoint()
+    // writes pnt0/pnt1/pnt2 all at the position, which round-trips into a polygon
+    // -- 8 points that look right in the list but draw as straight segments.
+    // Asserting on the RELOADED rail, not the in-memory spec, is what catches it.
+    for (std::size_t index = 0; index < rail.points.size(); ++index) {
+        const auto& point = rail.points[index];
+        expect(std::abs(point.position.x - expected[index].position.x) < 0.01F &&
+                   std::abs(point.position.y - expected[index].position.y) < 0.01F &&
+                   std::abs(point.position.z - expected[index].position.z) < 0.01F,
+               "a stored point must sit where the arc generator put it");
+        expect(std::abs(point.control2.x - expected[index].control2.x) < 0.01F &&
+                   std::abs(point.control2.y - expected[index].control2.y) < 0.01F &&
+                   std::abs(point.control2.z - expected[index].control2.z) < 0.01F,
+               "the OUTGOING handle must survive the write; a collapsed handle turns "
+               "the circle into a polygon");
+        expect(std::abs(point.control1.x - expected[index].control1.x) < 0.01F &&
+                   std::abs(point.control1.y - expected[index].control1.y) < 0.01F &&
+                   std::abs(point.control1.z - expected[index].control1.z) < 0.01F,
+               "the INCOMING handle must survive the write");
+    }
+
+    // Roundness measured on the RELOADED rail, the only version that proves the
+    // handles actually reached the archive.
+    {
+        float worst = 0.0F;
+        const auto& points = rail.points;
+        for (std::size_t index = 0; index + 1 < points.size(); ++index) {
+            const auto& a = points[index];
+            const auto& b = points[(index + 1) % points.size()];
+            for (int step = 0; step <= 32; ++step) {
+                const auto t = static_cast<float>(step) / 32.0F;
+                const auto p = whitehole::smg::bezierPoint(t, a.position, a.control2, b.control1,
+                                                            b.position);
+                worst = std::max(worst, std::abs((p - spec.center).length() - spec.radius));
+            }
+        }
+        expect(worst / spec.radius < 0.0005F,
+               "a rail reloaded from the archive must still be a round circle");
+    }
+
+    // ---- save / reload -----------------------------------------------------
+    {
+        TemporaryDirectory temporary;
+        const auto output = temporary.path / "WithCircle.arc";
+        stage.saveTo(output);
+        auto reloaded = StageArchive::openMapFile(output);
+        const auto again = whitehole::smg::loadPaths(reloaded);
+        expect(again.size() == 1, "the circle must survive the save");
+        if (!again.empty()) {
+            expect(again.front().points.size() == 8, "the point count must survive the save");
+            expect(again.front().closed, "the CLOSE flag must survive the save");
+            expect(std::abs(again.front().points[0].control2.x - rail.points[0].control2.x) <
+                       0.01F,
+                   "the handles must survive the save, not just the positions");
+            // num_pnt is synced by the writer, as the existing path tests assert.
+            const auto& info = reloaded.tables()[again.front().tableIndex].table;
+            expect(info.getInt(info.rows()[again.front().rowIndex], "num_pnt", -1) == 8,
+                   "num_pnt must be synced to the point count");
+        }
+        // Nothing may leak into the placement object list.
+        for (const auto& object : reloaded.objects()) {
+            expect(object.kind != "path" && object.kind != "pathpoint",
+                   "rail rows must not appear in the object list");
+        }
+    }
+
+    // ---- undo / redo -------------------------------------------------------
+    expect(stack.canUndo(), "the arc must be undoable");
+    expect(stack.undo(), "undo must succeed");
+    expect(whitehole::smg::loadPaths(stage).empty(),
+           "ONE undo must remove the entire rail, not one point of it");
+    expect(stack.canRedo(), "the arc must be redoable");
+    expect(stack.redo(), "redo must succeed");
+    expect(whitehole::smg::loadPaths(stage).size() == 1,
+           "redo must bring the whole rail back");
+
+    // ---- a partial arc stays OPEN ----------------------------------------
+    {
+        ArcSpec half;
+        half.center = spec.center;
+        half.radius = spec.radius;
+        half.sweepDegrees = 180.0F;
+        half.segments = 4;
+        half.axis = spec.axis;
+        expect(createArcPath(stage, stack, half, "Half arc").has_value(),
+               "a partial arc must be creatable");
+        const auto both = whitehole::smg::loadPaths(stage);
+        expect(both.size() == 2, "the half arc must be added beside the circle");
+        if (both.size() == 2) {
+            const auto& partial = both.back();
+            expect(!partial.closed,
+                   "a partial arc must stay OPEN so its last section does not wrap");
+            expect(partial.points.size() == 5, "a 180 degree arc of 4 segments is 5 points");
+        }
+    }
+
+    // ---- a spec with no geometry must not leave a rail --------------------
+    {
+        const auto railsBefore = whitehole::smg::loadPaths(stage).size();
+        const auto undoBefore = stack.size();
+        ArcSpec degenerate;
+        degenerate.radius = 0.0F;
+        expect(!createArcPath(stage, stack, degenerate, "Bad arc").has_value(),
+               "a degenerate spec must be refused");
+        expect(whitehole::smg::loadPaths(stage).size() == railsBefore,
+               "a refused arc must not leave an empty rail behind");
+        expect(stack.size() == undoBefore, "a refused arc must not record an undo step");
+    }
 }
 
 void testGizmoMath() {
@@ -4669,6 +5295,204 @@ void testJsonRoundTrip() {
     expect(rejected, "malformed JSON was not rejected");
 }
 
+// Language and layout keys. These are closed sets persisted by machine key, and
+// the property that matters is the FALLBACK: a hand-edited settings file must
+// never leave the editor holding a value no switch statement handles.
+void testLanguageAndLayoutKeys() {
+    using whitehole::app::availableLanguages;
+    using whitehole::app::availableUiLayouts;
+    using whitehole::app::isKnownLanguage;
+    using whitehole::app::isKnownUiLayout;
+    using whitehole::app::Language;
+    using whitehole::app::languageFromKey;
+    using whitehole::app::languageKey;
+    using whitehole::app::languageSelfName;
+    using whitehole::app::UiLayout;
+    using whitehole::app::uiLayoutFromKey;
+    using whitehole::app::uiLayoutKey;
+    using whitehole::app::uiLayoutLabel;
+
+    // The four languages the editor ships, each named in ITSELF. A picker has to
+    // be readable by the person who cannot read the current UI language, so the
+    // entry must not be a translation of the English name.
+    expect(availableLanguages().size() == 4, "the editor ships four languages");
+    expect(languageSelfName(Language::English) == std::string("English"),
+           "English names itself in English");
+    expect(languageSelfName(Language::Spanish) == std::string("Espa\xC3\xB1ol"),
+           "Spanish must name itself \"Espanol\" with the tilde, not the English name");
+    expect(languageSelfName(Language::French) == std::string("Fran\xC3\xA7" "ais"),
+           "French must name itself with the cedilla");
+    expect(languageSelfName(Language::German) == std::string("Deutsch"),
+           "German must name itself \"Deutsch\", not \"German\"");
+    for (std::size_t a = 0; a < availableLanguages().size(); ++a) {
+        for (std::size_t b = a + 1; b < availableLanguages().size(); ++b) {
+            expect(languageSelfName(availableLanguages()[a]) !=
+                       languageSelfName(availableLanguages()[b]),
+                   "every language must have a distinct name in the picker");
+        }
+    }
+
+    // Key round trip, for every language: key -> enum -> key.
+    for (const auto language : availableLanguages()) {
+        expect(isKnownLanguage(language), "every listed language must be a known value");
+        expect(languageFromKey(languageKey(language)) == language,
+               "a language's key must resolve back to that language");
+        expect(std::string(languageKey(language)).size() == 2,
+               "language keys must be two-letter codes");
+        // Keys are identifiers, not labels, so they must stay ASCII or the
+        // settings file stops being portable.
+        for (const char c : std::string(languageKey(language))) {
+            expect(static_cast<unsigned char>(c) < 128, "a machine key must be ASCII");
+        }
+    }
+
+    // Fallbacks: everything unrecognised resolves to a usable default.
+    for (const std::string bad : {"", "klingon", "EN", "es-MX", "english", "  "}) {
+        expect(languageFromKey(bad) == Language::English,
+               "an unknown language key must fall back to English: \"" + bad + "\"");
+    }
+    expect(!isKnownLanguage(static_cast<Language>(99)),
+           "an out-of-range language must not be reported as known");
+
+    // Layouts: the same contract.
+    expect(availableUiLayouts().size() == 2, "the editor ships two layouts");
+    for (const auto layout : availableUiLayouts()) {
+        expect(isKnownUiLayout(layout), "every listed layout must be a known value");
+        expect(uiLayoutFromKey(uiLayoutKey(layout)) == layout,
+               "a layout's key must resolve back to that layout");
+        expect(uiLayoutLabel(layout) != nullptr, "every layout needs a label");
+    }
+    expect(uiLayoutFromKey("novice") == UiLayout::Novice, "the novice key must resolve");
+    expect(uiLayoutFromKey("pro") == UiLayout::Pro, "the pro key must resolve");
+    // Pro is the deliberate fallback: it is the layout the editor has always
+    // used, so a corrupt file degrades to the familiar full set.
+    for (const std::string bad : {"", "chaos", "PRO", "beginner"}) {
+        expect(uiLayoutFromKey(bad) == UiLayout::Pro,
+               "an unknown layout key must fall back to Pro: \"" + bad + "\"");
+    }
+    expect(!isKnownUiLayout(static_cast<UiLayout>(42)),
+           "an out-of-range layout must not be reported as known");
+    expect(uiLayoutKey(UiLayout::Novice) != uiLayoutKey(UiLayout::Pro),
+           "the two layouts must have distinct keys");
+}
+
+// Settings persistence for the new fields. The interesting cases are the ones a
+// hand-edited file produces, not the happy path.
+void testSettingsNewFields() {
+    using whitehole::app::Language;
+    using whitehole::app::Settings;
+    using whitehole::app::UiLayout;
+    using whitehole::render::ViewportCamera;
+
+    // ---- round trip --------------------------------------------------------
+    {
+        TemporaryDirectory temp;
+        const auto path = temp.path / "settings.json";
+        Settings saved;
+        saved.setConfigPath(path);
+        saved.language = Language::German;
+        saved.uiLayout = UiLayout::Novice;
+        saved.orthographicView = true;
+        saved.orthoScale = 1234.5F;
+        saved.themeFile = "C:/themes/midnight.json";
+        saved.save();
+
+        Settings loaded;
+        loaded.setConfigPath(path);
+        loaded.load();
+        expect(loaded.language == Language::German, "the language must round trip");
+        expect(loaded.uiLayout == UiLayout::Novice, "the layout must round trip");
+        expect(loaded.orthographicView, "the ortho flag must round trip");
+        expect(std::abs(loaded.orthoScale - 1234.5F) < 0.001F, "the ortho scale must round trip");
+        expect(loaded.themeFile == "C:/themes/midnight.json", "the theme path must round trip");
+    }
+
+    const auto loadJson = [](const std::filesystem::path& path, const std::string& json) {
+        // The stream MUST be closed before load() reads the file back. Leaving it
+        // open meant load() saw an empty file, took every default, and the clamp
+        // assertions below failed for a reason that had nothing to do with the
+        // clamp. This is the same trap BLUEPRINT.txt records for MSVC vs MinGW:
+        // scope every stream in its own block.
+        {
+            std::ofstream out(path, std::ios::binary);
+            out << json;
+        }
+        Settings settings;
+        settings.setConfigPath(path);
+        settings.load();
+        return settings;
+    };
+
+    // ---- clamping ----------------------------------------------------------
+    // orthoScale is clamped to the CAMERA's own bounds, so the two cannot drift
+    // apart, and a 0 can never collapse the ortho frustum.
+    {
+        TemporaryDirectory temp;
+        const Settings huge = loadJson(temp.path / "a.json", R"({"orthoScale":1e9})");
+        expect(huge.orthoScale == ViewportCamera::kMaxOrthoHeight,
+               "an absurdly large ortho scale must clamp to the camera's maximum");
+        const Settings tiny = loadJson(temp.path / "b.json", R"({"orthoScale":-500.0})");
+        expect(tiny.orthoScale == ViewportCamera::kMinOrthoHeight,
+               "a negative ortho scale must clamp to the camera's minimum");
+        const Settings zero = loadJson(temp.path / "c.json", R"({"orthoScale":0})");
+        expect(zero.orthoScale == ViewportCamera::kMinOrthoHeight,
+               "a zero ortho scale must clamp UP to the camera's minimum, not stay zero");
+        expect(zero.orthoScale > 0.0F,
+               "a loaded ortho scale must never be zero: it would collapse the frustum");
+        // A non-numeric value must fall back: std::clamp leaves NaN alone, so this
+        // needs the explicit isfinite guard the loader has.
+        const Settings garbage = loadJson(temp.path / "d.json", R"({"orthoScale":"nope"})");
+        expect(garbage.orthoScale > 0.0F, "a non-numeric ortho scale must fall back");
+        const Settings absent = loadJson(temp.path / "e.json", R"({"darkMode":true})");
+        expect(std::abs(absent.orthoScale - 800.0F) < 0.001F,
+               "an absent ortho scale must take the documented default");
+        // An in-range value must survive untouched -- the clamp must not quietly
+        // rewrite a legitimate zoom level.
+        const Settings inside = loadJson(temp.path / "f.json", R"({"orthoScale":2500.0})");
+        expect(std::abs(inside.orthoScale - 2500.0F) < 0.001F,
+               "an in-range ortho scale must be preserved exactly");
+    }
+
+    // ---- unknown closed-set values ----------------------------------------
+    {
+        TemporaryDirectory temp;
+        const Settings odd = loadJson(temp.path / "g.json",
+                                      R"({"language":"klingon","uiLayout":"chaos","themeFile":42})");
+        expect(odd.language == Language::English,
+               "an unknown language must fall back to English, never a raw string");
+        expect(odd.uiLayout == UiLayout::Pro, "an unknown layout must fall back to Pro");
+        expect(odd.themeFile.empty(), "a non-string themeFile must read as empty");
+        const Settings blank = loadJson(temp.path / "h.json", R"({"language":""})");
+        expect(blank.language == Language::English, "an empty language key must fall back");
+    }
+
+    // ---- defaults and reset ------------------------------------------------
+    {
+        Settings fresh;
+        expect(fresh.language == Language::English, "the default language is English");
+        expect(fresh.uiLayout == UiLayout::Pro, "the default layout is Pro");
+        expect(!fresh.orthographicView,
+               "the default view is perspective: that is how the game looks");
+        expect(std::abs(fresh.orthoScale - 800.0F) < 0.001F, "the default ortho scale is 800");
+        expect(fresh.themeFile.empty(), "an empty themeFile means the built-in palette");
+
+        // reset() must return EVERY new field, not leave the edited ones -- a
+        // stale language surviving a reset is a confusing bug.
+        Settings edited;
+        edited.language = Language::French;
+        edited.uiLayout = UiLayout::Novice;
+        edited.orthographicView = true;
+        edited.orthoScale = 4000.0F;
+        edited.themeFile = "C:/x.json";
+        edited.reset();
+        expect(edited.language == Language::English, "reset must restore the language");
+        expect(edited.uiLayout == UiLayout::Pro, "reset must restore the layout");
+        expect(!edited.orthographicView, "reset must clear the ortho flag");
+        expect(std::abs(edited.orthoScale - 800.0F) < 0.001F, "reset must restore the ortho scale");
+        expect(edited.themeFile.empty(), "reset must clear the theme path");
+    }
+}
+
 void testSettingsRoundTrip() {
     whitehole::app::Settings settings;
     TemporaryDirectory temp;
@@ -6128,6 +6952,255 @@ void testShellBackground() {
     }
 }
 
+// Custom theme export/import. The property that matters most is at the end: a
+// theme file is HAND-EDITED and shared, so an imported palette must still be
+// legible. Loading must never be able to produce an unreadable UI.
+void testThemeSerialisation() {
+    using whitehole::app::blend;
+    using whitehole::app::contrastRatio;
+    using whitehole::app::defaultPalette;
+    using whitehole::app::kGlyphContrastMinimum;
+    using whitehole::app::kTextContrastMinimum;
+    using whitehole::app::loadThemeFile;
+    using whitehole::app::Palette;
+    using whitehole::app::Rgba;
+    using whitehole::app::saveThemeFile;
+    using whitehole::app::themeFromJson;
+    using whitehole::app::themePalette;
+    using whitehole::app::themeToJson;
+    using whitehole::util::JsonValue;
+
+    const auto sameColor = [](const Rgba& a, const Rgba& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    // ---- round trip --------------------------------------------------------
+    for (const bool dark : {true, false}) {
+        const Palette original = defaultPalette(dark);
+        const JsonValue document = themeToJson(original, dark ? "Midnight" : "Paper", dark);
+        expect(document.isObject(), "a serialised theme must be a JSON object");
+        expect(document.stringAt("name") == (dark ? "Midnight" : "Paper"),
+               "the theme name must round trip");
+        expect(document.at("dark").asBool(!dark) == dark,
+               "the dark flag must round trip, or a load cannot pick its fallback");
+
+        // Re-parsed through TEXT, not just the in-memory value: that is what a
+        // real load does, and it is where an unserialisable value would surface.
+        const std::string text = whitehole::util::serializeJson(document);
+        const Palette restored =
+            themeFromJson(whitehole::util::parseJson(text), defaultPalette(dark));
+
+        expect(sameColor(restored.windowBg, original.windowBg), "windowBg must round trip");
+        expect(sameColor(restored.panelBg, original.panelBg), "panelBg must round trip");
+        expect(sameColor(restored.frameBg, original.frameBg), "frameBg must round trip");
+        expect(sameColor(restored.frameHover, original.frameHover), "frameHover must round trip");
+        expect(sameColor(restored.frameActive, original.frameActive),
+               "frameActive must round trip");
+        expect(sameColor(restored.header, original.header), "header must round trip");
+        expect(sameColor(restored.headerHover, original.headerHover),
+               "headerHover must round trip");
+        expect(sameColor(restored.headerActive, original.headerActive),
+               "headerActive must round trip");
+        expect(sameColor(restored.tabSelected, original.tabSelected),
+               "tabSelected must round trip");
+        expect(sameColor(restored.border, original.border), "border must round trip");
+        expect(sameColor(restored.text, original.text), "text must round trip");
+        expect(sameColor(restored.textDim, original.textDim), "textDim must round trip");
+        expect(sameColor(restored.accent, original.accent), "accent must round trip");
+        expect(sameColor(restored.accentFg, original.accentFg), "accentFg must round trip");
+        expect(sameColor(restored.unsaved, original.unsaved), "unsaved must round trip");
+        expect(sameColor(restored.error, original.error), "error must round trip");
+        // selectionBg is the one translucent slot, so its alpha must survive too.
+        expect(sameColor(restored.selectionBg, original.selectionBg),
+               "selectionBg must round trip, alpha included");
+        expect(restored.disabledAlpha == original.disabledAlpha,
+               "disabledAlpha must round trip exactly");
+    }
+}
+
+// A theme file is hand-written, so a PARTIAL document is the normal case and a
+// typo in ONE colour is the worst case. It must cost that one slot, never the
+// whole theme -- otherwise sharing a theme is a trap.
+void testThemePartialAndBadInput() {
+    using whitehole::app::defaultPalette;
+    using whitehole::app::Palette;
+    using whitehole::app::Rgba;
+    using whitehole::app::themeFromJson;
+
+    const Palette fallback = defaultPalette(true);
+    const auto load = [&fallback](const std::string& json) {
+        return themeFromJson(whitehole::util::parseJson(json), fallback);
+    };
+    const auto sameColor = [](const Rgba& a, const Rgba& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    const Palette partial = load(R"({"text":[1.0,0.0,0.0]})");
+    expect(sameColor(partial.text, Rgba{1.0F, 0.0F, 0.0F, 1.0F}),
+           "a valid custom colour must be applied");
+    expect(sameColor(partial.windowBg, fallback.windowBg),
+           "a slot the document omits must keep the fallback");
+    expect(sameColor(partial.accent, fallback.accent),
+           "every other slot must keep the fallback");
+
+    // Rejected shapes, one slot each: a bare number, a string, too few channels,
+    // too many, an out-of-range channel, and null.
+    for (const std::string bad :
+         {R"({"text":0.5})", R"({"text":"red"})", R"({"text":[1.0,0.0]})",
+          R"({"text":[1.0,0.0,0.0,1.0,1.0]})", R"({"text":[1.0,0.0,2.0]})",
+          R"({"text":[-0.5,0.0,0.0]})", R"({"text":null})", R"({"text":{}})"}) {
+        const Palette rejected = load(bad);
+        expect(sameColor(rejected.text, fallback.text),
+               "an unusable colour must keep the fallback: " + bad);
+        expect(sameColor(rejected.accent, fallback.accent),
+               "a bad slot must not disturb the others: " + bad);
+    }
+
+    // Unknown keys are ignored, not rejected: a file written by a NEWER version
+    // must still open in an older one.
+    const Palette extra =
+        load(R"({"text":[1.0,1.0,1.0],"someFutureSlot":[0,0,0],"nonsense":42})");
+    expect(sameColor(extra.text, Rgba{1.0F, 1.0F, 1.0F, 1.0F}),
+           "a known slot must still apply when unknown keys are present");
+
+    // A non-object document is not an error, just "nothing to apply".
+    expect(sameColor(themeFromJson(whitehole::util::parseJson("[1,2,3]"), fallback).text,
+                     fallback.text),
+           "an array document must fall back entirely");
+
+    // disabledAlpha gates EVERY disabled control at once, so a bad value here
+    // breaks legibility everywhere rather than in one place.
+    for (const std::string bad :
+         {R"({"disabledAlpha":0})", R"({"disabledAlpha":-1})", R"({"disabledAlpha":5})",
+          R"({"disabledAlpha":"x"})"}) {
+        expect(themeFromJson(whitehole::util::parseJson(bad), fallback).disabledAlpha ==
+                   fallback.disabledAlpha,
+               "an out-of-range disabledAlpha must keep the fallback: " + bad);
+    }
+    // A valid one IS applied, or the slot would be unreachable.
+    expect(themeFromJson(whitehole::util::parseJson(R"({"disabledAlpha":0.55})"), fallback)
+                   .disabledAlpha == 0.55F,
+           "a valid disabledAlpha must be applied");
+}
+
+// ---- file round trip, and the failures that must not throw ------------------
+
+void testThemeFileRoundTrip() {
+    using whitehole::app::defaultPalette;
+    using whitehole::app::loadThemeFile;
+    using whitehole::app::Palette;
+    using whitehole::app::Rgba;
+    using whitehole::app::saveThemeFile;
+
+    const auto sameColor = [](const Rgba& a, const Rgba& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    TemporaryDirectory temporary;
+    const auto path = temporary.path / "custom.json";
+    const Palette custom = defaultPalette(true);
+    expect(saveThemeFile(path.string(), custom, "Shared", true),
+           "saving a theme file must succeed");
+    Palette loaded{};
+    expect(loadThemeFile(path.string(), loaded), "loading the saved theme must succeed");
+    expect(sameColor(loaded.text, custom.text), "the file must round trip through text");
+    // The translucent slot is the one that would silently lose its alpha if the
+    // serialiser wrote RGB only.
+    expect(sameColor(loaded.selectionBg, custom.selectionBg),
+           "translucent alpha must survive the file round trip");
+    expect(loaded.disabledAlpha == custom.disabledAlpha,
+           "disabledAlpha must survive the file round trip");
+
+    // A light-mode theme must fall back to LIGHT defaults, or a partial light
+    // theme would inherit dark surfaces and look broken.
+    const auto light = temporary.path / "light.json";
+    expect(saveThemeFile(light.string(), defaultPalette(false), "Paper", false),
+           "saving a light theme must succeed");
+    Palette lightLoaded{};
+    expect(loadThemeFile(light.string(), lightLoaded), "a light theme file must load");
+    expect(sameColor(lightLoaded.windowBg, defaultPalette(false).windowBg),
+           "a light theme file must keep light defaults");
+
+    // Failures report false and never throw -- the malformed-file case especially,
+    // which must surface as "could not read theme", not a crash on launch.
+    Palette untouched{};
+    untouched.text = Rgba{0.5F, 0.5F, 0.5F, 1.0F};
+    expect(!loadThemeFile((temporary.path / "absent.json").string(), untouched),
+           "a missing theme file must report false");
+    expect(sameColor(untouched.text, Rgba{0.5F, 0.5F, 0.5F, 1.0F}),
+           "a failed load must not modify the caller's palette");
+    expect(!loadThemeFile("", untouched), "an empty path must report false");
+    expect(!saveThemeFile("", custom, "x", true),
+           "saving to an empty path must report false");
+
+    const auto broken = temporary.path / "broken.json";
+    {
+        std::ofstream out(broken);
+        out << "{ this is not json";
+    }
+    expect(!loadThemeFile(broken.string(), untouched),
+           "a malformed theme file must report false, not throw");
+}
+
+// THE IMPORTANT ONE. Loads the built-in palettes through exactly the code path a
+// user's theme file takes, then re-runs the AA contrast suite over the RESULT.
+// This is what stops a shared theme from shipping an unreadable editor: without
+// it, "custom themes" would be a way to make the UI illegible.
+void testImportedThemeStaysLegible() {
+    using whitehole::app::blend;
+    using whitehole::app::contrastRatio;
+    using whitehole::app::defaultPalette;
+    using whitehole::app::kGlyphContrastMinimum;
+    using whitehole::app::kTextContrastMinimum;
+    using whitehole::app::themeFromJson;
+    using whitehole::app::themeToJson;
+
+    for (const bool dark : {true, false}) {
+        const auto text = whitehole::util::serializeJson(
+            themeToJson(defaultPalette(dark), "Round trip", dark));
+        const auto imported =
+            themeFromJson(whitehole::util::parseJson(text), defaultPalette(dark));
+
+        std::vector<std::string> failures;
+        const auto check = [&](const whitehole::app::Rgba& fg,
+                               const whitehole::app::Rgba& bg, double minimum, const char* what,
+                               const char* surface) {
+            const double ratio = std::round(contrastRatio(fg, bg) * 100.0) / 100.0;
+            if (ratio < minimum) {
+                failures.push_back(std::string(what) + " on " + surface + " is " +
+                                   std::to_string(ratio) + ":1");
+            }
+        };
+        struct Surface {
+            const char* name;
+            const whitehole::app::Rgba* color;
+        };
+        const Surface surfaces[] = {
+            {"windowBg", &imported.windowBg}, {"panelBg", &imported.panelBg},
+            {"frameBg", &imported.frameBg},   {"header", &imported.header},
+            {"tabSelected", &imported.tabSelected},
+        };
+        for (const auto& surface : surfaces) {
+            check(imported.text, *surface.color, kTextContrastMinimum, "body text", surface.name);
+            check(imported.textDim, *surface.color, kTextContrastMinimum, "secondary text",
+                  surface.name);
+            check(blend(imported.textDim, *surface.color, imported.disabledAlpha), *surface.color,
+                  kTextContrastMinimum, "disabled text", surface.name);
+            check(imported.accentFg, *surface.color, kTextContrastMinimum, "accent glyph",
+                  surface.name);
+            check(imported.accent, *surface.color, kGlyphContrastMinimum, "accent decoration",
+                  surface.name);
+        }
+        check(imported.unsaved, imported.tabSelected, kTextContrastMinimum, "unsaved marker",
+              "tabSelected");
+        check(imported.error, imported.panelBg, kTextContrastMinimum, "error copy", "panelBg");
+        expect(failures.empty(),
+               std::string("an imported ") + (dark ? "dark" : "light") +
+                   " theme must still clear WCAG AA; first failing pair: " +
+                   (failures.empty() ? std::string("none") : failures.front()));
+    }
+}
+
 void testThemeContrast() {
     using whitehole::app::blend;
     using whitehole::app::contrastRatio;
@@ -7118,6 +8191,8 @@ int main() {
         testViewportCamera();
         testViewportCameraPreview();
         testReversedZDepthBuffer();
+        testOrthographicProjection();
+        testOrthographicPickingParity();
         testViewportScene();
         testObjectVisual();
         testHashes();
@@ -7155,7 +8230,13 @@ int main() {
         testModelLibrary();
         testJsonRoundTrip();
         testSettingsRoundTrip();
+        testSettingsNewFields();
+        testLanguageAndLayoutKeys();
         testShellBackground();
+        testThemeSerialisation();
+        testThemePartialAndBadInput();
+        testThemeFileRoundTrip();
+        testImportedThemeStaysLegible();
         testThemeContrast();
         testObjectDatabase();
         testObjectDatabaseV2();
@@ -7168,6 +8249,8 @@ int main() {
         testDataHolderRoundTrip();
         testDbHelpersRoundTrip();
         testRailMath();
+        testArcPaths();
+        testArcPathAuthoring();
         testPathData();
         testOverlayScene();
         testKclParsing();

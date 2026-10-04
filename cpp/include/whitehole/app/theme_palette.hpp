@@ -13,6 +13,10 @@
 // whitehole_core is what the test binary links -- lets the suite assert every
 // text-on-surface pair actually clears WCAG AA.
 
+#include "whitehole/util/json.hpp"
+
+#include <string>
+
 namespace whitehole::app {
 
 // Linear-free sRGB triple with alpha, mirroring how ImGui consumes colours.
@@ -81,6 +85,48 @@ struct Palette {
 // it a palette fact instead of a second hard-coded constant, and lets the
 // suite assert it always matches the theme the shell is drawn in.
 [[nodiscard]] Rgba shellBackground(bool dark) noexcept;
+
+// ---- custom themes: export / import -----------------------------------------
+//
+// A theme is just a Palette, and the Palette is deliberately ImGui-free, so
+// serialising it needs no GUI code and the whole round trip is unit-testable in
+// whitehole_core -- the same property that let the contrast suite exist at all.
+
+// The palette as JSON, with a "name" and a "dark" flag alongside the colours, so
+// an exported file is self-describing and can be read back without the caller
+// having to remember which mode it was.
+[[nodiscard]] util::JsonValue themeToJson(const Palette& palette, std::string name, bool dark);
+
+// A palette from JSON. `fallback` supplies every slot the document does not
+// define.
+//
+// PER-SLOT FALLBACK IS THE WHOLE DESIGN: a theme file is meant to be hand-edited
+// and shared, so a typo in one colour, a value out of range, or a non-finite
+// number must cost the author that ONE slot -- not the entire theme. Anything
+// unusable silently keeps `fallback`'s value, which is why loading can never
+// throw and never leaves a half-applied palette.
+//
+// Non-colour garbage is treated the same way: a missing "name" is not an error,
+// it just means "no name". Malformed JSON throws from util::parseJson, which
+// callers surface as "could not read theme file" rather than as a crash.
+[[nodiscard]] Palette themeFromJson(const util::JsonValue& value, const Palette& fallback);
+
+// Convenience: the built-in palette for `dark`, with no file involved.
+[[nodiscard]] Palette defaultPalette(bool dark) noexcept;
+
+// Read/write a theme file. Both return false instead of throwing, matching the
+// best-effort contract Settings::save() already uses -- a theme file is not
+// worth interrupting an editing session over.
+//
+// The write goes through io::writeFile's staged temp-and-rename, so an
+// interrupted save cannot leave a truncated theme file that fails to parse on
+// the next launch.
+[[nodiscard]] bool saveThemeFile(const std::string& path, const Palette& palette, std::string name,
+                                 bool dark);
+
+// Reads and parses a theme file. False on any failure (missing file, malformed
+// JSON, not an object); `outPalette` is only touched on success.
+[[nodiscard]] bool loadThemeFile(const std::string& path, Palette& outPalette);
 
 // Minimum acceptable contrast for body copy, per WCAG AA.
 inline constexpr double kTextContrastMinimum = 4.5;
